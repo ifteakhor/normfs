@@ -40,14 +40,26 @@ impl OrderedBuffer {
             None => UintN::from(0u64),
         };
 
-        log::info!(
-            target: "normfs",
-            "WAL writer buffer [{}]: waiting for order, buffer size: {}, waiting for: {}, received: {}",
-            self.queue_id,
-            self.pending.len(),
-            expected_id,
-            id
-        );
+        let buffer_size = self.pending.len() + 1;
+        if buffer_size > 10 {
+            log::info!(
+                target: "normfs",
+                "WAL writer buffer [{}]: waiting for order, buffer size: {}, waiting for: {}, received: {}",
+                self.queue_id,
+                buffer_size,
+                expected_id,
+                id
+            );
+        } else {
+            log::debug!(
+                target: "normfs",
+                "WAL writer buffer [{}]: waiting for order, buffer size: {}, waiting for: {}, received: {}",
+                self.queue_id,
+                buffer_size,
+                expected_id,
+                id
+            );
+        }
 
         self.pending.push((id, data));
         self.pending
@@ -78,15 +90,24 @@ impl OrderedBuffer {
             self.last_written_id = last_id;
         }
 
-        // Log when wait is resolved
         if !ready.is_empty() {
-            log::info!(
-                target: "normfs",
-                "WAL writer buffer [{}]: wait resolved, released {} entries from buffer, remaining buffer size: {}",
-                self.queue_id,
-                ready.len(),
-                self.pending.len()
-            );
+            if buffer_size > 10 {
+                log::info!(
+                    target: "normfs",
+                    "WAL writer buffer [{}]: wait resolved, released {} entries from buffer, remaining buffer size: {}",
+                    self.queue_id,
+                    ready.len(),
+                    self.pending.len()
+                );
+            } else {
+                log::debug!(
+                    target: "normfs",
+                    "WAL writer buffer [{}]: wait resolved, released {} entries from buffer, remaining buffer size: {}",
+                    self.queue_id,
+                    ready.len(),
+                    self.pending.len()
+                );
+            }
         }
 
         ready
