@@ -2,6 +2,7 @@
 target/
 **/*.rs.bk
 Cargo.lock
+uintn-rs/c/build/
 
 # macOS
 .DS_Store
