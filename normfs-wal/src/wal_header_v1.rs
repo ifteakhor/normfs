@@ -4,6 +4,7 @@ use std::os::raw::c_int;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use uintn::{UintN, varint};
 
+use super::wal_entry_v1::{WalEntryV1Error, derive_entry_id};
 use super::wal_header::{WalHeader, WalHeaderError};
 
 pub const WAL_HEADER_V0_VERSION: u64 = 0;
@@ -233,6 +234,12 @@ impl WalHeaderV1 {
             header.id_size_bytes,
             num_entries_before,
         )
+    }
+
+    /// Id of the `index`-th entry in this file. V1 entries do not store their
+    /// id, so it is derived from the header instead.
+    pub fn entry_id(&self, index: u64) -> Result<u64, WalEntryV1Error> {
+        derive_entry_id(self.num_entries_before, index)
     }
 
     fn as_c(&self) -> CWalHeaderV1 {

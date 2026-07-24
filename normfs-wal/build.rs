@@ -18,6 +18,8 @@ fn main() {
 
     cc::Build::new()
         .file(manifest_dir.join("c/src/wal_header.c"))
+        .file(manifest_dir.join("c/src/crc32c.c"))
+        .file(manifest_dir.join("c/src/wal_entry.c"))
         .include(&include_dir)
         .include(&uintn_include_dir)
         .flag("-std=c99")
