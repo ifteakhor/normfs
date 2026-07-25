@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use normfs::{NormFS, NormFsSettings};
 use normfs_crypto::CryptoContext;
-use normfs_store::header::{FileAuthentication, SignatureType, StoreHeader};
+use normfs_store::header::{FileAuthentication, SignatureType};
+use normfs_store::store_header_v1::AnyStoreHeader;
 use std::sync::Arc;
 use tempfile::TempDir;
 use uintn::UintN;
@@ -69,7 +70,7 @@ async fn test_signature_verification() {
 
     // Parse StoreHeader
     let content_after_auth = &store_bytes[auth_size..];
-    let (_header, header_size) = StoreHeader::from_bytes(content_after_auth).unwrap();
+    let (_header, header_size) = AnyStoreHeader::from_bytes(content_after_auth).unwrap();
 
     // Verify header signature
     let header_bytes = &content_after_auth[..header_size];
@@ -135,7 +136,7 @@ async fn test_signature_verification_fails_on_tampered_header() {
 
     // Parse StoreHeader
     let content_after_auth = &store_bytes[auth_size..];
-    let (_, header_size) = StoreHeader::from_bytes(content_after_auth).unwrap();
+    let (_, header_size) = AnyStoreHeader::from_bytes(content_after_auth).unwrap();
 
     // Tamper with header
     let mut tampered_header = content_after_auth[..header_size].to_vec();
@@ -202,7 +203,7 @@ async fn test_signature_verification_fails_on_tampered_content() {
 
     // Parse StoreHeader
     let content_after_auth = &store_bytes[auth_size..];
-    let (_, header_size) = StoreHeader::from_bytes(content_after_auth).unwrap();
+    let (_, header_size) = AnyStoreHeader::from_bytes(content_after_auth).unwrap();
 
     // Tamper with content
     let mut tampered_content = content_after_auth[header_size..].to_vec();
