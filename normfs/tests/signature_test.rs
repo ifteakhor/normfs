@@ -17,6 +17,21 @@ fn get_queue_store_path(
     base_path.join(full_path).join("store")
 }
 
+/// The store file only appears after the WAL rotates and the store writers
+/// persist the sealed file, so how long that takes depends on disk speed. A
+/// fixed sleep is a race on a slow CI runner: `close()` shuts the store
+/// writers down before the WAL, so anything still in flight is dropped and
+/// the file never appears at all.
+async fn wait_for_store_file(path: &std::path::Path) {
+    for _ in 0..600 {
+        if path.exists() {
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    panic!("store file {} was not written within 60s", path.display());
+}
+
 #[tokio::test]
 async fn test_signature_verification() {
     let temp_dir = TempDir::new().unwrap();
@@ -45,19 +60,17 @@ async fn test_signature_verification() {
 
     let instance_id = normfs.get_instance_id().to_string();
 
+    let store_dir = get_queue_store_path(&data_dir, &instance_id, queue_name);
+    let file_id = UintN::from(1u64);
+    let store_file_path = file_id.to_file_path(store_dir.to_str().unwrap(), "store");
+
     // Wait for WAL rotation and store writes to complete
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    wait_for_store_file(&store_file_path).await;
 
     normfs.close().await.unwrap();
     drop(normfs);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     let crypto_ctx = CryptoContext::open(&data_dir).unwrap();
-
-    let store_dir = get_queue_store_path(&data_dir, &instance_id, queue_name);
-    let file_id = UintN::from(1u64);
-    let store_file_path = file_id.to_file_path(store_dir.to_str().unwrap(), "store");
 
     let store_bytes = std::fs::read(&store_file_path).unwrap();
 
@@ -114,19 +127,17 @@ async fn test_signature_verification_fails_on_tampered_header() {
 
     let instance_id = normfs.get_instance_id().to_string();
 
+    let store_dir = get_queue_store_path(&data_dir, &instance_id, queue_name);
+    let file_id = UintN::from(1u64);
+    let store_file_path = file_id.to_file_path(store_dir.to_str().unwrap(), "store");
+
     // Wait for WAL rotation and store writes to complete
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    wait_for_store_file(&store_file_path).await;
 
     normfs.close().await.unwrap();
     drop(normfs);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     let crypto_ctx = CryptoContext::open(&data_dir).unwrap();
-
-    let store_dir = get_queue_store_path(&data_dir, &instance_id, queue_name);
-    let file_id = UintN::from(1u64);
-    let store_file_path = file_id.to_file_path(store_dir.to_str().unwrap(), "store");
 
     let store_bytes = std::fs::read(&store_file_path).unwrap();
 
@@ -181,19 +192,17 @@ async fn test_signature_verification_fails_on_tampered_content() {
 
     let instance_id = normfs.get_instance_id().to_string();
 
+    let store_dir = get_queue_store_path(&data_dir, &instance_id, queue_name);
+    let file_id = UintN::from(1u64);
+    let store_file_path = file_id.to_file_path(store_dir.to_str().unwrap(), "store");
+
     // Wait for WAL rotation and store writes to complete
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    wait_for_store_file(&store_file_path).await;
 
     normfs.close().await.unwrap();
     drop(normfs);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     let crypto_ctx = CryptoContext::open(&data_dir).unwrap();
-
-    let store_dir = get_queue_store_path(&data_dir, &instance_id, queue_name);
-    let file_id = UintN::from(1u64);
-    let store_file_path = file_id.to_file_path(store_dir.to_str().unwrap(), "store");
 
     let store_bytes = std::fs::read(&store_file_path).unwrap();
 
