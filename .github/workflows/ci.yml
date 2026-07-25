@@ -1,0 +1,94 @@
+name: ci
+
+# Scope is the varint proofs; a branch adding a module adds its verify-* target
+# to verify/Makefile and is picked up without editing this file.
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: cargo test --workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Not --locked: Cargo.lock is untracked here.
+      - run: cargo test --workspace
+
+  build:
+    name: build C (c99, -Werror)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The runner's gcc, not the pinned image: this checks portability.
+      - name: Build every C module
+        run: make -f verify/Makefile build
+
+  image:
+    name: toolchain image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/verify-image
+          key: verify-image-${{ hashFiles('verify/Dockerfile') }}
+      # if/then, not `[ -f ] && exit 0`: under bash -e a short-circuited &&
+      # fails the step on exactly the cold-cache path this handles.
+      - name: Build if not cached
+        run: |
+          if [ ! -f /tmp/verify-image/image.tar ]; then
+            docker build -t normfs-verify:pinned -f verify/Dockerfile verify
+            mkdir -p /tmp/verify-image
+            docker save normfs-verify:pinned -o /tmp/verify-image/image.tar
+          fi
+
+  proofs:
+    name: WP
+    runs-on: ubuntu-latest
+    needs: image
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the pinned toolchain image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/verify-image
+          key: verify-image-${{ hashFiles('verify/Dockerfile') }}
+
+      - name: Load the pinned toolchain image
+        run: docker load -i /tmp/verify-image/image.tar
+
+      # pipefail: the container's exit status is the whole signal, and tee's
+      # would always be 0.
+      - name: Prove
+        shell: bash
+        run: |
+          set -o pipefail
+          docker run --rm -v "$PWD:/work" -w /work normfs-verify:pinned \
+            make -f verify/Makefile verify 2>&1 | tee wp.log
+
+      - name: Summarise
+        if: always()
+        run: ./verify/summarize.sh build-verify/logs >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wp-log
+          path: wp.log
