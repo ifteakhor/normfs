@@ -18,3 +18,6 @@ normfs-store/c/build/
 
 # Logs
 *.log
+
+# Proof build directories
+build-verify/
