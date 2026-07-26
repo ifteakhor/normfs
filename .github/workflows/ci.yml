@@ -65,8 +65,8 @@ jobs:
 
   proofs:
     name: WP
-    # Larger runner: WP is the long pole, ~25 minutes across the three targets,
-    # and the only job whose wall clock anyone waits on.
+    # Larger runner: WP is the long pole, tens of minutes across the discovered
+    # targets, and the only job whose wall clock anyone waits on.
     runs-on: ubuntu-latest-m
     needs: image
     timeout-minutes: 60
