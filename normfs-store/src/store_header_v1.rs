@@ -153,32 +153,6 @@ fn map_field_status(
     }
 }
 
-/// Maps a compression code that the C decoder has already accepted.
-///
-/// This is not a second validation pass. `normfs_store_header_v1_validate`
-/// proves `0 <= compression <= NORMFS_STORE_COMPRESSION_MAX`, and both
-/// `normfs_store_header_v1_encode` and `_decode` return `OK` only when it
-/// holds, so the mapping is total on every value that reaches here.
-fn compression_from_c(value: u64) -> CompressionType {
-    match value {
-        0 => CompressionType::None,
-        1 => CompressionType::Gzip,
-        2 => CompressionType::Xz,
-        3 => CompressionType::Zstd,
-        _ => unreachable!("C decoder returned OK with compression {}", value),
-    }
-}
-
-/// Maps an encryption code that the C decoder has already accepted. See
-/// [`compression_from_c`] for why no error case is needed.
-fn encryption_from_c(value: u64) -> EncryptionType {
-    match value {
-        0 => EncryptionType::None,
-        1 => EncryptionType::Aes,
-        _ => unreachable!("C decoder returned OK with encryption {}", value),
-    }
-}
-
 /// Reads the version word of a header without consuming the rest of it.
 ///
 /// Both versions carry the version as a `u64` little-endian word at offset 0,
@@ -262,10 +236,15 @@ impl StoreHeaderV1 {
         let result = unsafe { normfs_store_header_v1_decode(data.as_ptr(), data.len()) };
         map_field_status(result.status, result.version, &result.header)?;
 
+        let compression = CompressionType::try_from(result.header.compression)
+            .map_err(|_| StoreHeaderV1Error::UnsupportedCompression(result.header.compression))?;
+        let encryption = EncryptionType::try_from(result.header.encryption)
+            .map_err(|_| StoreHeaderV1Error::UnsupportedEncryption(result.header.encryption))?;
+
         Ok((
             Self {
-                compression: compression_from_c(result.header.compression),
-                encryption: encryption_from_c(result.header.encryption),
+                compression,
+                encryption,
                 num_entries_before: result.header.num_entries_before,
                 num_entries: result.header.num_entries,
             },
