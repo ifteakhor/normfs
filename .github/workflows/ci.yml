@@ -39,7 +39,9 @@ jobs:
 
   image:
     name: toolchain image
-    runs-on: ubuntu-latest
+    # Larger runner: this builds the pinned Frama-C image from source, which is
+    # the ~10 minute half of a cold run.
+    runs-on: ubuntu-latest-m
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -59,7 +61,9 @@ jobs:
 
   proofs:
     name: WP
-    runs-on: ubuntu-latest
+    # Larger runner: WP is the long pole, ~25 minutes across the three targets,
+    # and the only job whose wall clock anyone waits on.
+    runs-on: ubuntu-latest-m
     needs: image
     timeout-minutes: 60
     steps:
