@@ -12,12 +12,14 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let include_dir = manifest_dir.join("c/include");
     let uintn_include_dir = uintn_include_dir(&manifest_dir);
+    let source = manifest_dir.join("c/src/store_header.c");
 
     println!("cargo:rerun-if-changed={}", include_dir.display());
     println!("cargo:rerun-if-changed={}", uintn_include_dir.display());
+    println!("cargo:rerun-if-changed={}", source.display());
 
     cc::Build::new()
-        .file(manifest_dir.join("c/src/store_header.c"))
+        .file(&source)
         .include(&include_dir)
         .include(&uintn_include_dir)
         .flag("-std=c99")
