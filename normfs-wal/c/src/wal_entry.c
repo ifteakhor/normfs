@@ -93,7 +93,6 @@ normfs_wal_entry_v1_encode(const uint8_t *record, uint32_t record_size,
 	total = normfs_wal_entry_v1_size(record_size);
 	if (out_len < total) return r;
 
-	/* out_len >= total >= the varint size, so the encode cannot run out. */
 	length = normfs_uintn_varint32_encode(record_size, out, out_len);
 	offset = length.written;
 	/*@ assert normfs_uintn_varint32_value(out) == record_size; */
