@@ -57,11 +57,20 @@ build: configure
 	    cmake --build "$(BUILD)/$$(echo $$m | tr / _)" || exit 1; \
 	done
 
-# The proofs cannot check their own gate: a report check-proved.sh wrongly
-# accepts is indistinguishable from one it rightly accepts. Needs no frama-c,
-# so it runs on the plain build job.
+# test covers the two things the proof job cannot: the CRC32C differential test
+# (hardware intrinsics against the proven portable path, which WP cannot reach)
+# and check-proved.sh itself, since a report it wrongly accepts looks exactly
+# like one it rightly accepts. --no-tests=ignore lets the modules that carry no
+# tests pass rather than error, keeping this discovered.
 test: build
 	@"$(ROOT)/verify/check-proved-test.sh"
+	@rc=0; \
+	for m in $(MODULES); do \
+	    echo "== test $$m =="; \
+	    ctest --test-dir "$(BUILD)/$$(echo $$m | tr / _)" \
+	          --output-on-failure --no-tests=ignore || rc=1; \
+	done; \
+	exit $$rc
 
 # frama-c exits 0 whether or not it discharges every goal, so each target rules
 # on its JSON report instead, which carries a verdict per goal. The log is kept

@@ -35,8 +35,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The runner's gcc, not the pinned image: this checks portability.
-      # test implies build, and covers what the proof job cannot check itself:
-      # that check-proved.sh still rejects a report with an open goal.
+      # test implies build. It exercises the SSE4.2 CRC32C path against the
+      # proven portable one, and checks that check-proved.sh still rejects a
+      # report with an open goal — neither is something the proof job can do.
       - name: Build and test every C module
         run: make -f verify/Makefile test
 
