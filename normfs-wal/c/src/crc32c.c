@@ -5,10 +5,18 @@
 
 #if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
 #define NORMFS_CRC32C_ARM 1
+#define NORMFS_CRC32C_HW 1
+#define NORMFS_CRC32C_HW_TARGET
+#define NORMFS_CRC32C_STEP8(c, w) __crc32cd((c), (w))
+#define NORMFS_CRC32C_STEP1(c, b) __crc32cb((c), (b))
 #include <arm_acle.h>
 #include <string.h>
 #elif defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #define NORMFS_CRC32C_X86 1
+#define NORMFS_CRC32C_HW 1
+#define NORMFS_CRC32C_HW_TARGET __attribute__((target("sse4.2")))
+#define NORMFS_CRC32C_STEP8(c, w) ((uint32_t)_mm_crc32_u64((uint64_t)(c), (w)))
+#define NORMFS_CRC32C_STEP1(c, b) ((uint32_t)_mm_crc32_u8((c), (b)))
 #include <nmmintrin.h>
 #include <string.h>
 #endif
@@ -109,50 +117,126 @@ normfs_crc32c_portable(uint32_t crc, const uint8_t *data, size_t len)
 	return 0xFFFFFFFFu ^ c;
 }
 
-#if defined(NORMFS_CRC32C_ARM)
+#if !defined(NORMFS_CRC32C_PORTABLE_ONLY)
 
+/*
+ * Columns of the GF(2) operator "append N zero bytes" to the raw CRC state:
+ * normfs_crc32c_shift_N[i] is the state after folding N zero bytes from state
+ * 1u << i (x^(8N) mod P applied to basis bit i, reflected convention, no
+ * inversion). Used to join independently folded streams. Not part of the
+ * public API; exported without a header declaration so test_crc32c can
+ * re-derive them from the polynomial by repeated squaring and check them
+ * entry by entry.
+ */
+const uint32_t normfs_crc32c_shift_1024[32] = {
+	0xFE314258U, 0xF98EF241U, 0xF6F19273U, 0xE80F5217U,
+	0xD5F2D2DFU, 0xAE09D34FU, 0x59FFD06FU, 0xB3FFA0DEU,
+	0x6213374DU, 0xC4266E9AU, 0x8DA0ABC5U, 0x1EAD217BU,
+	0x3D5A42F6U, 0x7AB485ECU, 0xF5690BD8U, 0xEF3E6141U,
+	0xDB90B473U, 0xB2CD1E17U, 0x60764ADFU, 0xC0EC95BEU,
+	0x84355D8DU, 0x0D86CDEBU, 0x1B0D9BD6U, 0x361B37ACU,
+	0x6C366F58U, 0xD86CDEB0U, 0xB535CB91U, 0x6F87E1D3U,
+	0xDF0FC3A6U, 0xBBF3F1BDU, 0x720B958BU, 0xE4172B16U
+};
+
+const uint32_t normfs_crc32c_shift_2048[32] = {
+	0xF7506984U, 0xEB4CA5F9U, 0xD3753D03U, 0xA3060CF7U,
+	0x43E06F1FU, 0x87C0DE3EU, 0x0A6DCA8DU, 0x14DB951AU,
+	0x29B72A34U, 0x536E5468U, 0xA6DCA8D0U, 0x48552751U,
+	0x90AA4EA2U, 0x24B8EBB5U, 0x4971D76AU, 0x92E3AED4U,
+	0x202B2B59U, 0x405656B2U, 0x80ACAD64U, 0x04B52C39U,
+	0x096A5872U, 0x12D4B0E4U, 0x25A961C8U, 0x4B52C390U,
+	0x96A58720U, 0x28A778B1U, 0x514EF162U, 0xA29DE2C4U,
+	0x40D7B379U, 0x81AF66F2U, 0x06B2BB15U, 0x0D65762AU
+};
+
+#endif
+
+#if defined(NORMFS_CRC32C_HW)
+
+/*
+ * Image of v under the operator whose columns are m. Branchless: a bit-test
+ * loop mispredicts about half the time on random states.
+ */
 static uint32_t
-normfs_crc32c_arm(uint32_t crc, const uint8_t *data, size_t len)
+normfs_crc32c_shift(uint32_t v, const uint32_t m[32])
+{
+	uint32_t r = 0u;
+	uint32_t i;
+
+	for (i = 0u; i < 32u; i++)
+		r ^= m[i] & (0u - ((v >> i) & 1u));
+
+	return r;
+}
+
+/* Serial fold over the raw CRC state: no inversion on entry or exit. */
+NORMFS_CRC32C_HW_TARGET static uint32_t
+normfs_crc32c_hw_serial(uint32_t c, const uint8_t *data, size_t len)
+{
+	size_t i = 0u;
+
+	while (len - i >= 8u) {
+		uint64_t word;
+		memcpy(&word, data + i, sizeof(word));
+		c = NORMFS_CRC32C_STEP8(c, word);
+		i += 8u;
+	}
+
+	while (i < len) {
+		c = NORMFS_CRC32C_STEP1(c, data[i]);
+		i++;
+	}
+
+	return c;
+}
+
+/*
+ * One 3n-byte block as three independent n-byte streams: the crc
+ * instruction's latency hides behind the other two chains, so the block runs
+ * at instruction throughput instead. n must be a multiple of 8. Streams b and
+ * c start from state 0, which makes their folds the constant terms of the
+ * affine block maps, so the shift operators join the three results exactly.
+ */
+NORMFS_CRC32C_HW_TARGET static uint32_t
+normfs_crc32c_hw_block3(uint32_t c0, const uint8_t *p, size_t n,
+    const uint32_t m2n[32], const uint32_t mn[32])
+{
+	uint32_t a = c0;
+	uint32_t b = 0u;
+	uint32_t c = 0u;
+	size_t i;
+
+	for (i = 0u; i < n; i += 8u) {
+		uint64_t wa;
+		uint64_t wb;
+		uint64_t wc;
+
+		memcpy(&wa, p + i, sizeof(wa));
+		memcpy(&wb, p + n + i, sizeof(wb));
+		memcpy(&wc, p + 2u * n + i, sizeof(wc));
+		a = NORMFS_CRC32C_STEP8(a, wa);
+		b = NORMFS_CRC32C_STEP8(b, wb);
+		c = NORMFS_CRC32C_STEP8(c, wc);
+	}
+
+	return normfs_crc32c_shift(a, m2n) ^ normfs_crc32c_shift(b, mn) ^ c;
+}
+
+/* The only place the 0xFFFFFFFF inversion convention lives on this path. */
+NORMFS_CRC32C_HW_TARGET static uint32_t
+normfs_crc32c_hw(uint32_t crc, const uint8_t *data, size_t len)
 {
 	uint32_t c = ~crc;
 	size_t i = 0u;
 
-	while (len - i >= 8u) {
-		uint64_t word;
-		memcpy(&word, data + i, sizeof(word));
-		c = __crc32cd(c, word);
-		i += 8u;
+	while (len - i >= 3072u) {
+		c = normfs_crc32c_hw_block3(c, data + i, 1024u,
+		    normfs_crc32c_shift_2048, normfs_crc32c_shift_1024);
+		i += 3072u;
 	}
 
-	while (i < len) {
-		c = __crc32cb(c, data[i]);
-		i++;
-	}
-
-	return ~c;
-}
-
-#elif defined(NORMFS_CRC32C_X86)
-
-__attribute__((target("sse4.2"))) static uint32_t
-normfs_crc32c_x86(uint32_t crc, const uint8_t *data, size_t len)
-{
-	uint64_t c = ~crc;
-	size_t i = 0u;
-
-	while (len - i >= 8u) {
-		uint64_t word;
-		memcpy(&word, data + i, sizeof(word));
-		c = _mm_crc32_u64(c, word);
-		i += 8u;
-	}
-
-	while (i < len) {
-		c = _mm_crc32_u8((uint32_t)c, data[i]);
-		i++;
-	}
-
-	return ~(uint32_t)c;
+	return ~normfs_crc32c_hw_serial(c, data + i, len - i);
 }
 
 #endif
@@ -165,10 +249,10 @@ uint32_t
 normfs_crc32c(uint32_t crc, const uint8_t *data, size_t len)
 {
 #if defined(NORMFS_CRC32C_ARM)
-	return normfs_crc32c_arm(crc, data, len);
+	return normfs_crc32c_hw(crc, data, len);
 #elif defined(NORMFS_CRC32C_X86)
 	if (__builtin_cpu_supports("sse4.2"))
-		return normfs_crc32c_x86(crc, data, len);
+		return normfs_crc32c_hw(crc, data, len);
 	return normfs_crc32c_portable(crc, data, len);
 #else
 	return normfs_crc32c_portable(crc, data, len);
