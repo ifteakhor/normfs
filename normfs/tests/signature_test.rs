@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use normfs::{NormFS, NormFsSettings};
 use normfs_crypto::CryptoContext;
-use normfs_store::header::{FileAuthentication, SignatureType, StoreHeader};
+use normfs_store::header::{FileAuthentication, SignatureType};
+use normfs_store::store_header_v1::AnyStoreHeader;
 use std::sync::Arc;
 use tempfile::TempDir;
 use uintn::UintN;
@@ -15,21 +16,6 @@ fn get_queue_store_path(
     // In real code, QueueId would already have instance_id embedded via resolver
     let full_path = format!("{}/{}", instance_id, queue_name);
     base_path.join(full_path).join("store")
-}
-
-/// The store file only appears after the WAL rotates and the store writers
-/// persist the sealed file, so how long that takes depends on disk speed. A
-/// fixed sleep is a race on a slow CI runner: `close()` shuts the store
-/// writers down before the WAL, so anything still in flight is dropped and
-/// the file never appears at all.
-async fn wait_for_store_file(path: &std::path::Path) {
-    for _ in 0..600 {
-        if path.exists() {
-            return;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
-    panic!("store file {} was not written within 60s", path.display());
 }
 
 #[tokio::test]
@@ -64,15 +50,17 @@ async fn test_signature_verification() {
     let file_id = UintN::from(1u64);
     let store_file_path = file_id.to_file_path(store_dir.to_str().unwrap(), "store");
 
-    // Wait for WAL rotation and store writes to complete
-    wait_for_store_file(&store_file_path).await;
+    // Read while the instance is still alive: the flusher that writes store
+    // files stops once it is closed, and there is no guarantee that a file
+    // which merely exists at some instant is still there (or unchanged) by
+    // the time a later, separate read happens, so retry the read itself
+    // rather than checking existence and reading in two separate steps.
+    let store_bytes = read_store_file_when_ready(&store_file_path).await;
 
     normfs.close().await.unwrap();
     drop(normfs);
 
     let crypto_ctx = CryptoContext::open(&data_dir).unwrap();
-
-    let store_bytes = std::fs::read(&store_file_path).unwrap();
 
     // Parse FileAuthentication
     let (file_auth, auth_size) = FileAuthentication::from_bytes(&store_bytes).unwrap();
@@ -82,7 +70,7 @@ async fn test_signature_verification() {
 
     // Parse StoreHeader
     let content_after_auth = &store_bytes[auth_size..];
-    let (_header, header_size) = StoreHeader::from_bytes(content_after_auth).unwrap();
+    let (_header, header_size) = AnyStoreHeader::from_bytes(content_after_auth).unwrap();
 
     // Verify header signature
     let header_bytes = &content_after_auth[..header_size];
@@ -131,22 +119,24 @@ async fn test_signature_verification_fails_on_tampered_header() {
     let file_id = UintN::from(1u64);
     let store_file_path = file_id.to_file_path(store_dir.to_str().unwrap(), "store");
 
-    // Wait for WAL rotation and store writes to complete
-    wait_for_store_file(&store_file_path).await;
+    // Read while the instance is still alive: the flusher that writes store
+    // files stops once it is closed, and there is no guarantee that a file
+    // which merely exists at some instant is still there (or unchanged) by
+    // the time a later, separate read happens, so retry the read itself
+    // rather than checking existence and reading in two separate steps.
+    let store_bytes = read_store_file_when_ready(&store_file_path).await;
 
     normfs.close().await.unwrap();
     drop(normfs);
 
     let crypto_ctx = CryptoContext::open(&data_dir).unwrap();
 
-    let store_bytes = std::fs::read(&store_file_path).unwrap();
-
     // Parse FileAuthentication
     let (file_auth, auth_size) = FileAuthentication::from_bytes(&store_bytes).unwrap();
 
     // Parse StoreHeader
     let content_after_auth = &store_bytes[auth_size..];
-    let (_, header_size) = StoreHeader::from_bytes(content_after_auth).unwrap();
+    let (_, header_size) = AnyStoreHeader::from_bytes(content_after_auth).unwrap();
 
     // Tamper with header
     let mut tampered_header = content_after_auth[..header_size].to_vec();
@@ -196,22 +186,24 @@ async fn test_signature_verification_fails_on_tampered_content() {
     let file_id = UintN::from(1u64);
     let store_file_path = file_id.to_file_path(store_dir.to_str().unwrap(), "store");
 
-    // Wait for WAL rotation and store writes to complete
-    wait_for_store_file(&store_file_path).await;
+    // Read while the instance is still alive: the flusher that writes store
+    // files stops once it is closed, and there is no guarantee that a file
+    // which merely exists at some instant is still there (or unchanged) by
+    // the time a later, separate read happens, so retry the read itself
+    // rather than checking existence and reading in two separate steps.
+    let store_bytes = read_store_file_when_ready(&store_file_path).await;
 
     normfs.close().await.unwrap();
     drop(normfs);
 
     let crypto_ctx = CryptoContext::open(&data_dir).unwrap();
 
-    let store_bytes = std::fs::read(&store_file_path).unwrap();
-
     // Parse FileAuthentication
     let (file_auth, auth_size) = FileAuthentication::from_bytes(&store_bytes).unwrap();
 
     // Parse StoreHeader
     let content_after_auth = &store_bytes[auth_size..];
-    let (_, header_size) = StoreHeader::from_bytes(content_after_auth).unwrap();
+    let (_, header_size) = AnyStoreHeader::from_bytes(content_after_auth).unwrap();
 
     // Tamper with content
     let mut tampered_content = content_after_auth[header_size..].to_vec();
@@ -227,4 +219,31 @@ async fn test_signature_verification_fails_on_tampered_content() {
     );
 
     println!("✓ Content signature verification correctly rejected tampered data!");
+}
+
+/// Waits for the flusher to produce a store file.
+///
+/// The store write is asynchronous: the WAL rotates, then the content is
+/// compressed, encrypted and signed before the file appears. A fixed sleep is
+/// a race that holds on a fast machine and loses on a shared CI runner.
+///
+/// This must be awaited, not blocked on: these are `#[tokio::test]`, so the
+/// runtime is current-thread and the flusher only makes progress while the
+/// test is awaiting.
+async fn read_store_file_when_ready(path: &std::path::Path) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        match std::fs::read(path) {
+            Ok(bytes) => return bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "store file never appeared: {}",
+                    path.display()
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("reading {}: {}", path.display(), e),
+        }
+    }
 }
