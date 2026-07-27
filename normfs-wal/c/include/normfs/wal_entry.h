@@ -53,6 +53,24 @@ struct normfs_wal_entry_id_result {
 	int status;
 };
 
+/*
+ * One step of a forward iteration over a buffer of V1 entries. It decodes the
+ * entry at the front of buf and, in the same call, derives that entry's id
+ * from the file header's num_entries_before and the entry's 0-based index in
+ * the file. The record fields mirror normfs_wal_entry_v1_decode (zero copy:
+ * record_offset/record_size point into buf); consumed is how far to advance
+ * the cursor before the next call. The 8-byte fields precede the 4-byte ones
+ * so the struct has no internal padding.
+ */
+struct normfs_wal_entry_iter_result {
+	size_t record_offset;
+	size_t record_size;
+	size_t consumed;
+	uint64_t entry_id;
+	uint32_t crc;
+	int status;
+};
+
 /*@ axiomatic NormfsWalEntryV1 {
       logic integer normfs_wal_entry_v1_size_logic(integer record_size) =
         normfs_uintn_varint32_size_logic(record_size) + record_size +
@@ -78,5 +96,17 @@ normfs_wal_entry_v1_decode(const uint8_t *buf, size_t len);
 
 struct normfs_wal_entry_id_result
 normfs_wal_entry_v1_id(uint64_t num_entries_before, uint64_t index);
+
+/*
+ * Decode the entry at the front of buf and derive its id in one step. Rust
+ * drives the loop: start with index 0, and after an NORMFS_WAL_ENTRY_OK
+ * result advance the cursor by consumed and the index by one. Any non-OK
+ * status stops the iteration (a corrupt or truncated entry means the ids of
+ * every later entry are unknowable, since they are counted from the start of
+ * the file).
+ */
+struct normfs_wal_entry_iter_result
+normfs_wal_entry_v1_iter_next(const uint8_t *buf, size_t len,
+    uint64_t num_entries_before, uint64_t index);
 
 #endif /* NORMFS_WAL_ENTRY_H */

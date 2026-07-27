@@ -67,6 +67,18 @@ struct CIdResult {
     status: c_int,
 }
 
+// Field order matches struct normfs_wal_entry_iter_result: the 8-byte fields
+// first, then the two 4-byte fields, so both sides agree with no padding.
+#[repr(C)]
+struct CIterResult {
+    record_offset: usize,
+    record_size: usize,
+    consumed: usize,
+    entry_id: u64,
+    crc: u32,
+    status: c_int,
+}
+
 unsafe extern "C" {
     fn normfs_wal_entry_v1_size(record_size: u32) -> usize;
 
@@ -81,7 +93,16 @@ unsafe extern "C" {
 
     fn normfs_wal_entry_v1_id(num_entries_before: u64, index: u64) -> CIdResult;
 
+    fn normfs_wal_entry_v1_iter_next(
+        buf: *const u8,
+        len: usize,
+        num_entries_before: u64,
+        index: u64,
+    ) -> CIterResult;
+
     fn normfs_crc32c(crc: u32, data: *const u8, len: usize) -> u32;
+
+    fn normfs_crc32c_portable(crc: u32, data: *const u8, len: usize) -> u32;
 }
 
 fn map_status(status: c_int) -> Result<(), WalEntryV1Error> {
@@ -103,6 +124,12 @@ fn map_status(status: c_int) -> Result<(), WalEntryV1Error> {
 /// seed checksums the concatenation.
 pub fn crc32c(seed: u32, data: &[u8]) -> u32 {
     unsafe { normfs_crc32c(seed, data.as_ptr(), data.len()) }
+}
+
+/// CRC32C over `data` using the portable table-driven path, never a CPU fast
+/// path. Same value as [`crc32c`]; exposed to benchmark the fast-path cost.
+pub fn crc32c_portable(seed: u32, data: &[u8]) -> u32 {
+    unsafe { normfs_crc32c_portable(seed, data.as_ptr(), data.len()) }
 }
 
 /// Entry id for the `index`-th entry of a file whose header records
@@ -175,6 +202,33 @@ impl<'a> WalEntryV1<'a> {
             Self {
                 record: &data[result.record_offset..end],
             },
+            result.consumed,
+        ))
+    }
+
+    /// Decode the entry at the front of `data` and derive its id in one step.
+    ///
+    /// `num_entries_before` comes from the file header and `index` is the
+    /// entry's 0-based position in the file, so the returned id is
+    /// `num_entries_before + index`. Returns the borrowed entry, its id, and
+    /// how many bytes it consumed — advance the cursor by that before the next
+    /// call. Any error stops the iteration (see `normfs_wal_entry_v1_iter_next`).
+    pub fn iter_next(
+        data: &'a [u8],
+        num_entries_before: u64,
+        index: u64,
+    ) -> Result<(Self, u64, usize), WalEntryV1Error> {
+        let result = unsafe {
+            normfs_wal_entry_v1_iter_next(data.as_ptr(), data.len(), num_entries_before, index)
+        };
+        map_status(result.status)?;
+
+        let end = result.record_offset + result.record_size;
+        Ok((
+            Self {
+                record: &data[result.record_offset..end],
+            },
+            result.entry_id,
             result.consumed,
         ))
     }

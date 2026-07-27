@@ -70,7 +70,8 @@ if(FRAMAC)
         normfs_wal_entry_v1_size
         normfs_wal_entry_v1_encode
         normfs_wal_entry_v1_decode
-        normfs_wal_entry_v1_id)
+        normfs_wal_entry_v1_id
+        normfs_wal_entry_v1_iter_next)
 
     function(normfs_add_wp_target target source fcts comment)
         string(REPLACE ";" "," fcts_arg "${fcts}")

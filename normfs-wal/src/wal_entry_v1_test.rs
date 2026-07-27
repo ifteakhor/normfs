@@ -191,6 +191,78 @@ fn test_wal_entry_v1_entry_id_derivation() {
 }
 
 #[test]
+fn test_wal_entry_v1_iter_next_derives_ids_across_buffer() {
+    // Entries packed back to back, iterated with a running index. The id of the
+    // i-th entry is num_entries_before + i.
+    let base = 1000u64;
+    let sizes = [0usize, 5, 130, 17, 200];
+    let records: Vec<Vec<u8>> = sizes.iter().map(|s| pseudo_random(*s)).collect();
+
+    let mut buffer = BytesMut::new();
+    for record in &records {
+        WalEntryV1::new(record).write_to_bytes(&mut buffer).unwrap();
+    }
+
+    let mut cursor = 0usize;
+    let mut index = 0u64;
+    for record in &records {
+        let (decoded, entry_id, consumed) =
+            WalEntryV1::iter_next(&buffer[cursor..], base, index).unwrap();
+        assert_eq!(decoded.record, &record[..]);
+        assert_eq!(entry_id, base + index);
+        // The same entry decoded standalone consumes the same number of bytes.
+        let (_, consumed_decode) = WalEntryV1::from_bytes(&buffer[cursor..]).unwrap();
+        assert_eq!(consumed, consumed_decode);
+        cursor += consumed;
+        index += 1;
+    }
+    assert_eq!(cursor, buffer.len());
+}
+
+#[test]
+fn test_wal_entry_v1_iter_next_stops_on_truncation_and_corruption() {
+    let record = pseudo_random(120);
+    let mut buffer = BytesMut::new();
+    let written = WalEntryV1::new(&record)
+        .write_to_bytes(&mut buffer)
+        .unwrap();
+
+    // Every proper prefix is truncated.
+    for len in 0..written {
+        assert_eq!(
+            WalEntryV1::iter_next(&buffer[..len], 0, 0),
+            Err(WalEntryV1Error::Truncated),
+            "length {} should be truncated",
+            len
+        );
+    }
+
+    // A flipped record byte is a CRC mismatch, regardless of index/base.
+    buffer[3] ^= 0x01;
+    assert_eq!(
+        WalEntryV1::iter_next(&buffer, 42, 7),
+        Err(WalEntryV1Error::CrcMismatch)
+    );
+}
+
+#[test]
+fn test_wal_entry_v1_iter_next_reports_id_overflow() {
+    // The entry decodes fine, but num_entries_before + index wraps u64.
+    let record = pseudo_random(8);
+    let mut buffer = BytesMut::new();
+    WalEntryV1::new(&record).write_to_bytes(&mut buffer).unwrap();
+
+    // Largest non-overflowing id.
+    let (_, entry_id, _) = WalEntryV1::iter_next(&buffer, u64::MAX, 0).unwrap();
+    assert_eq!(entry_id, u64::MAX);
+
+    assert_eq!(
+        WalEntryV1::iter_next(&buffer, u64::MAX, 1),
+        Err(WalEntryV1Error::IdOverflow)
+    );
+}
+
+#[test]
 fn test_wal_entry_v0_is_unchanged() {
     // From Go test: entry_id 456, record "hello world", V0 framing.
     let wal_header = WalHeader::new(2, 4, UintN::from(123u64)).unwrap();

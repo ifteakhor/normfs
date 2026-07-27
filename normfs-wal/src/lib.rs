@@ -19,9 +19,10 @@ mod writer_buffer;
 
 pub use errors::*;
 pub use reader::{ReadRangeResult, WalContent, get_wal_header};
+pub use wal_entry::{WAL_ENTRY_HEADER_FIXED_OVERHEAD, WalEntryHeader};
 pub use wal_entry_v1::{
     WAL_ENTRY_V1_CRC_SIZE, WAL_ENTRY_V1_MAX_OVERHEAD, WAL_ENTRY_V1_MIN_SIZE, WalEntryV1,
-    WalEntryV1Error, crc32c, derive_entry_id,
+    WalEntryV1Error, crc32c, crc32c_portable, derive_entry_id, encoded_len,
 };
 pub use wal_header::{WalHeader, WalHeaderError};
 pub use wal_header_v1::{
@@ -50,6 +51,21 @@ mod reader_test;
 #[cfg(test)]
 mod writer_test;
 
+/// On-disk WAL entry format for newly written files.
+///
+/// V1 is the default. V0 is kept so old files stay readable and so the V0
+/// baseline can be reproduced for benchmarking; readers dispatch on the file
+/// header version, so a queue can hold a mix of V0 and V1 files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WalEntryFormat {
+    /// `[version u64][entry_id][record_size][xxhash u64][record]` — id stored.
+    V0,
+    /// `[record_size varint32][record][crc32c u32 LE]` — id derived from the
+    /// header's `num_entries_before` plus the entry index.
+    #[default]
+    V1,
+}
+
 #[derive(Debug, Clone)]
 pub struct WalSettings {
     pub max_file_size: usize,
@@ -57,6 +73,7 @@ pub struct WalSettings {
     pub enable_fsync: bool,
     pub encryption_type: normfs_types::EncryptionType,
     pub compression_type: normfs_types::CompressionType,
+    pub wal_entry_format: WalEntryFormat,
 }
 
 impl Default for WalSettings {
@@ -67,6 +84,7 @@ impl Default for WalSettings {
             enable_fsync: true,
             encryption_type: normfs_types::EncryptionType::Aes,
             compression_type: normfs_types::CompressionType::Zstd,
+            wal_entry_format: WalEntryFormat::default(),
         }
     }
 }

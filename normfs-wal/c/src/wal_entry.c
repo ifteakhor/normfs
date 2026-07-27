@@ -214,3 +214,73 @@ normfs_wal_entry_v1_id(uint64_t num_entries_before, uint64_t index)
 	r.status = NORMFS_WAL_ENTRY_OK;
 	return r;
 }
+
+/*@ requires len == 0 || \valid_read(buf + (0 .. len - 1));
+    assigns \nothing;
+    ensures \result.status == NORMFS_WAL_ENTRY_OK ||
+            \result.status == NORMFS_WAL_ENTRY_ERR_TRUNCATED ||
+            \result.status == NORMFS_WAL_ENTRY_ERR_OVERFLOW ||
+            \result.status == NORMFS_WAL_ENTRY_ERR_NON_CANONICAL ||
+            \result.status == NORMFS_WAL_ENTRY_ERR_CRC_MISMATCH ||
+            \result.status == NORMFS_WAL_ENTRY_ERR_ID_OVERFLOW;
+    // framing: same guarantees the single-entry decode gives
+    ensures \result.status == NORMFS_WAL_ENTRY_OK ==>
+              \result.record_offset ==
+                normfs_uintn_varint32_size_logic(\result.record_size) &&
+              1 <= \result.record_offset <= 5;
+    ensures \result.status == NORMFS_WAL_ENTRY_OK ==>
+              \result.consumed == \result.record_offset + \result.record_size +
+                NORMFS_WAL_ENTRY_V1_CRC_SIZE &&
+              \result.consumed <= len &&
+              NORMFS_WAL_ENTRY_V1_MIN_SIZE <= \result.consumed;
+    // the crc covers exactly [record_size varint][record bytes] and is stored
+    // little-endian in the last NORMFS_WAL_ENTRY_V1_CRC_SIZE bytes
+    ensures \result.status == NORMFS_WAL_ENTRY_OK ==>
+              \result.crc == normfs_crc32c_logic(0, buf,
+                  \result.record_offset + \result.record_size) &&
+              \result.crc == normfs_le32(buf + \result.consumed -
+                  NORMFS_WAL_ENTRY_V1_CRC_SIZE);
+    // the id is num_entries_before + index, and that sum did not wrap u64
+    ensures \result.status == NORMFS_WAL_ENTRY_OK ==>
+              \result.entry_id == num_entries_before + index &&
+              num_entries_before + index <= 0xFFFFFFFFFFFFFFFF;
+    ensures \result.status != NORMFS_WAL_ENTRY_OK ==>
+              \result.record_offset == 0 && \result.record_size == 0 &&
+              \result.consumed == 0 && \result.crc == 0 &&
+              \result.entry_id == 0;
+*/
+struct normfs_wal_entry_iter_result
+normfs_wal_entry_v1_iter_next(const uint8_t *buf, size_t len,
+    uint64_t num_entries_before, uint64_t index)
+{
+	struct normfs_wal_entry_iter_result r = {
+	    0u,
+	    0u,
+	    0u,
+	    0u,
+	    0u,
+	    NORMFS_WAL_ENTRY_ERR_TRUNCATED
+	};
+	struct normfs_wal_entry_decode_result d;
+	struct normfs_wal_entry_id_result id;
+
+	d = normfs_wal_entry_v1_decode(buf, len);
+	if (d.status != NORMFS_WAL_ENTRY_OK) {
+		r.status = d.status;
+		return r;
+	}
+
+	id = normfs_wal_entry_v1_id(num_entries_before, index);
+	if (id.status != NORMFS_WAL_ENTRY_OK) {
+		r.status = id.status;
+		return r;
+	}
+
+	r.record_offset = d.record_offset;
+	r.record_size = d.record_size;
+	r.consumed = d.consumed;
+	r.crc = d.crc;
+	r.entry_id = id.entry_id;
+	r.status = NORMFS_WAL_ENTRY_OK;
+	return r;
+}

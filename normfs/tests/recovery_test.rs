@@ -329,17 +329,26 @@ async fn test_recovery_multiple_header_only_files() {
         fs.close().await.unwrap();
     }
 
-    // Start again without writing - creates file 2 with only header
-    {
+    // Start again without writing - creates file 2 with only header. Record
+    // its header-only size so the reuse check below is independent of the
+    // entry format (V1 headers/entries are smaller than the old V0 ones).
+    let header_only_size = {
         let settings = NormFsSettings::default();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+        let instance_id = fs.get_instance_id().to_string();
 
         // Don't write anything - file 2 now has header but no entries
         fs.close().await.unwrap();
-    }
+
+        let resolver = QueueIdResolver::new(&instance_id);
+        let queue_id = resolver.resolve("test-queue");
+        let wal_path = get_queue_wal_path(&path, &queue_id);
+        let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
+        tokio::fs::read(&file_2).await.unwrap().len()
+    };
 
     // Recovery: Should reuse file 2 (header-only)
     let instance_id = {
@@ -370,10 +379,11 @@ async fn test_recovery_multiple_header_only_files() {
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     let file_2_content = tokio::fs::read(&file_2).await.unwrap();
 
-    let header_size = 32;
     assert!(
-        file_2_content.len() > header_size,
-        "File 2 should have been reused and now contain entries"
+        file_2_content.len() > header_only_size,
+        "File 2 should have been reused and now contain entries (was {} bytes header-only, now {} bytes)",
+        header_only_size,
+        file_2_content.len()
     );
     println!(
         "File 2 size after recovery: {} bytes (reused header-only file)",
