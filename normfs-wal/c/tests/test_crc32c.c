@@ -48,6 +48,8 @@ reference_crc32c(uint32_t crc, const uint8_t *data, size_t len)
 
 /* crc32c.c internals, deliberately absent from the public header; a typo
  * here fails at link time. */
+extern const uint32_t normfs_crc32c_shift_256[32];
+extern const uint32_t normfs_crc32c_shift_512[32];
 extern const uint32_t normfs_crc32c_shift_1024[32];
 extern const uint32_t normfs_crc32c_shift_2048[32];
 
@@ -186,6 +188,14 @@ test_shift_matrices(void)
 	for (s = 1u; s <= 11u; s++) {
 		matrix_square(m, sq);
 		memcpy(m, sq, sizeof(m));
+		if (s == 8u) {
+			for (i = 0u; i < 32u; i++)
+				CHECK(m[i] == normfs_crc32c_shift_256[i]);
+		}
+		if (s == 9u) {
+			for (i = 0u; i < 32u; i++)
+				CHECK(m[i] == normfs_crc32c_shift_512[i]);
+		}
 		if (s == 10u) {
 			for (i = 0u; i < 32u; i++)
 				CHECK(m[i] == normfs_crc32c_shift_1024[i]);

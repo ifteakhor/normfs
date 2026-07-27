@@ -128,6 +128,28 @@ normfs_crc32c_portable(uint32_t crc, const uint8_t *data, size_t len)
  * re-derive them from the polynomial by repeated squaring and check them
  * entry by entry.
  */
+const uint32_t normfs_crc32c_shift_256[32] = {
+	0xDCB17AA4U, 0xBC8E83B9U, 0x7CF17183U, 0xF9E2E306U,
+	0xF629B0FDU, 0xE9BF170BU, 0xD69258E7U, 0xA8C8C73FU,
+	0x547DF88FU, 0xA8FBF11EU, 0x541B94CDU, 0xA837299AU,
+	0x558225C5U, 0xAB044B8AU, 0x53E4E1E5U, 0xA7C9C3CAU,
+	0x4A7FF165U, 0x94FFE2CAU, 0x2C13B365U, 0x582766CAU,
+	0xB04ECD94U, 0x6571EDD9U, 0xCAE3DBB2U, 0x902BC195U,
+	0x25BBF5DBU, 0x4B77EBB6U, 0x96EFD76CU, 0x2833D829U,
+	0x5067B052U, 0xA0CF60A4U, 0x4472B7B9U, 0x88E56F72U
+};
+
+const uint32_t normfs_crc32c_shift_512[32] = {
+	0xBD6F81F8U, 0x7F337501U, 0xFE66EA02U, 0xF921A2F5U,
+	0xF7AF331BU, 0xEAB210C7U, 0xD088577FU, 0xA4FCD80FU,
+	0x4C15C6EFU, 0x982B8DDEU, 0x35BB6D4DU, 0x6B76DA9AU,
+	0xD6EDB534U, 0xA8371C99U, 0x55824FC3U, 0xAB049F86U,
+	0x53E549FDU, 0xA7CA93FAU, 0x4A795105U, 0x94F2A20AU,
+	0x2C0932E5U, 0x581265CAU, 0xB024CB94U, 0x65A5E1D9U,
+	0xCB4BC3B2U, 0x937BF195U, 0x231B95DBU, 0x46372BB6U,
+	0x8C6E576CU, 0x1D30D829U, 0x3A61B052U, 0x74C360A4U
+};
+
 const uint32_t normfs_crc32c_shift_1024[32] = {
 	0xFE314258U, 0xF98EF241U, 0xF6F19273U, 0xE80F5217U,
 	0xD5F2D2DFU, 0xAE09D34FU, 0x59FFD06FU, 0xB3FFA0DEU,
@@ -234,6 +256,12 @@ normfs_crc32c_hw(uint32_t crc, const uint8_t *data, size_t len)
 		c = normfs_crc32c_hw_block3(c, data + i, 1024u,
 		    normfs_crc32c_shift_2048, normfs_crc32c_shift_1024);
 		i += 3072u;
+	}
+
+	while (len - i >= 768u) {
+		c = normfs_crc32c_hw_block3(c, data + i, 256u,
+		    normfs_crc32c_shift_512, normfs_crc32c_shift_256);
+		i += 768u;
 	}
 
 	return ~normfs_crc32c_hw_serial(c, data + i, len - i);
