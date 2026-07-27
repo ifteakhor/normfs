@@ -13,6 +13,7 @@ mod reader;
 mod wal_entry;
 mod wal_entry_v1;
 mod wal_header;
+mod wal_ring_v1;
 mod wal_header_v1;
 mod writer;
 mod writer_buffer;
@@ -25,6 +26,7 @@ pub use wal_entry_v1::{
     WalEntryV1Error, crc32c, derive_entry_id, encoded_len,
 };
 pub use wal_header::{WalHeader, WalHeaderError};
+pub use wal_ring_v1::{AppendOutcome, WalRing};
 pub use wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_MAX_SIZE,
     WAL_HEADER_V1_MIN_SIZE, WAL_HEADER_V1_VERSION, WAL_HEADER_VERSION_SIZE, WalHeaderV1,
@@ -39,6 +41,9 @@ mod wal_header_v1_test;
 
 #[cfg(test)]
 mod wal_entry_v1_test;
+
+#[cfg(test)]
+mod wal_ring_v1_test;
 
 #[cfg(test)]
 mod wal_entry_test;
