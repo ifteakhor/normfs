@@ -58,12 +58,6 @@ if(FRAMAC)
         normfs_wal_header_peek_version
         normfs_wal_header_v1_roundtrip_holds)
 
-    # verify-crc32c proves the portable path only; the intrinsic fast paths are
-    # compiled out for the proof and covered by the differential test instead.
-    set(NORMFS_CRC32C_WP_FCTS
-        normfs_crc32c_portable
-        normfs_crc32c)
-
     set(NORMFS_WAL_ENTRY_WP_FCTS
         normfs_wal_entry_read_le32
         normfs_wal_entry_write_le32
@@ -73,8 +67,15 @@ if(FRAMAC)
         normfs_wal_entry_v1_id
         normfs_wal_entry_v1_iter_next)
 
+    # An empty fcts list drops -wp-fct entirely: WP then also schedules global
+    # lemma goals, which a function list silently excludes.
     function(normfs_add_wp_target target source fcts comment)
-        string(REPLACE ";" "," fcts_arg "${fcts}")
+        if(fcts STREQUAL "")
+            set(fct_args)
+        else()
+            string(REPLACE ";" "," fcts_arg "${fcts}")
+            set(fct_args -wp-fct ${fcts_arg})
+        endif()
         add_custom_target(${target}
             COMMAND ${FRAMAC}
                 -machdep gcc_x86_64
@@ -89,7 +90,7 @@ if(FRAMAC)
                 -wp-warn-key pedantic-assigns=inactive
                 -wp-no-warn-memory-model
                 -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include\ -I${NORMFS_UINTN_INCLUDE}\ ${ARGN}
-                -wp-fct ${fcts_arg}
+                ${fct_args}
                 ${source}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             COMMENT "${comment}"
@@ -99,8 +100,12 @@ if(FRAMAC)
 
     normfs_add_wp_target(verify-wal-header src/wal_header.c
         "${NORMFS_WAL_HEADER_WP_FCTS}" "WP: normfs V1 WAL header")
+    # NORMFS_CRC32C_PORTABLE_ONLY strips the intrinsic fast paths WP cannot
+    # interpret; the differential test covers them instead. That leaves only
+    # the two proved functions in the unit, so no allowlist is needed, and
+    # omitting it schedules the fold_extend lemma goal too.
     normfs_add_wp_target(verify-crc32c src/crc32c.c
-        "${NORMFS_CRC32C_WP_FCTS}" "WP: normfs CRC32C (portable path)"
+        "" "WP: normfs CRC32C (portable path)"
         -DNORMFS_CRC32C_PORTABLE_ONLY)
     normfs_add_wp_target(verify-wal-entry src/wal_entry.c
         "${NORMFS_WAL_ENTRY_WP_FCTS}" "WP: normfs V1 WAL entry")
