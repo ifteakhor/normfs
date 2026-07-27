@@ -25,3 +25,17 @@ tempfile = "3"
 criterion = "0.5"
 env_logger = { workspace = true }
 rand = "0.8"
+
+# V0-vs-V1 WAL benchmarks. Warmup and measurement windows default to 5s / 30s
+# and are overridable with WAL_BENCH_WARMUP / WAL_BENCH_MEASURE (seconds).
+[[bench]]
+name = "wal_v1_codec"
+harness = false
+
+[[bench]]
+name = "wal_v1_scan"
+harness = false
+
+[[bench]]
+name = "wal_v1_sizes"
+harness = false
