@@ -549,3 +549,30 @@ async fn test_channel_closed_unsubscribes() {
     // Note: We can't easily verify unsubscribe was called without accessing internal state
     // This test mainly ensures no panic occurs when sending to closed channel
 }
+
+#[tokio::test]
+async fn test_bounded_cache_drops_old_unacked_and_falls_back() {
+    // A tiny budget gives a single 256 KiB page. Three ~100 KiB records
+    // overflow it: with the first two unacked, the third forces the cache to
+    // drop them, so it holds only the newest and older ids fall back to file.
+    let mem = Arc::new(MemStore::new(300));
+    let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
+    let queue = resolver.resolve("bounded_queue");
+    mem.start_queue(&queue, None);
+
+    let big = Bytes::from(vec![7u8; 100 * 1024]);
+    let id0 = mem.enqueue(&queue, big.clone());
+    let _id1 = mem.enqueue(&queue, big.clone());
+    let id2 = mem.enqueue(&queue, big.clone());
+
+    // Newest id is cached and served from memory.
+    let (tx, mut rx) = mpsc::channel(10);
+    let hit = mem.read_full(&queue, id2.clone(), id2.clone(), 1, &tx).await;
+    assert!(hit.success, "newest entry should be served from memory");
+    assert_eq!(rx.try_recv().unwrap().id, id2);
+
+    // The oldest id was evicted, so the read reports a memory miss (file fallback).
+    let (tx2, _rx2) = mpsc::channel(10);
+    let miss = mem.read_full(&queue, id0.clone(), id2.clone(), 1, &tx2).await;
+    assert!(!miss.success, "evicted entry should miss memory and fall back to file");
+}

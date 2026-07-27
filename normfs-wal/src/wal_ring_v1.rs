@@ -39,12 +39,6 @@ struct CRingAppendResult {
 }
 
 #[repr(C)]
-struct CRingReusableResult {
-    index: usize,
-    found: c_int,
-}
-
-#[repr(C)]
 struct CRingSeekResult {
     page_index: usize,
     index: u32,
@@ -75,7 +69,6 @@ unsafe extern "C" {
         first_entry_id: u64,
     );
     fn normfs_wal_page_offset(page: *mut CWalPage, index: u32) -> u32;
-    fn normfs_wal_page_entry_id(page: *mut CWalPage, index: u32) -> u64;
     fn normfs_wal_page_pin(page: *mut CWalPage);
     fn normfs_wal_page_unpin(page: *mut CWalPage);
 
@@ -91,7 +84,6 @@ unsafe extern "C" {
         record: *const u8,
         record_size: u32,
     ) -> CRingAppendResult;
-    fn normfs_wal_ring_find_reusable(ring: *mut CWalRing) -> CRingReusableResult;
     fn normfs_wal_ring_rotate_to(ring: *mut CWalRing, index: usize);
     fn normfs_wal_ring_seek(ring: *mut CWalRing, entry_id: u64) -> CRingSeekResult;
     fn normfs_wal_ring_set_essential(ring: *mut CWalRing, min_essential_id: u64);
@@ -167,6 +159,9 @@ impl WalRing {
 
     /// Appends a record, rotating into a reusable page if the active one is
     /// full. Records larger than a page are reported as [`AppendOutcome::TooLarge`].
+    ///
+    /// Rotation prefers an empty page, then the oldest all-reclaimable page, so
+    /// the cached entries stay a contiguous id suffix.
     pub fn append(&mut self, record: &[u8]) -> AppendOutcome {
         if record.len() > u32::MAX as usize {
             return AppendOutcome::TooLarge;
@@ -178,15 +173,14 @@ impl WalRing {
         match first.status {
             RING_OK => return AppendOutcome::Cached(first.entry_id),
             RING_TOO_LARGE => return AppendOutcome::TooLarge,
-            _ => {}
+            _ => {} // NEEDS_ROTATE
         }
 
-        // Active page is full: find a reusable page and retry once.
-        let reusable = unsafe { normfs_wal_ring_find_reusable(self.ring.as_mut()) };
-        if reusable.found == 0 {
-            return AppendOutcome::Full;
-        }
-        unsafe { normfs_wal_ring_rotate_to(self.ring.as_mut(), reusable.index) };
+        let idx = match self.oldest_reclaimable_page() {
+            Some(k) => k,
+            None => return AppendOutcome::Full,
+        };
+        unsafe { normfs_wal_ring_rotate_to(self.ring.as_mut(), idx) };
 
         let second = unsafe { normfs_wal_ring_try_append(self.ring.as_mut(), ptr, size) };
         match second.status {
@@ -196,6 +190,101 @@ impl WalRing {
         }
     }
 
+    /// Picks the page to rotate into: an empty page if any, otherwise the
+    /// oldest page whose entries are all below the essential id.
+    fn oldest_reclaimable_page(&self) -> Option<usize> {
+        let min_essential = self.ring.min_essential_id;
+        let mut empty: Option<usize> = None;
+        let mut oldest: Option<(usize, u64)> = None;
+        for (k, p) in self.pages.iter().enumerate() {
+            if p.pin_count != 0 {
+                continue;
+            }
+            if p.count == 0 {
+                empty.get_or_insert(k);
+                continue;
+            }
+            if p.last_entry_id < min_essential
+                && oldest.is_none_or(|(_, fid)| p.first_entry_id < fid)
+            {
+                oldest = Some((k, p.first_entry_id));
+            }
+        }
+        empty.or(oldest.map(|(k, _)| k))
+    }
+
+    /// Resets the ring to empty, with `first_entry_id` as the next id to cache.
+    /// Used to resync the cache after an entry could not be cached.
+    pub fn reinit(&mut self, first_entry_id: u64) {
+        let page_size = self.page_size;
+        let n = self.pages.len();
+        for k in 0..n {
+            let buf = self.buffers[k].as_mut_ptr();
+            unsafe {
+                normfs_wal_page_init(&mut self.pages[k], buf, page_size, k as u64, first_entry_id);
+            }
+        }
+        let pages_ptr = self.pages.as_mut_ptr();
+        unsafe {
+            normfs_wal_ring_init(self.ring.as_mut(), pages_ptr, n, page_size, first_entry_id);
+        }
+    }
+
+    /// The lowest entry id currently cached, or `None` if the ring is empty.
+    pub fn min_cached_id(&self) -> Option<u64> {
+        self.pages
+            .iter()
+            .filter(|p| p.count > 0)
+            .map(|p| p.first_entry_id)
+            .min()
+    }
+
+    /// Whether the ring holds no cached entries.
+    pub fn is_empty(&self) -> bool {
+        self.pages.iter().all(|p| p.count == 0)
+    }
+
+    /// All cached records with id in `[start, end]`, in id order.
+    pub fn collect_range(&self, start: u64, end: u64) -> Vec<(u64, Vec<u8>)> {
+        let mut out: Vec<(u64, Vec<u8>)> = Vec::new();
+        for (k, p) in self.pages.iter().enumerate() {
+            if p.count == 0 {
+                continue;
+            }
+            let pfirst = p.first_entry_id;
+            let plast = p.first_entry_id + p.count as u64 - 1;
+            if plast < start || pfirst > end {
+                continue;
+            }
+            let lo = start.max(pfirst);
+            let hi = end.min(plast);
+            for id in lo..=hi {
+                let index = (id - pfirst) as u32;
+                if let Some(rec) = self.record_at(k, index) {
+                    out.push((id, rec.to_vec()));
+                }
+            }
+        }
+        out.sort_by_key(|(id, _)| *id);
+        out
+    }
+
+    // Reads the record of entry `index` on page `page_index`. The C calls are
+    // proven `assigns \nothing`, so casting the shared page reference to a
+    // mutable pointer for FFI is sound.
+    fn record_at(&self, page_index: usize, index: u32) -> Option<&[u8]> {
+        let page = &self.pages[page_index] as *const CWalPage as *mut CWalPage;
+        let offset = unsafe { normfs_wal_page_offset(page, index) as usize };
+        let buffer = &self.buffers[page_index];
+        let framed = &buffer[offset..];
+        let decoded = unsafe { normfs_wal_entry_v1_decode(framed.as_ptr(), framed.len()) };
+        if decoded.status != ENTRY_OK {
+            return None;
+        }
+        let s = offset + decoded.record_offset;
+        Some(&buffer[s..s + decoded.record_size])
+    }
+
     /// Advances the reclaim boundary: entries with id `< min_essential_id` may
     /// have their pages reused.
     pub fn set_essential(&mut self, min_essential_id: u64) {
@@ -203,8 +292,9 @@ impl WalRing {
     }
 
     /// Locates the entry with `entry_id`, returning its `(page_index, index)`.
-    pub fn seek(&mut self, entry_id: u64) -> Option<(usize, u32)> {
-        let r = unsafe { normfs_wal_ring_seek(self.ring.as_mut(), entry_id) };
+    pub fn seek(&self, entry_id: u64) -> Option<(usize, u32)> {
+        let ring = &*self.ring as *const CWalRing as *mut CWalRing;
+        let r = unsafe { normfs_wal_ring_seek(ring, entry_id) };
         if r.found != 0 {
             Some((r.page_index, r.index))
         } else {
@@ -212,29 +302,13 @@ impl WalRing {
         }
     }
 
-    /// The entry id of the `index`-th entry of page `page_index`.
-    pub fn entry_id(&mut self, page_index: usize, index: u32) -> u64 {
-        unsafe { normfs_wal_page_entry_id(&mut self.pages[page_index], index) }
-    }
-
-    /// Returns the record bytes of the entry at `(page_index, index)`, borrowed
-    /// out of the page buffer, or `None` if the entry does not decode.
-    pub fn record(&mut self, page_index: usize, index: u32) -> Option<&[u8]> {
-        let offset = unsafe {
-            normfs_wal_page_offset(&mut self.pages[page_index], index) as usize
-        };
-        let buffer = &self.buffers[page_index];
-        let framed = &buffer[offset..];
-        let decoded = unsafe { normfs_wal_entry_v1_decode(framed.as_ptr(), framed.len()) };
-        if decoded.status != ENTRY_OK {
-            return None;
-        }
-        let start = offset + decoded.record_offset;
-        Some(&buffer[start..start + decoded.record_size])
+    /// Returns the record bytes of the entry at `(page_index, index)`.
+    pub fn record(&self, page_index: usize, index: u32) -> Option<&[u8]> {
+        self.record_at(page_index, index)
     }
 
     /// Convenience: seek then read the record for `entry_id`.
-    pub fn get(&mut self, entry_id: u64) -> Option<&[u8]> {
+    pub fn get(&self, entry_id: u64) -> Option<&[u8]> {
         let (page_index, index) = self.seek(entry_id)?;
         self.record(page_index, index)
     }
@@ -262,5 +336,7 @@ impl WalRing {
 
 // The raw pointers the C ring holds refer only to this value's own heap
 // allocations, which are never shared, so the ring may cross threads under an
-// external lock.
+// external lock. Shared (`&self`) access only calls C functions proven to
+// write nothing, so concurrent reads are safe.
 unsafe impl Send for WalRing {}
+unsafe impl Sync for WalRing {}

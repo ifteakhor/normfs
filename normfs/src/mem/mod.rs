@@ -4,7 +4,23 @@ use tokio::sync::mpsc::Sender;
 
 use bytes::Bytes;
 use normfs_types::{DataSource, QueueId, ReadEntry, SubscriberCallback};
+use normfs_wal::{AppendOutcome, WalRing};
 use uintn::UintN;
+
+// Geometry of the in-memory paged store. A record larger than a page is not
+// cached and is served from file; the ring caps a queue's cache at
+// MEM_MAX_PAGES pages.
+const MEM_PAGE_SIZE: usize = 256 * 1024;
+const MEM_MAX_PAGES: usize = 64;
+
+fn ring_page_count(max_memory_usage: usize) -> usize {
+    (max_memory_usage / MEM_PAGE_SIZE).clamp(1, MEM_MAX_PAGES)
+}
+
+// Entry ids are sequential counters that fit u64 for any real queue.
+fn id_to_u64(id: &UintN) -> u64 {
+    id.to_u64().unwrap_or(u64::MAX)
+}
 
 /// Result of a memory read operation
 #[derive(Debug)]
@@ -32,17 +48,14 @@ pub struct MemStore {
     max_memory_usage: usize,
 }
 
-struct Entry {
-    id: UintN,
-    data: Bytes,
-}
-
 struct Inner {
-    entries: Vec<Entry>,
+    // The paged store, allocated on first enqueue. It holds a contiguous suffix
+    // of recent entries; older acked entries are reclaimed and served from file.
+    ring: Option<WalRing>,
+    // The last enqueued id. It persists beyond the cache, so it is tracked
+    // separately from the ring.
     last_id: Option<UintN>,
-    first_id: Option<UintN>,
     last_acked_id: Option<UintN>,
-    memory_usage: usize,
 }
 
 struct MemQueue {
@@ -56,15 +69,42 @@ impl MemQueue {
     pub fn new(last_id: Option<UintN>, max_memory_usage: usize) -> Self {
         MemQueue {
             inner: RwLock::new(Inner {
-                entries: Vec::new(),
+                ring: None,
                 last_id,
-                first_id: None,
                 last_acked_id: None,
-                memory_usage: 0,
             }),
             max_memory_usage,
             subscribers: Mutex::new(HashMap::new()),
             next_subscriber_id: Mutex::new(0),
+        }
+    }
+
+    // Caches `data` under `id_u64`, allocating the ring on first use and
+    // resyncing it when a previous entry could not be cached. A record that
+    // does not fit a page (TooLarge), or one that arrives when no page can be
+    // reclaimed (Full), is left to the file: the ring resumes caching from the
+    // next id so its contents stay a contiguous suffix.
+    fn cache_append(&self, inner: &mut Inner, id_u64: u64, data: &[u8]) {
+        let max_memory = self.max_memory_usage;
+        let ring = inner.ring.get_or_insert_with(|| {
+            WalRing::new(ring_page_count(max_memory), MEM_PAGE_SIZE, id_u64)
+        });
+
+        if ring.next_entry_id() != id_u64 {
+            ring.reinit(id_u64);
+        }
+
+        match ring.append(data) {
+            AppendOutcome::Cached(_) => {}
+            AppendOutcome::Full => {
+                ring.reinit(id_u64);
+                if !matches!(ring.append(data), AppendOutcome::Cached(_)) {
+                    ring.reinit(id_u64.wrapping_add(1));
+                }
+            }
+            AppendOutcome::TooLarge => {
+                ring.reinit(id_u64.wrapping_add(1));
+            }
         }
     }
 
@@ -75,28 +115,16 @@ impl MemQueue {
             .as_ref()
             .map_or(UintN::zero(), |id| id.increment());
 
-        if inner.first_id.is_none() {
-            inner.first_id = Some(id.clone());
-        }
-        inner.last_id = Some(id.clone());
-        let data_len = data.len();
-
         let subscribers_data = if self.subscribers.lock().unwrap().is_empty() {
             None
         } else {
             Some(data.clone())
         };
 
-        inner.entries.push(Entry {
-            id: id.clone(),
-            data,
-        });
-        inner.memory_usage += data_len;
+        self.cache_append(&mut inner, id_to_u64(&id), &data);
+        inner.last_id = Some(id.clone());
 
-        log::debug!(target: "normfs-mem", "Enqueued entry - ID: {}, Data size: {} bytes, Memory usage: {} bytes",
-            id, data_len, inner.memory_usage);
-
-        self.cleanup_unlocked(&mut inner);
+        log::debug!(target: "normfs-mem", "Enqueued entry - ID: {}, Data size: {} bytes", id, data.len());
 
         drop(inner);
 
@@ -119,10 +147,6 @@ impl MemQueue {
             .as_ref()
             .map_or(UintN::zero(), |id| id.increment());
 
-        if inner.first_id.is_none() {
-            inner.first_id = Some(next_id.clone());
-        }
-
         let has_subscribers = !self.subscribers.lock().unwrap().is_empty();
         let mut entries_with_ids = if has_subscribers {
             Vec::with_capacity(entries.len())
@@ -132,25 +156,16 @@ impl MemQueue {
 
         for data in entries {
             ids.push(next_id.clone());
-            let data_len = data.len();
-
             if has_subscribers {
                 entries_with_ids.push((next_id.clone(), data.clone()));
             }
-
-            inner.entries.push(Entry {
-                id: next_id.clone(),
-                data,
-            });
-            inner.memory_usage += data_len;
+            self.cache_append(&mut inner, id_to_u64(&next_id), &data);
             next_id = next_id.increment();
         }
 
         if let Some(last_id) = ids.last() {
             inner.last_id = Some(last_id.clone());
         }
-
-        self.cleanup_unlocked(&mut inner);
 
         drop(inner);
 
@@ -170,39 +185,11 @@ impl MemQueue {
         if inner.last_acked_id.as_ref().is_none_or(|last| id > last) {
             log::debug!(target: "normfs-mem", "Acknowledging entry - ID: {}", id);
             inner.last_acked_id = Some(id.clone());
-        }
-
-        self.cleanup_unlocked(&mut inner);
-    }
-
-    fn cleanup_unlocked(&self, inner: &mut std::sync::RwLockWriteGuard<Inner>) {
-        if inner.memory_usage <= self.max_memory_usage {
-            return;
-        }
-
-        if let Some(last_acked_id) = &inner.last_acked_id {
-            let mut to_remove = 0;
-            for entry in &inner.entries {
-                if entry.id <= *last_acked_id {
-                    to_remove += 1;
-                } else {
-                    break;
-                }
-            }
-
-            if to_remove > 0 {
-                let memory_removed: usize = inner
-                    .entries
-                    .iter()
-                    .take(to_remove)
-                    .map(|e| e.data.len())
-                    .sum();
-                inner.entries.drain(0..to_remove);
-                inner.memory_usage -= memory_removed;
-                inner.first_id = inner.entries.first().map(|e| e.id.clone());
-
-                log::debug!(target: "normfs-mem", "Cleaned up {} entries, freed {} bytes, remaining memory: {} bytes",
-                    to_remove, memory_removed, inner.memory_usage);
+            // Entries at or below the acked id may now be reclaimed; the ring
+            // reuses their pages on the next append that needs space.
+            let essential = id_to_u64(id).saturating_add(1);
+            if let Some(ring) = inner.ring.as_mut() {
+                ring.set_essential(essential);
             }
         }
     }
@@ -242,33 +229,39 @@ impl MemQueue {
             }
 
             // Check if entries are actually loaded in memory
-            let mem_start_id = match &inner.first_id {
-                Some(id) => id,
-                None => return MemReadResult::fail(), // Entries not in memory, read from files
+            let ring = match &inner.ring {
+                Some(ring) if !ring.is_empty() => ring,
+                _ => return MemReadResult::fail(), // Not in memory, read from files
+            };
+
+            let mem_start_id = match ring.min_cached_id() {
+                Some(m) => UintN::from(m),
+                None => return MemReadResult::fail(),
             };
 
             // If start_id is before what's in memory, need to read from files
-            if start_id < *mem_start_id {
+            if start_id < mem_start_id {
                 return MemReadResult::fail();
             }
 
             let mut current_id = start_id.clone();
             let mut results = Vec::new();
 
-            for entry in inner.entries.iter().skip_while(|e| e.id < start_id) {
-                if entry.id > end_id {
+            for (id_u64, data) in ring.collect_range(id_to_u64(&start_id), id_to_u64(&end_id)) {
+                let id = UintN::from(id_u64);
+                if id > end_id {
                     break;
                 }
 
-                while current_id < entry.id {
+                while current_id < id {
                     current_id = current_id.step_by(step);
                     if current_id > end_id {
                         break;
                     }
                 }
 
-                if current_id == entry.id {
-                    results.push((entry.id.clone(), entry.data.clone()));
+                if current_id == id {
+                    results.push((id.clone(), Bytes::from(data)));
                     current_id = current_id.step_by(step);
                 }
             }
@@ -324,19 +317,30 @@ impl MemQueue {
                 last_id.sub(&offset).unwrap_or(UintN::zero())
             };
 
-            let mem_start_id = if let Some(id) = &inner.first_id {
-                id
-            } else {
-                // No entries in memory yet (e.g. after recovery), but last_id exists.
-                // Return computed start_id so caller can fall back to file lookup.
-                return MemReadResult {
-                    success: false,
-                    start_id: Some(start_id),
-                    subscription_id: None,
-                };
+            let ring = match &inner.ring {
+                Some(ring) if !ring.is_empty() => ring,
+                _ => {
+                    // Nothing in memory yet; return start_id for file fallback.
+                    return MemReadResult {
+                        success: false,
+                        start_id: Some(start_id),
+                        subscription_id: None,
+                    };
+                }
             };
 
-            if start_id < *mem_start_id {
+            let mem_start_id = match ring.min_cached_id() {
+                Some(m) => UintN::from(m),
+                None => {
+                    return MemReadResult {
+                        success: false,
+                        start_id: Some(start_id),
+                        subscription_id: None,
+                    };
+                }
+            };
+
+            if start_id < mem_start_id {
                 return MemReadResult {
                     success: false,
                     start_id: Some(start_id),
@@ -344,21 +348,21 @@ impl MemQueue {
                 };
             }
 
+            let last = inner.last_id.as_ref().map(id_to_u64).unwrap_or(u64::MAX);
             let mut current_id = start_id.clone();
             let mut entries = Vec::new();
             let mut count = 0u64;
 
-            for entry in inner.entries.iter().skip_while(|e| e.id < start_id) {
+            for (id_u64, data) in ring.collect_range(id_to_u64(&start_id), last) {
                 if limit > 0 && count >= limit {
                     break;
                 }
-
-                while current_id < entry.id {
+                let id = UintN::from(id_u64);
+                while current_id < id {
                     current_id = current_id.step_by(step);
                 }
-
-                if current_id == entry.id {
-                    entries.push((entry.id.clone(), entry.data.clone()));
+                if current_id == id {
+                    entries.push((id.clone(), Bytes::from(data)));
                     current_id = current_id.step_by(step);
                     count += 1;
                 }
@@ -407,29 +411,30 @@ impl MemQueue {
         let (entries_to_send, last_sent_id) = {
             let inner = self.inner.read().unwrap();
 
-            if let Some(mem_start_id) = &inner.first_id {
-                if start_id < *mem_start_id {
-                    return MemReadResult::fail();
-                }
-
-                let mut current_id = start_id.clone();
-                let mut entries = Vec::new();
-
-                for entry in inner.entries.iter().skip_while(|e| e.id < start_id) {
-                    while current_id < entry.id {
-                        current_id = current_id.step_by(step);
+            match &inner.ring {
+                Some(ring) if !ring.is_empty() => {
+                    if let Some(mem_start) = ring.min_cached_id() {
+                        if start_id < UintN::from(mem_start) {
+                            return MemReadResult::fail();
+                        }
                     }
-
-                    if current_id == entry.id {
-                        entries.push((entry.id.clone(), entry.data.clone()));
-                        current_id = current_id.step_by(step);
+                    let last = inner.last_id.as_ref().map(id_to_u64).unwrap_or(u64::MAX);
+                    let mut current_id = start_id.clone();
+                    let mut entries = Vec::new();
+                    for (id_u64, data) in ring.collect_range(id_to_u64(&start_id), last) {
+                        let id = UintN::from(id_u64);
+                        while current_id < id {
+                            current_id = current_id.step_by(step);
+                        }
+                        if current_id == id {
+                            entries.push((id.clone(), Bytes::from(data)));
+                            current_id = current_id.step_by(step);
+                        }
                     }
+                    let last_id = entries.last().map(|(id, _)| id.clone());
+                    (entries, last_id)
                 }
-
-                let last_id = entries.last().map(|(id, _)| id.clone());
-                (entries, last_id)
-            } else {
-                (Vec::new(), None)
+                _ => (Vec::new(), None),
             }
         };
 
@@ -565,34 +570,38 @@ impl MemQueue {
                 last_id.sub(&offset).unwrap_or(UintN::zero())
             };
 
-            let mem_start_id = if let Some(id) = &inner.first_id {
-                id
-            } else {
-                return MemReadResult {
-                    success: false,
-                    start_id: Some(start_id),
-                    subscription_id: None,
-                };
+            let ring = match &inner.ring {
+                Some(ring) if !ring.is_empty() => ring,
+                _ => {
+                    return MemReadResult {
+                        success: false,
+                        start_id: Some(start_id),
+                        subscription_id: None,
+                    };
+                }
             };
 
-            if start_id < *mem_start_id {
-                return MemReadResult {
-                    success: false,
-                    start_id: Some(start_id),
-                    subscription_id: None,
-                };
+            if let Some(mem_start) = ring.min_cached_id() {
+                if start_id < UintN::from(mem_start) {
+                    return MemReadResult {
+                        success: false,
+                        start_id: Some(start_id),
+                        subscription_id: None,
+                    };
+                }
             }
 
+            let last = inner.last_id.as_ref().map(id_to_u64).unwrap_or(u64::MAX);
             let mut current_id = start_id.clone();
             let mut entries = Vec::new();
 
-            for entry in inner.entries.iter().skip_while(|e| e.id < start_id) {
-                while current_id < entry.id {
+            for (id_u64, data) in ring.collect_range(id_to_u64(&start_id), last) {
+                let id = UintN::from(id_u64);
+                while current_id < id {
                     current_id = current_id.step_by(step);
                 }
-
-                if current_id == entry.id {
-                    entries.push((entry.id.clone(), entry.data.clone()));
+                if current_id == id {
+                    entries.push((id.clone(), Bytes::from(data)));
                     current_id = current_id.step_by(step);
                 }
             }
