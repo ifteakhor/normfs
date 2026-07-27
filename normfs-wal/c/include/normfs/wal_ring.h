@@ -1,0 +1,214 @@
+#ifndef NORMFS_WAL_RING_H
+#define NORMFS_WAL_RING_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "normfs/wal_page.h"
+
+/*
+ * A ring of WAL pages. Rust allocates one byte buffer per page, initialises
+ * each page descriptor (normfs_wal_page_init) on its own buffer, and hands the
+ * array to normfs_wal_ring_init; C never allocates.
+ *
+ * The ring exposes primitives that each touch a single page, so their frames
+ * stay precise; Rust sequences them:
+ *
+ *   r = try_append(record)
+ *   if r.status == NEEDS_ROTATE:
+ *       f = find_reusable()
+ *       if !f.found: buffer is full, flush/wait
+ *       rotate_to(f.index)
+ *       r = try_append(record)     // an empty page always has room
+ *
+ * Entry ids run sequentially across pages; the id of the next entry is
+ * next_entry_id. Distinct pages own disjoint buffers, so each page keeps its
+ * own page_wf independently.
+ */
+
+enum normfs_wal_ring_status {
+	NORMFS_WAL_RING_OK = 0,
+	NORMFS_WAL_RING_NEEDS_ROTATE = 1,  /* active page is full */
+	NORMFS_WAL_RING_ERR_TOO_LARGE = 2  /* record does not fit an empty page */
+};
+
+struct normfs_wal_ring {
+	struct normfs_wal_page *pages;
+	size_t page_count;
+	size_t page_size;
+	size_t active;
+	uint64_t next_entry_id;
+	uint64_t next_page_id;
+	uint64_t min_essential_id;
+};
+
+struct normfs_wal_ring_append_result {
+	uint64_t entry_id;
+	size_t page_index;
+	int status;
+};
+
+struct normfs_wal_ring_reusable_result {
+	size_t index;
+	int found;
+};
+
+struct normfs_wal_ring_seek_result {
+	size_t page_index;
+	uint32_t index;
+	int found;
+};
+
+/*@ axiomatic NormfsWalRing {
+      predicate normfs_wal_ring_pages_wf{L}(struct normfs_wal_ring *r) =
+        \forall integer k; 0 <= k < r->page_count ==>
+          normfs_wal_page_wf(&r->pages[k]);
+
+      // Each page's cap matches page_size (so an empty page fits any record
+      // that fits page_size), and the active page continues the id run.
+      predicate normfs_wal_ring_scalar_wf{L}(struct normfs_wal_ring *r) =
+        r->page_count >= 1 &&
+        r->page_size >= NORMFS_WAL_ENTRY_V1_MIN_SIZE + 4 &&
+        r->page_size <= 0xFFFFFFFF &&
+        r->active < r->page_count &&
+        (\forall integer k; 0 <= k < r->page_count ==>
+           r->pages[k].cap == r->page_size) &&
+        r->pages[r->active].first_entry_id + (integer)r->pages[r->active].count
+          == r->next_entry_id;
+
+      // Descriptors, the ring, and each page buffer are pairwise disjoint, so a
+      // write to one page's buffer leaves every other page untouched.
+      predicate normfs_wal_ring_sep{L}(struct normfs_wal_ring *r) =
+        \separated(r, r->pages + (0 .. r->page_count - 1)) &&
+        (\forall integer k; 0 <= k < r->page_count ==>
+           \separated(&r->pages[k], r->pages[k].buf + (0 .. r->page_size - 1)) &&
+           \separated(r, r->pages[k].buf + (0 .. r->page_size - 1)) &&
+           \separated(r->pages + (0 .. r->page_count - 1),
+                      r->pages[k].buf + (0 .. r->page_size - 1))) &&
+        (\forall integer j, k; 0 <= j < r->page_count && 0 <= k < r->page_count &&
+           j != k ==>
+           \separated(r->pages[j].buf + (0 .. r->page_size - 1),
+                      r->pages[k].buf + (0 .. r->page_size - 1)));
+
+      predicate normfs_wal_ring_wf{L}(struct normfs_wal_ring *r) =
+        \valid(r) &&
+        \valid(r->pages + (0 .. r->page_count - 1)) &&
+        normfs_wal_ring_scalar_wf(r) &&
+        normfs_wal_ring_sep(r) &&
+        normfs_wal_ring_pages_wf(r);
+    }
+*/
+
+/*@ requires \valid(ring);
+    requires page_count >= 1;
+    requires page_size >= NORMFS_WAL_ENTRY_V1_MIN_SIZE + 4;
+    requires page_size <= 0xFFFFFFFF;
+    requires \valid(pages + (0 .. page_count - 1));
+    requires \forall integer k; 0 <= k < page_count ==>
+               normfs_wal_page_wf(&pages[k]) && pages[k].cap == page_size &&
+               pages[k].count == 0;
+    requires pages[0].first_entry_id == first_entry_id;
+    requires \separated(ring, pages + (0 .. page_count - 1));
+    requires \forall integer k; 0 <= k < page_count ==>
+               \separated(&pages[k], pages[k].buf + (0 .. page_size - 1)) &&
+               \separated(ring, pages[k].buf + (0 .. page_size - 1)) &&
+               \separated(pages + (0 .. page_count - 1),
+                          pages[k].buf + (0 .. page_size - 1));
+    requires \forall integer j, k; 0 <= j < page_count && 0 <= k < page_count &&
+               j != k ==>
+               \separated(pages[j].buf + (0 .. page_size - 1),
+                          pages[k].buf + (0 .. page_size - 1));
+    assigns ring->pages, ring->page_count, ring->page_size, ring->active,
+            ring->next_entry_id, ring->next_page_id, ring->min_essential_id;
+    ensures normfs_wal_ring_wf(ring);
+    ensures ring->active == 0 && ring->next_entry_id == first_entry_id;
+*/
+void normfs_wal_ring_init(struct normfs_wal_ring *ring,
+    struct normfs_wal_page *pages, size_t page_count, size_t page_size,
+    uint64_t first_entry_id);
+
+/* This contract is the intended specification, but try_append (like
+ * rotate_to) is verified by the WalRing Rust tests rather than WP:
+ * re-establishing every page's page_wf after a mutation is a nested-quantifier
+ * frame over the offset tables that the automatic provers do not discharge.
+ * Its callee page_append is fully proven. */
+/*@ requires normfs_wal_ring_wf(ring);
+    requires ring->next_entry_id < 0xFFFFFFFFFFFFFFFF;
+    requires record_size == 0 || \valid_read(record + (0 .. record_size - 1));
+    requires record_size == 0 ||
+             \separated(ring->pages[ring->active].buf +
+                          (0 .. ring->page_size - 1),
+                        record + (0 .. record_size - 1));
+    requires \separated(ring, ring->pages[ring->active].buf +
+                                (0 .. ring->page_size - 1));
+    assigns ring->next_entry_id,
+            ring->pages[ring->active].used_bytes,
+            ring->pages[ring->active].count,
+            ring->pages[ring->active].last_entry_id,
+            ring->pages[ring->active].buf[0 .. ring->page_size - 1];
+    ensures normfs_wal_ring_wf(ring);
+    ensures \result.status == NORMFS_WAL_RING_OK ||
+            \result.status == NORMFS_WAL_RING_NEEDS_ROTATE ||
+            \result.status == NORMFS_WAL_RING_ERR_TOO_LARGE;
+    ensures \result.status == NORMFS_WAL_RING_OK ==>
+            \result.entry_id == \old(ring->next_entry_id) &&
+            ring->next_entry_id == \old(ring->next_entry_id) + 1 &&
+            \result.page_index == ring->active;
+    ensures \result.status == NORMFS_WAL_RING_ERR_TOO_LARGE ==>
+            normfs_wal_entry_v1_size_logic(record_size) + 4 > ring->page_size;
+    ensures \result.status != NORMFS_WAL_RING_OK ==>
+            ring->next_entry_id == \old(ring->next_entry_id) &&
+            ring->active == \old(ring->active);
+*/
+struct normfs_wal_ring_append_result
+normfs_wal_ring_try_append(struct normfs_wal_ring *ring, const uint8_t *record,
+    uint32_t record_size);
+
+/*@ requires normfs_wal_ring_wf(ring);
+    assigns \nothing;
+    ensures \result.found != 0 ==>
+            \result.index < ring->page_count &&
+            normfs_wal_page_is_reusable(&ring->pages[\result.index],
+                                        ring->min_essential_id);
+*/
+struct normfs_wal_ring_reusable_result
+normfs_wal_ring_find_reusable(struct normfs_wal_ring *ring);
+
+/* Like try_append, rotate_to is behavior-tested rather than WP-verified (see
+ * the note on try_append); its callee page_reset is fully proven. */
+/*@ requires normfs_wal_ring_wf(ring);
+    requires index < ring->page_count;
+    requires normfs_wal_page_is_reusable(&ring->pages[index],
+                                         ring->min_essential_id);
+    assigns ring->active, ring->next_page_id,
+            ring->pages[index].used_bytes,
+            ring->pages[index].count,
+            ring->pages[index].page_id,
+            ring->pages[index].first_entry_id,
+            ring->pages[index].last_entry_id;
+    ensures normfs_wal_ring_wf(ring);
+    ensures ring->active == index && ring->pages[index].count == 0;
+    ensures ring->pages[index].first_entry_id == \old(ring->next_entry_id);
+    ensures ring->next_entry_id == \old(ring->next_entry_id);
+*/
+void normfs_wal_ring_rotate_to(struct normfs_wal_ring *ring, size_t index);
+
+/*@ requires normfs_wal_ring_wf(ring);
+    assigns \nothing;
+    ensures \result.found != 0 ==>
+            \result.page_index < ring->page_count &&
+            \result.index < ring->pages[\result.page_index].count &&
+            ring->pages[\result.page_index].first_entry_id +
+              (integer)\result.index == entry_id;
+*/
+struct normfs_wal_ring_seek_result
+normfs_wal_ring_seek(struct normfs_wal_ring *ring, uint64_t entry_id);
+
+/*@ requires \valid(ring);
+    assigns ring->min_essential_id;
+    ensures ring->min_essential_id == min_essential_id;
+*/
+void normfs_wal_ring_set_essential(struct normfs_wal_ring *ring,
+    uint64_t min_essential_id);
+
+#endif /* NORMFS_WAL_RING_H */

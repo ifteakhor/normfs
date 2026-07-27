@@ -14,6 +14,8 @@ add_library(normfs_wal_c STATIC
     src/wal_header.c
     src/crc32c.c
     src/wal_entry.c
+    src/wal_page.c
+    src/wal_ring.c
 )
 target_include_directories(normfs_wal_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -67,6 +69,29 @@ if(FRAMAC)
         normfs_wal_entry_v1_id
         normfs_wal_entry_v1_iter_next)
 
+    set(NORMFS_WAL_PAGE_WP_FCTS
+        normfs_uintn_le32_read
+        normfs_uintn_le32_write
+        normfs_wal_page_init
+        normfs_wal_page_reset
+        normfs_wal_page_append
+        normfs_wal_page_offset
+        normfs_wal_page_entry_id
+        normfs_wal_page_find
+        normfs_wal_page_pin
+        normfs_wal_page_unpin
+        normfs_wal_page_reusable)
+
+    # try_append and rotate_to are excluded: re-establishing every page's
+    # page_wf after a mutation is a nested-quantifier frame over the offset
+    # tables that the automatic provers do not discharge. Both are covered by
+    # the WalRing Rust tests; the read and setup primitives are proven here.
+    set(NORMFS_WAL_RING_WP_FCTS
+        normfs_wal_ring_init
+        normfs_wal_ring_set_essential
+        normfs_wal_ring_find_reusable
+        normfs_wal_ring_seek)
+
     # An empty fcts list drops -wp-fct entirely: WP then also schedules global
     # lemma goals, which a function list silently excludes.
     function(normfs_add_wp_target target source fcts comment)
@@ -109,7 +134,12 @@ if(FRAMAC)
         "" "WP: normfs CRC32C (table path, dispatcher)")
     normfs_add_wp_target(verify-wal-entry src/wal_entry.c
         "${NORMFS_WAL_ENTRY_WP_FCTS}" "WP: normfs V1 WAL entry")
+    normfs_add_wp_target(verify-wal-page "src/wal_page.c;src/wal_entry.c"
+        "${NORMFS_WAL_PAGE_WP_FCTS}" "WP: normfs V1 WAL page")
+    normfs_add_wp_target(verify-wal-ring "src/wal_ring.c;src/wal_page.c;src/wal_entry.c"
+        "${NORMFS_WAL_RING_WP_FCTS}" "WP: normfs V1 WAL ring")
 
     add_custom_target(verify)
-    add_dependencies(verify verify-wal-header verify-crc32c verify-wal-entry)
+    add_dependencies(verify verify-wal-header verify-crc32c verify-wal-entry
+        verify-wal-page verify-wal-ring)
 endif()
