@@ -14,8 +14,13 @@
  * callers always seed with 0.
  *
  * normfs_crc32c dispatches to a CPU fast path where one is available.
- * normfs_crc32c_portable is the table driven reference and is the version
- * carrying the Frama-C contracts.
+ * normfs_crc32c_portable is the table driven reference.
+ *
+ * Both carry the same Frama-C contract and both are proven, the dispatcher
+ * against an assumed contract for the intrinsic path, which no prover can
+ * discharge and which test_crc32c.c checks against the table on every build.
+ * The table is not a fallback for exotic targets, it is the definition: the
+ * logic below is what "CRC32C" means to every other proof in the tree.
  */
 
 extern const uint32_t normfs_crc32c_table[256];

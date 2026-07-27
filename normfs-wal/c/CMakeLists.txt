@@ -100,13 +100,13 @@ if(FRAMAC)
 
     normfs_add_wp_target(verify-wal-header src/wal_header.c
         "${NORMFS_WAL_HEADER_WP_FCTS}" "WP: normfs V1 WAL header")
-    # NORMFS_CRC32C_PORTABLE_ONLY strips the intrinsic fast paths WP cannot
-    # interpret; the differential test covers them instead. That leaves only
-    # the two proved functions in the unit, so no allowlist is needed, and
+    # Under __FRAMAC__ the intrinsic fast path has its contract but no body, so
+    # WP assumes it and proves the dispatcher that actually ships against it;
+    # the differential test is what covers that one assumption. Only the two
+    # proved functions have bodies in the unit, so no allowlist is needed, and
     # omitting it schedules the fold_extend lemma goal too.
     normfs_add_wp_target(verify-crc32c src/crc32c.c
-        "" "WP: normfs CRC32C (portable path)"
-        -DNORMFS_CRC32C_PORTABLE_ONLY)
+        "" "WP: normfs CRC32C (table path, dispatcher)")
     normfs_add_wp_target(verify-wal-entry src/wal_entry.c
         "${NORMFS_WAL_ENTRY_WP_FCTS}" "WP: normfs V1 WAL entry")
 

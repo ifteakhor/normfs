@@ -1,6 +1,16 @@
 #include "normfs/crc32c.h"
 
-#if !defined(NORMFS_CRC32C_PORTABLE_ONLY) && \
+/*
+ * Frama-C sees the fast path's contract but not its body: the intrinsics have
+ * no meaning it can interpret. The contract is therefore assumed, and the
+ * dispatcher below is proven against it, so what WP establishes is the code
+ * that actually runs rather than an unused portable twin. The assumption is
+ * exactly "the CRC32 instruction computes CRC32C as its ISA specifies", and
+ * test_crc32c.c checks it against the proven table path on every build.
+ */
+#if defined(__FRAMAC__)
+#define NORMFS_CRC32C_HW 1
+#elif !defined(NORMFS_CRC32C_PORTABLE_ONLY) && \
     defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 
 #if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
@@ -11,6 +21,24 @@
 #define NORMFS_CRC32C_STEP1(c, b) __crc32cb((c), (b))
 #include <arm_acle.h>
 #include <string.h>
+/*
+ * CRC32 is optional in ARMv8.0 and only mandatory from ARMv8.1, so a build for
+ * generic armv8-a leaves __ARM_FEATURE_CRC32 undefined and would otherwise
+ * silently take the table path on hardware that has the instruction. Compile
+ * the fast path for +crc anyway and select it from AT_HWCAP at runtime.
+ */
+#elif defined(__aarch64__) && defined(__linux__) && \
+    (defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 11))
+#define NORMFS_CRC32C_ARM 1
+#define NORMFS_CRC32C_ARM_RUNTIME 1
+#define NORMFS_CRC32C_HW 1
+#define NORMFS_CRC32C_HW_TARGET __attribute__((target("+crc")))
+#define NORMFS_CRC32C_STEP8(c, w) __crc32cd((c), (w))
+#define NORMFS_CRC32C_STEP1(c, b) __crc32cb((c), (b))
+#include <arm_acle.h>
+#include <asm/hwcap.h>
+#include <string.h>
+#include <sys/auxv.h>
 #elif defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #define NORMFS_CRC32C_X86 1
 #define NORMFS_CRC32C_HW 1
@@ -20,6 +48,20 @@
 #include <nmmintrin.h>
 #include <string.h>
 #endif
+
+#endif
+
+#if defined(NORMFS_CRC32C_HW)
+
+/* Zero until the constructor below runs, so a call from another translation
+ * unit's constructor takes the portable path rather than an absent one. */
+extern int normfs_crc32c_hw_supported;
+
+/*@ requires len == 0 || \valid_read(data + (0 .. len - 1));
+    assigns \nothing;
+    ensures \result == normfs_crc32c_logic(crc, data, len);
+*/
+uint32_t normfs_crc32c_hw(uint32_t crc, const uint8_t *data, size_t len);
 
 #endif
 
@@ -174,7 +216,7 @@ const uint32_t normfs_crc32c_shift_2048[32] = {
 
 #endif
 
-#if defined(NORMFS_CRC32C_HW)
+#if defined(NORMFS_CRC32C_HW) && !defined(__FRAMAC__)
 
 /*
  * Image of v under the operator whose columns are m. Branchless: a bit-test
@@ -246,7 +288,7 @@ normfs_crc32c_hw_block3(uint32_t c0, const uint8_t *p, size_t n,
 }
 
 /* The only place the 0xFFFFFFFF inversion convention lives on this path. */
-NORMFS_CRC32C_HW_TARGET static uint32_t
+NORMFS_CRC32C_HW_TARGET uint32_t
 normfs_crc32c_hw(uint32_t crc, const uint8_t *data, size_t len)
 {
 	uint32_t c = ~crc;
@@ -267,6 +309,23 @@ normfs_crc32c_hw(uint32_t crc, const uint8_t *data, size_t len)
 	return ~normfs_crc32c_hw_serial(c, data + i, len - i);
 }
 
+/* Resolved once before main rather than per call: the feature query is not
+ * free, and a plain load keeps the dispatcher's "assigns nothing" honest. */
+int normfs_crc32c_hw_supported = 0;
+
+__attribute__((constructor)) static void
+normfs_crc32c_hw_detect(void)
+{
+#if defined(NORMFS_CRC32C_X86)
+	normfs_crc32c_hw_supported = __builtin_cpu_supports("sse4.2") ? 1 : 0;
+#elif defined(NORMFS_CRC32C_ARM_RUNTIME)
+	normfs_crc32c_hw_supported =
+	    (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0ul ? 1 : 0;
+#else
+	normfs_crc32c_hw_supported = 1;
+#endif
+}
+
 #endif
 
 /*@ requires len == 0 || \valid_read(data + (0 .. len - 1));
@@ -276,13 +335,9 @@ normfs_crc32c_hw(uint32_t crc, const uint8_t *data, size_t len)
 uint32_t
 normfs_crc32c(uint32_t crc, const uint8_t *data, size_t len)
 {
-#if defined(NORMFS_CRC32C_ARM)
-	return normfs_crc32c_hw(crc, data, len);
-#elif defined(NORMFS_CRC32C_X86)
-	if (__builtin_cpu_supports("sse4.2"))
+#if defined(NORMFS_CRC32C_HW)
+	if (normfs_crc32c_hw_supported != 0)
 		return normfs_crc32c_hw(crc, data, len);
-	return normfs_crc32c_portable(crc, data, len);
-#else
-	return normfs_crc32c_portable(crc, data, len);
 #endif
+	return normfs_crc32c_portable(crc, data, len);
 }
