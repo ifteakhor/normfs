@@ -1,6 +1,6 @@
 //! Recovery / scan-time benchmark (metric e), V0 vs V1.
 //!
-//! Builds one WAL file of many entries in each format, then times
+//! Builds one WAL file per case and format, then times
 //! `WalStore::get_file_end` — the public call recovery uses to find a file's
 //! last entry id. It reads the header and scans every entry, verifying each
 //! entry's checksum (xxHash64 for V0, CRC32C for V1) and, for V1, deriving the
@@ -81,37 +81,66 @@ fn bench_recovery_scan(c: &mut Criterion) {
     g.measurement_time(meas());
     g.sample_size(20);
 
-    let n = 100_000u64;
-    let payload = 64usize;
-    g.throughput(Throughput::Elements(n));
+    // Two axes decide whether the V1 checksum's chunked fast path matters, and
+    // one case cannot cover both:
+    //
+    //   * entry size — the chunked path needs 768 bytes in one call, so a 64 B
+    //     record is checksummed by the serial tail no matter how big the file
+    //     is. That case measures framing and iteration, not the fast path.
+    //   * working set — three interleaved cursors beat one chain while the data
+    //     is in cache and lose to it once the scan is pulling from RAM.
+    //
+    // Sizes are chosen against a 16 MiB L3: "cached" stays well inside it,
+    // "uncached" is an order of magnitude past. Both keep the file in the page
+    // cache across iterations, so what is being compared is CPU cache
+    // residency, not disk; a real recovery pays I/O on top of either number.
+    let cases = [
+        ("small_cached", 100_000u64, 64usize),
+        ("large_cached", 400u64, 12 * 1024usize),
+        ("large_uncached", 12_000u64, 12 * 1024usize),
+    ];
 
-    for (label, format) in [
-        ("v0", WalEntryFormat::V0),
-        ("v1", WalEntryFormat::V1),
-    ] {
-        let tmp = tempfile::tempdir().unwrap();
-        let (store, queue_id, file_id) = rt.block_on(build_file(tmp.path(), format, n, payload));
+    for (case, n, payload) in cases {
+        g.throughput(Throughput::Elements(n));
 
-        // Sanity: the scan finds the last entry id (= n - 1 for both formats).
-        let end = rt
-            .block_on(store.get_file_end(&queue_id, &file_id))
-            .unwrap();
-        assert_eq!(end, Some(UintN::from(n - 1)), "{label} scan should reach the last entry");
+        for (label, format) in [
+            ("v0", WalEntryFormat::V0),
+            ("v1", WalEntryFormat::V1),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (store, queue_id, file_id) =
+                rt.block_on(build_file(tmp.path(), format, n, payload));
 
-        g.bench_function(BenchmarkId::new("get_file_end", label), |b| {
-            b.iter_custom(|iters| {
-                rt.block_on(async {
-                    let start = Instant::now();
-                    for _ in 0..iters {
-                        black_box(store.get_file_end(&queue_id, &file_id).await.unwrap());
-                    }
-                    start.elapsed()
-                })
-            });
-        });
+            // Sanity: the scan finds the last entry id (= n - 1 for both formats).
+            let end = rt
+                .block_on(store.get_file_end(&queue_id, &file_id))
+                .unwrap();
+            assert_eq!(
+                end,
+                Some(UintN::from(n - 1)),
+                "{case}/{label} scan should reach the last entry"
+            );
 
-        drop(store);
-        drop(tmp);
+            g.bench_function(
+                BenchmarkId::new("get_file_end", format!("{case}/{label}")),
+                |b| {
+                    b.iter_custom(|iters| {
+                        rt.block_on(async {
+                            let start = Instant::now();
+                            for _ in 0..iters {
+                                black_box(
+                                    store.get_file_end(&queue_id, &file_id).await.unwrap(),
+                                );
+                            }
+                            start.elapsed()
+                        })
+                    });
+                },
+            );
+
+            drop(store);
+            drop(tmp);
+        }
     }
     g.finish();
 }
