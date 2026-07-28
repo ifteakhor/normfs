@@ -317,6 +317,9 @@ __attribute__((constructor)) static void
 normfs_crc32c_hw_detect(void)
 {
 #if defined(NORMFS_CRC32C_X86)
+	/* libgcc fills in the CPU model from a constructor of its own, and the
+	 * order between the two is unspecified, so ask for it explicitly. */
+	__builtin_cpu_init();
 	normfs_crc32c_hw_supported = __builtin_cpu_supports("sse4.2") ? 1 : 0;
 #elif defined(NORMFS_CRC32C_ARM_RUNTIME)
 	normfs_crc32c_hw_supported =
