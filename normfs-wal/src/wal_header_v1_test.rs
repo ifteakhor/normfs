@@ -1,6 +1,7 @@
 use super::wal_header::{WalHeader, WalHeaderError};
 use super::wal_header_v1::{
-    AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_MAX_SIZE,
+    AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_CRC_SIZE,
+    WAL_HEADER_V1_MAX_SIZE,
     WAL_HEADER_V1_MIN_SIZE, WAL_HEADER_V1_VERSION, WAL_HEADER_VERSION_SIZE, WalHeaderV1,
     WalHeaderV1Error, peek_version,
 };
@@ -92,7 +93,10 @@ fn test_v0_parser_rejects_v1_header_with_its_version() {
     );
 }
 
-fn roundtrip(data_size_bytes: u64, id_size_bytes: u64, num_entries_before: u64, expected: usize) {
+fn roundtrip(data_size_bytes: u64, id_size_bytes: u64, num_entries_before: u64, fields: usize) {
+    // The cases below tabulate the varint widths of the fields; every encoding
+    // also carries the 4-byte CRC trailer.
+    let expected = fields + WAL_HEADER_V1_CRC_SIZE;
     let header = WalHeaderV1::new(data_size_bytes, id_size_bytes, num_entries_before).unwrap();
     assert_eq!(header.size(), expected);
 
@@ -125,7 +129,7 @@ fn test_wal_header_v1_roundtrip_across_varint_widths() {
 
     assert_eq!(
         WalHeaderV1::new(1, 1, 0).unwrap().size(),
-        WAL_HEADER_V1_MIN_SIZE
+        WAL_HEADER_V1_MIN_SIZE + WAL_HEADER_V1_CRC_SIZE
     );
 }
 
@@ -260,15 +264,15 @@ async fn test_wal_header_v1_reader_rejects_unsupported_versions() {
 #[test]
 fn test_wal_header_v1_u64_bounds() {
     let header = WalHeaderV1::new(8, 4, u64::MAX).unwrap();
-    assert_eq!(header.size(), WAL_HEADER_V1_MAX_SIZE);
+    assert_eq!(header.size(), WAL_HEADER_V1_MAX_SIZE + WAL_HEADER_V1_CRC_SIZE);
 
     let mut buffer = BytesMut::new();
     let written = header.write_to_bytes(&mut buffer).unwrap();
-    assert_eq!(written, WAL_HEADER_V1_MAX_SIZE);
+    assert_eq!(written, WAL_HEADER_V1_MAX_SIZE + WAL_HEADER_V1_CRC_SIZE);
 
     let (decoded, bytes_read) = WalHeaderV1::from_bytes(&buffer).unwrap();
     assert_eq!(decoded.num_entries_before, u64::MAX);
-    assert_eq!(bytes_read, WAL_HEADER_V1_MAX_SIZE);
+    assert_eq!(bytes_read, WAL_HEADER_V1_MAX_SIZE + WAL_HEADER_V1_CRC_SIZE);
 
     // A V0 header whose counter fits in a u64 converts; one above it does not.
     let convertible = WalHeader::new(8, 4, UintN::from(u64::MAX)).unwrap();
@@ -284,4 +288,54 @@ fn test_wal_header_v1_u64_bounds() {
         WalHeaderV1::from_v0(&too_large),
         Err(WalHeaderV1Error::ValueTooLarge)
     );
+}
+
+/// A single flipped bit anywhere in the header must be rejected. Without the
+/// trailer a flip inside num_entries_before decodes cleanly and renumbers every
+/// entry in the file, because V1 entries carry no id of their own and their own
+/// CRCs still verify.
+#[test]
+fn test_v1_header_rejects_every_single_bit_flip() {
+    let header = WalHeaderV1::new(8, 4, 1000).unwrap();
+    let mut clean = BytesMut::new();
+    header.write_to_bytes(&mut clean).unwrap();
+    let clean = clean.to_vec();
+
+    assert_eq!(WalHeaderV1::from_bytes(&clean).unwrap().0, header);
+
+    for byte in 0..clean.len() {
+        for bit in 0..8u32 {
+            let mut corrupt = clean.clone();
+            corrupt[byte] ^= 1 << bit;
+
+            match WalHeaderV1::from_bytes(&corrupt) {
+                Err(_) => {}
+                Ok((decoded, _)) => panic!(
+                    "flip of byte {byte} bit {bit} accepted: {:?} (clean was {:?})",
+                    decoded, header
+                ),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_v1_header_from_reader_rejects_corrupt_trailer() {
+    let header = WalHeaderV1::new(8, 4, 1000).unwrap();
+    let mut buf = BytesMut::new();
+    header.write_to_bytes(&mut buf).unwrap();
+
+    let mut good = std::io::Cursor::new(buf.to_vec());
+    let (decoded, consumed) = WalHeaderV1::from_reader(&mut good).await.unwrap();
+    assert_eq!(decoded, header);
+    assert_eq!(consumed, buf.len());
+
+    let mut corrupt_bytes = buf.to_vec();
+    let last = corrupt_bytes.len() - 1;
+    corrupt_bytes[last] ^= 0x01;
+    let mut corrupt = std::io::Cursor::new(corrupt_bytes);
+    assert!(matches!(
+        WalHeaderV1::from_reader(&mut corrupt).await,
+        Err(WalHeaderV1Error::CrcMismatch { .. })
+    ));
 }
