@@ -128,7 +128,10 @@ pub async fn get_wal_range(
     // num_entries_before plus a running index. A truncated or corrupt entry
     // stops the scan — the ids of everything after it would be unknowable.
     if any_header.version() == WAL_HEADER_V1_VERSION {
-        let num_entries_before = wal_header.num_entries_before.to_u64().unwrap_or(u64::MAX);
+        let num_entries_before = wal_header
+            .num_entries_before
+            .to_u64()
+            .map_err(|_| WalHeaderV1Error::ValueTooLarge)?;
         let mut first_id: Option<UintN> = None;
         let mut last_id: Option<UintN> = None;
         let mut entry_count = 0u64;
@@ -259,7 +262,10 @@ pub async fn get_wal_content(base_path: &Path, file_id: &UintN) -> Result<WalCon
     // V1: iterate frames from the byte buffer, deriving each id from
     // num_entries_before + running index; stop at the first corrupt entry.
     if any_header.version() == WAL_HEADER_V1_VERSION {
-        let num_entries_before = wal_header.num_entries_before.to_u64().unwrap_or(u64::MAX);
+        let num_entries_before = wal_header
+            .num_entries_before
+            .to_u64()
+            .map_err(|_| WalHeaderV1Error::ValueTooLarge)?;
         let mut num_entries: u64 = 0;
         let mut cursor = header_size;
         let mut index = 0u64;
@@ -429,7 +435,10 @@ pub async fn read_wal_file_range(
     // but the id comes from the position rather than the entry bytes; the CRC
     // check lives inside iter_next, so a corrupt entry stops the scan.
     if any_header.version() == WAL_HEADER_V1_VERSION {
-        let num_entries_before = wal_header.num_entries_before.to_u64().unwrap_or(u64::MAX);
+        let num_entries_before = wal_header
+            .num_entries_before
+            .to_u64()
+            .map_err(|_| WalHeaderV1Error::ValueTooLarge)?;
         let mut last_read_id: Option<UintN> = None;
         let mut last_processed_id: Option<UintN> = None;
         let mut found_complete = false;
@@ -724,7 +733,10 @@ pub async fn read_wal_bytes_range(
     // V1: iterate frames from the in-memory buffer with zero-copy record
     // slices, deriving each id from num_entries_before + running index.
     if any_header.version() == WAL_HEADER_V1_VERSION {
-        let num_entries_before = wal_header.num_entries_before.to_u64().unwrap_or(u64::MAX);
+        let num_entries_before = wal_header
+            .num_entries_before
+            .to_u64()
+            .map_err(|_| WalHeaderV1Error::ValueTooLarge)?;
         let mut cursor = header_size;
         let mut last_read_id: Option<UintN> = None;
         let mut last_processed_id: Option<UintN> = None;
