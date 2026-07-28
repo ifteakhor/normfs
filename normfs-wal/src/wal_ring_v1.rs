@@ -69,6 +69,7 @@ unsafe extern "C" {
         first_entry_id: u64,
     );
     fn normfs_wal_page_offset(page: *mut CWalPage, index: u32) -> u32;
+    fn normfs_wal_page_entry_id(page: *mut CWalPage, index: u32) -> u64;
     fn normfs_wal_page_pin(page: *mut CWalPage);
     fn normfs_wal_page_unpin(page: *mut CWalPage);
 
@@ -251,15 +252,22 @@ impl WalRing {
             if p.count == 0 {
                 continue;
             }
+            // Cheap page-level skip using the page's id span; the per-entry id
+            // itself is derived by the proven C page codec below.
             let pfirst = p.first_entry_id;
             let plast = p.first_entry_id + p.count as u64 - 1;
             if plast < start || pfirst > end {
                 continue;
             }
-            let lo = start.max(pfirst);
-            let hi = end.min(plast);
-            for id in lo..=hi {
-                let index = (id - pfirst) as u32;
+            let page = &self.pages[k] as *const CWalPage as *mut CWalPage;
+            for index in 0..p.count {
+                // id = first_entry_id + index, from the Frama-C-proven
+                // normfs_wal_page_entry_id (assigns \nothing, so the shared
+                // page reference may be cast to a mutable pointer for FFI).
+                let id = unsafe { normfs_wal_page_entry_id(page, index) };
+                if id < start || id > end {
+                    continue;
+                }
                 if let Some(rec) = self.record_at(k, index) {
                     out.push((id, rec.to_vec()));
                 }
