@@ -54,7 +54,7 @@ async fn build_file(
     let queue_id = QueueIdResolver::new("bench").resolve("scan");
     let file_id = UintN::from(1u64);
     let settings = WalSettings {
-        max_file_size: 1 << 30, // 1 GiB: keep everything in one file
+        max_file_size: 1 << 40, // 1 TiB: never rotate, the scan must be one file
         write_buffer_size: 8 * 1024 * 1024,
         enable_fsync: false,
         wal_entry_format: format,
@@ -90,18 +90,27 @@ fn bench_recovery_scan(c: &mut Criterion) {
     //   * working set — three interleaved cursors beat one chain while the data
     //     is in cache and lose to it once the scan is pulling from RAM.
     //
-    // Sizes are chosen against a 16 MiB L3: "cached" stays well inside it,
-    // "uncached" is an order of magnitude past. Both keep the file in the page
-    // cache across iterations, so what is being compared is CPU cache
-    // residency, not disk; a real recovery pays I/O on top of either number.
+    // The two "cached" cases are sized against a 16 MiB L3 and stay inside it.
+    // The uncached one is sized in GiB, not entries: at 147 MB it sat in the
+    // page cache and every iteration after the first measured a memory scan.
+    let scan_gib: u64 = std::env::var("WAL_BENCH_SCAN_GIB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let big_payload = 12 * 1024usize;
+    // Sized against V0's wider 28-byte framing, so neither format exceeds it.
+    let big_n = (scan_gib << 30) / (big_payload as u64 + 28);
+
     let cases = [
         ("small_cached", 100_000u64, 64usize),
-        ("large_cached", 400u64, 12 * 1024usize),
-        ("large_uncached", 12_000u64, 12 * 1024usize),
+        ("large_cached", 400u64, big_payload),
+        ("large_uncached", big_n, big_payload),
     ];
 
     for (case, n, payload) in cases {
         g.throughput(Throughput::Elements(n));
+        // A multi-GiB scan takes seconds per iteration; 10 is criterion's floor.
+        g.sample_size(if n == big_n { 10 } else { 20 });
 
         for (label, format) in [
             ("v0", WalEntryFormat::V0),
