@@ -9,7 +9,15 @@
 //! Warmup / measurement default to 5 s / 30 s, overridable (seconds) with
 //! WAL_BENCH_WARMUP / WAL_BENCH_MEASURE.
 //!
+//! Other knobs:
+//!   WAL_BENCH_SCAN_GIB   size of the uncached case, in GiB (default 2)
+//!   WAL_BENCH_CACHED_N   entries in the large cached case (default 400)
+//!   WAL_BENCH_ORDER      v0v1 (default) or v1v0 — which format is built and
+//!                        scanned first; run both to tell a format difference
+//!                        apart from a running-order one
+//!
 //!   cargo bench -p normfs-wal --bench wal_v1_scan
+//!   WAL_BENCH_ORDER=v1v0 cargo bench -p normfs-wal --bench wal_v1_scan
 
 use std::hint::black_box;
 use std::path::Path;
@@ -74,6 +82,22 @@ async fn build_file(
     (store, queue_id, file_id)
 }
 
+/// Total bytes of every file under `dir`, so each case can report the size it
+/// actually scanned rather than the size it asked for.
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => total += dir_size(&entry.path()),
+                Ok(_) => total += entry.metadata().map(|m| m.len()).unwrap_or(0),
+                Err(_) => {}
+            }
+        }
+    }
+    total
+}
+
 fn bench_recovery_scan(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut g = c.benchmark_group("recovery_scan");
@@ -101,9 +125,33 @@ fn bench_recovery_scan(c: &mut Criterion) {
     // Sized against V0's wider 28-byte framing, so neither format exceeds it.
     let big_n = (scan_gib << 30) / (big_payload as u64 + 28);
 
+    let large_cached_n: u64 = std::env::var("WAL_BENCH_CACHED_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
+
+    // Each case builds one dataset per format in sequence, so whichever format
+    // runs second inherits the other's free-space layout and a warmer drive. On
+    // a multi-GiB uncached scan that position is worth a few percent — enough to
+    // read as a format difference. Running both orders separates the two.
+    //
+    // An unrecognised value aborts rather than falling back: a silent default
+    // would hand back a V0-first run labelled as the swap, and these runs are
+    // measured in hours.
+    let order = std::env::var("WAL_BENCH_ORDER").unwrap_or_else(|_| "v0v1".to_string());
+    let formats = match order.replace(['-', '_', ','], "").as_str() {
+        "v0v1" => [("v0", WalEntryFormat::V0), ("v1", WalEntryFormat::V1)],
+        "v1v0" => [("v1", WalEntryFormat::V1), ("v0", WalEntryFormat::V0)],
+        other => panic!("WAL_BENCH_ORDER must be v0v1 or v1v0, got {other:?}"),
+    };
+    eprintln!(
+        "[bench] order={}, scan_gib={scan_gib}, cached_n={large_cached_n}",
+        formats.map(|(l, _)| l).join("->")
+    );
+
     let cases = [
         ("small_cached", 100_000u64, 64usize),
-        ("large_cached", 400u64, big_payload),
+        ("large_cached", large_cached_n, big_payload),
         ("large_uncached", big_n, big_payload),
     ];
 
@@ -112,13 +160,14 @@ fn bench_recovery_scan(c: &mut Criterion) {
         // A multi-GiB scan takes seconds per iteration; 10 is criterion's floor.
         g.sample_size(if n == big_n { 10 } else { 20 });
 
-        for (label, format) in [
-            ("v0", WalEntryFormat::V0),
-            ("v1", WalEntryFormat::V1),
-        ] {
+        for (label, format) in formats {
             let tmp = tempfile::tempdir().unwrap();
             let (store, queue_id, file_id) =
                 rt.block_on(build_file(tmp.path(), format, n, payload));
+            eprintln!(
+                "[bench] {case}/{label}: {n} entries, {:.2} GiB on disk",
+                dir_size(tmp.path()) as f64 / (1u64 << 30) as f64
+            );
 
             // Sanity: the scan finds the last entry id (= n - 1 for both formats).
             let end = rt
