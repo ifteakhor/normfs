@@ -46,6 +46,18 @@ fn meas() -> Duration {
     env_secs("WAL_BENCH_MEASURE", 30)
 }
 
+/// Cap on enqueued-but-unwritten bytes during a build. Large enough that the
+/// writer still batches efficiently — a small window paces the producer off the
+/// writer's flush timer and costs orders of magnitude of throughput — and small
+/// enough that a build far larger than RAM stays bounded.
+const BUILD_IN_FLIGHT_BYTES: u64 = 256 * 1024 * 1024;
+const CHECK_EVERY: u64 = 1024;
+
+/// Current on-disk length of the WAL file, or 0 before it exists.
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
 /// Write `n` entries of `payload` bytes to a single WAL file in `format`, then
 /// return a store that can read it back. The senders' receivers are dropped
 /// once writing is done; the read path does not use them.
@@ -74,8 +86,28 @@ async fn build_file(
         .unwrap();
 
     let record = Bytes::from(vec![0xABu8; payload]);
+    let wal_path = file_id.to_file_path(queue_id.to_wal_dir(root).to_str().unwrap(), "wal");
     for i in 0..n {
-        store.enqueue(&queue_id, UintN::from(i), record.clone()).unwrap();
+        store
+            .enqueue(&queue_id, UintN::from(i), record.clone())
+            .unwrap();
+
+        // `enqueue` is synchronous and hands the entry to a writer task, so an
+        // unthrottled loop produces at memory speed while the writer drains at
+        // disk speed and the difference stays on the heap — peak build heap
+        // otherwise reaches roughly 60% of the dataset, which is what puts a
+        // 100 GiB build out of reach. Gating on bytes actually landed holds it
+        // flat at ~1 GiB. Checked every CHECK_EVERY entries: the stat is not
+        // free and the backlog cannot move far in between.
+        if i % CHECK_EVERY == 0 {
+            let enqueued = (i + 1) * payload as u64;
+            let mut stalled = 0u32;
+            while enqueued.saturating_sub(file_len(&wal_path)) > BUILD_IN_FLIGHT_BYTES {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                stalled += 1;
+                assert!(stalled < 60_000, "writer made no progress for 120 s at {i}");
+            }
+        }
     }
     store.close().await.unwrap();
 

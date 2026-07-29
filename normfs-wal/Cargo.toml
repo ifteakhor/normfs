@@ -39,3 +39,7 @@ harness = false
 [[bench]]
 name = "wal_v1_sizes"
 harness = false
+
+[[bench]]
+name = "wal_memory"
+harness = false
