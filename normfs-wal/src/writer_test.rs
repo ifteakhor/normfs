@@ -45,7 +45,7 @@ async fn test_enqueue_and_read() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
-        wal_entry_format: WalEntryFormat::V0,
+        wal_entry_format: WalEntryFormat::default(),
     };
 
     store
@@ -116,7 +116,7 @@ async fn test_enqueue_batch_and_read() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
-        wal_entry_format: WalEntryFormat::V0,
+        wal_entry_format: WalEntryFormat::default(),
     };
 
     store
@@ -185,7 +185,7 @@ async fn test_size_based_rotation() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
-        wal_entry_format: WalEntryFormat::V0,
+        wal_entry_format: WalEntryFormat::default(),
     };
 
     store
@@ -220,6 +220,9 @@ async fn test_size_based_rotation() {
     assert_eq!(content2.num_entries, UintN::from(1u64));
 }
 
+/// Pinned to V0: the trigger only exists there. A V0 entry stores its record
+/// size in a `data_size_bytes`-wide field, so a record too wide for it forces a
+/// new file. V1 frames the size as a varint and has no width to overflow.
 #[tokio::test]
 async fn test_data_size_based_rotation() {
     init_logger();
@@ -549,4 +552,286 @@ async fn test_mixed_v0_and_v1_files_in_one_queue() {
         .unwrap();
     assert_eq!(e3.id, UintN::from(3u64));
     assert_eq!(e3.data, Bytes::from_static(b"v1-three"));
+}
+
+// V0 twins of the tests above, which track the current default format.
+
+/// V0 twin of `test_enqueue_and_read`.
+#[tokio::test]
+async fn test_enqueue_and_read_v0_compat() {
+    init_logger();
+    let tmp_dir = tempdir().unwrap();
+    let instance_id = "test_instance";
+    let (written_sender, _) = mpsc::unbounded_channel();
+    let (wal_complete_sender, _) = mpsc::unbounded_channel();
+
+    let store = WalStore::new(tmp_dir.path(), written_sender, wal_complete_sender);
+
+    let resolver = QueueIdResolver::new(instance_id);
+    let queue_id = resolver.resolve("test_queue");
+    let file_id = UintN::from(1u64);
+    let header = WalHeader::default();
+    let settings = WalSettings {
+        max_file_size: 1024,
+        write_buffer_size: 128,
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::Aes,
+        compression_type: normfs_types::CompressionType::Zstd,
+        wal_entry_format: WalEntryFormat::V0,
+    };
+
+    store
+        .start_writer(&queue_id, &file_id, header, settings, None)
+        .await
+        .unwrap();
+
+    store
+        .enqueue(&queue_id, UintN::from(0u64), Bytes::from("hello"))
+        .unwrap();
+    store
+        .enqueue(&queue_id, UintN::from(1u64), Bytes::from("world"))
+        .unwrap();
+
+    store.close().await.unwrap();
+
+    let raw = tokio::fs::read(
+        file_id.to_file_path(queue_id.to_wal_dir(tmp_dir.path()).to_str().unwrap(), "wal"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(raw[0], 0, "compat file must carry the V0 header version");
+
+    let (tx, mut rx) = mpsc::channel(10);
+    let result = read_wal_file_range(
+        &queue_id.to_wal_dir(tmp_dir.path()),
+        &file_id,
+        &UintN::from(0u64),
+        &Some(UintN::from(1u64)),
+        1,
+        &tx,
+        DataSource::DiskWal,
+    )
+    .await
+    .unwrap();
+    drop(tx);
+
+    assert!(matches!(result, ReadRangeResult::Complete));
+
+    let read_entry1 = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_entry1.id, UintN::from(0u64));
+    assert_eq!(read_entry1.data, Bytes::from("hello"));
+    assert_eq!(read_entry1.source, DataSource::DiskWal);
+
+    let read_entry2 = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_entry2.id, UintN::from(1u64));
+    assert_eq!(read_entry2.data, Bytes::from("world"));
+    assert_eq!(read_entry2.source, DataSource::DiskWal);
+}
+
+/// V0 twin of `test_enqueue_batch_and_read`.
+#[tokio::test]
+async fn test_enqueue_batch_and_read_v0_compat() {
+    init_logger();
+    let tmp_dir = tempdir().unwrap();
+    let instance_id = "test_instance";
+    let (written_sender, _) = mpsc::unbounded_channel();
+    let (wal_complete_sender, _) = mpsc::unbounded_channel();
+
+    let store = WalStore::new(tmp_dir.path(), written_sender, wal_complete_sender);
+
+    let resolver = QueueIdResolver::new(instance_id);
+    let queue_id = resolver.resolve("test_queue");
+    let file_id = UintN::from(1u64);
+    let header = WalHeader::default();
+    let settings = WalSettings {
+        max_file_size: 1024,
+        write_buffer_size: 128,
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::Aes,
+        compression_type: normfs_types::CompressionType::Zstd,
+        wal_entry_format: WalEntryFormat::V0,
+    };
+
+    store
+        .start_writer(&queue_id, &file_id, header, settings, None)
+        .await
+        .unwrap();
+
+    let entries = vec![
+        (UintN::from(0u64), Bytes::from("hello")),
+        (UintN::from(1u64), Bytes::from("world")),
+    ];
+    store.enqueue_batch(&queue_id, entries).unwrap();
+
+    store.close().await.unwrap();
+
+    let (tx, mut rx) = mpsc::channel(10);
+    let result = read_wal_file_range(
+        &queue_id.to_wal_dir(tmp_dir.path()),
+        &file_id,
+        &UintN::from(0u64),
+        &Some(UintN::from(1u64)),
+        1,
+        &tx,
+        DataSource::DiskWal,
+    )
+    .await
+    .unwrap();
+    drop(tx);
+
+    assert!(matches!(result, ReadRangeResult::Complete));
+
+    let read_entry1 = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_entry1.id, UintN::from(0u64));
+    assert_eq!(read_entry1.data, Bytes::from("hello"));
+
+    let read_entry2 = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_entry2.id, UintN::from(1u64));
+    assert_eq!(read_entry2.data, Bytes::from("world"));
+}
+
+/// V0 twin of `test_size_based_rotation`.
+#[tokio::test]
+async fn test_size_based_rotation_v0_compat() {
+    init_logger();
+    let tmp_dir = tempdir().unwrap();
+    let instance_id = "test_instance";
+    let (written_sender, _) = mpsc::unbounded_channel();
+    let (wal_complete_sender, mut wal_complete_receiver) = mpsc::unbounded_channel();
+
+    let store = WalStore::new(tmp_dir.path(), written_sender, wal_complete_sender);
+
+    let resolver = QueueIdResolver::new(instance_id);
+    let queue_id = resolver.resolve("test_queue");
+    let file_id = UintN::from(1u64);
+    let header = WalHeader::default();
+    let settings = WalSettings {
+        max_file_size: 128,
+        write_buffer_size: 64,
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::Aes,
+        compression_type: normfs_types::CompressionType::Zstd,
+        wal_entry_format: WalEntryFormat::V0,
+    };
+
+    store
+        .start_writer(&queue_id, &file_id, header, settings, None)
+        .await
+        .unwrap();
+
+    store
+        .enqueue(&queue_id, UintN::from(0u64), Bytes::from(vec![0; 64]))
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    store
+        .enqueue(&queue_id, UintN::from(1u64), Bytes::from(vec![0; 64]))
+        .unwrap();
+
+    store.close().await.unwrap();
+
+    let received = wal_complete_receiver.recv().await.unwrap();
+    assert_eq!(received.queue_id, queue_id);
+    assert_eq!(received.file_id, file_id);
+
+    let content1 = get_wal_content(&queue_id.to_wal_dir(tmp_dir.path()), &file_id)
+        .await
+        .unwrap();
+    assert_eq!(content1.num_entries, UintN::from(1u64));
+
+    let content2 = get_wal_content(&queue_id.to_wal_dir(tmp_dir.path()), &file_id.increment())
+        .await
+        .unwrap();
+    assert_eq!(content2.num_entries, UintN::from(1u64));
+}
+
+/// V1 counterpart to `test_data_size_based_rotation`: no width to overflow, so
+/// the oversized record stays put and `max_file_size` is the only trigger left.
+#[tokio::test]
+async fn test_v1_rotates_on_file_size_not_field_width() {
+    init_logger();
+    let tmp_dir = tempdir().unwrap();
+    let (written_sender, _) = mpsc::unbounded_channel();
+    let (wal_complete_sender, _) = mpsc::unbounded_channel();
+
+    let store = WalStore::new(tmp_dir.path(), written_sender, wal_complete_sender);
+
+    let resolver = QueueIdResolver::new("test_instance");
+    let queue_id = resolver.resolve("test_queue");
+    let file_id = UintN::from(1u64);
+    let header = WalHeader {
+        data_size_bytes: 1,
+        ..Default::default()
+    };
+    let settings = WalSettings {
+        max_file_size: 4096, // far above the total written below
+        write_buffer_size: 128,
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::Aes,
+        compression_type: normfs_types::CompressionType::Zstd,
+        wal_entry_format: WalEntryFormat::V1,
+    };
+
+    store
+        .start_writer(&queue_id, &file_id, header, settings, None)
+        .await
+        .unwrap();
+
+    store
+        .enqueue(&queue_id, UintN::from(0u64), Bytes::from("a"))
+        .unwrap();
+    // 512 bytes does not fit a 1-byte-wide size field. Under V0 this rotates.
+    store
+        .enqueue(&queue_id, UintN::from(1u64), Bytes::from(vec![b'x'; 512]))
+        .unwrap();
+
+    store.close().await.unwrap();
+
+    let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
+
+    let content1 = get_wal_content(&wal_dir, &file_id).await.unwrap();
+    assert_eq!(
+        content1.num_entries,
+        UintN::from(2u64),
+        "V1 has no fixed-width size field to overflow, so both entries belong to file 1"
+    );
+
+    let file_2 = UintN::from(2u64).to_file_path(wal_dir.to_str().unwrap(), "wal");
+    assert!(
+        tokio::fs::metadata(&file_2).await.is_err(),
+        "no rotation should have happened, but file 2 exists"
+    );
+
+    let (tx, mut rx) = mpsc::channel(10);
+    read_wal_file_range(
+        &wal_dir,
+        &file_id,
+        &UintN::from(1u64),
+        &Some(UintN::from(1u64)),
+        1,
+        &tx,
+        DataSource::DiskWal,
+    )
+    .await
+    .unwrap();
+    drop(tx);
+    let entry = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.id, UintN::from(1u64));
+    assert_eq!(entry.data, Bytes::from(vec![b'x'; 512]));
 }
