@@ -33,7 +33,8 @@ BUILDDIRS   = $(subst /,_,$(1))
 # second registry, and the failure when it falls behind is silent: no target
 # means no log means nothing for check-proved.sh to rule on.
 TARGETS    :=
-FIND_TARGETS := sed -n 's/^[[:space:]]*\(add_custom_target\|normfs_add_wp_target\)([[:space:]]*\(verify-[A-Za-z0-9_-]\+\).*/\2/p'
+# -E: \| and \+ are GNU extensions, so under BSD sed this matches nothing.
+FIND_TARGETS := sed -nE 's/^[[:space:]]*(add_custom_target|normfs_add_wp_target)\([[:space:]]*(verify-[A-Za-z0-9_-]+).*/\2/p'
 $(foreach m,$(MODULES),$(foreach t,$(shell $(FIND_TARGETS) $(ROOT)/$(m)/CMakeLists.txt),$(eval TARGETS += $(t))$(eval dir-$(t) := $(call BUILDDIRS,$(m)))))
 
 CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release
