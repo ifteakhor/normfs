@@ -15,6 +15,11 @@ use super::wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V1_VERSION, WalHeaderV1Error,
 };
 
+// Large enough to cover a typical entry (header/prefix + payload) in one
+// fill, so V1's varint length prefix and payload land in the same readahead
+// instead of round-tripping to disk separately on uncached reads.
+const WAL_READ_BUFFER_CAPACITY: usize = 64 * 1024;
+
 /// Read the bytes of one framed V1 entry — `[record_size varint32][record]
 /// [crc32c u32 LE]` — off `reader` into `buf` (cleared first). Returns
 /// `Ok(false)` at a clean end of file on an entry boundary (no more entries),
@@ -112,7 +117,7 @@ pub async fn get_wal_range(
         return Err(WalError::WalEmpty(file_id.clone()));
     }
 
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::with_capacity(WAL_READ_BUFFER_CAPACITY, file);
 
     let (any_header, _) = match AnyWalHeader::from_reader(&mut reader).await {
         Ok(v) => v,
@@ -426,7 +431,7 @@ pub async fn read_wal_file_range(
         });
     }
 
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::with_capacity(WAL_READ_BUFFER_CAPACITY, file);
     let (any_header, _) = AnyWalHeader::from_reader(&mut reader).await?;
     let wal_header = WalHeader::from(&any_header);
 
