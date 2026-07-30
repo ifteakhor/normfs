@@ -94,6 +94,9 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         }
         normfs.close().await?;
     }
+    // Marks the directory as this benchmark's, so the next run may reset it.
+    cfg.write_manifest()?;
+
     println!(
         "Built {:.2} GiB on disk in {:.1} s across {} WAL file(s)",
         dir_size(&cfg.dir) as f64 / (1u64 << 30) as f64,
