@@ -12,6 +12,7 @@
 //!   NORMFS_BENCH_COMPRESSION  none, gzip, xz or zstd (default zstd)
 //!   NORMFS_BENCH_ENCRYPTION   none or aes (default aes)
 //!   NORMFS_BENCH_MAX_QUEUE_GIB  per-queue disk cap in GiB, 0 for none (default 1)
+//!   NORMFS_BENCH_WAL_FILE_MIB   max size of one WAL file in MiB (default 128)
 //!   NORMFS_BENCH_DIR          dataset directory (default $TMPDIR/normfs-bench)
 //!
 //! Compression and encryption are explicit because they are easy to get wrong
@@ -51,6 +52,10 @@ pub struct BenchConfig {
     pub encryption: EncryptionType,
     /// `None` means no per-queue cap, so nothing offloads to the store.
     pub max_queue_bytes: Option<u64>,
+    /// Size at which the WAL rotates to a new file. Recovery walks back to the
+    /// newest file holding entries and scans that one, so this — not the
+    /// dataset size — is what bounds how much a restart has to read.
+    pub wal_file_bytes: usize,
 }
 
 impl BenchConfig {
@@ -87,6 +92,12 @@ impl BenchConfig {
         let max_queue_gib = env_u64("NORMFS_BENCH_MAX_QUEUE_GIB", 1);
         let max_queue_bytes = (max_queue_gib > 0).then(|| max_queue_gib << 30);
 
+        let wal_file_bytes = (env_u64("NORMFS_BENCH_WAL_FILE_MIB", 128) << 20) as usize;
+        assert!(
+            wal_file_bytes > 0,
+            "NORMFS_BENCH_WAL_FILE_MIB must be non-zero"
+        );
+
         let dir = std::env::var_os("NORMFS_BENCH_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("normfs-bench"));
@@ -99,6 +110,7 @@ impl BenchConfig {
             compression,
             encryption,
             max_queue_bytes,
+            wal_file_bytes,
         }
     }
 
@@ -120,6 +132,7 @@ impl BenchConfig {
             max_disk_usage_per_queue: self.max_queue_bytes,
             wal_settings: WalSettings {
                 wal_entry_format: self.format,
+                max_file_size: self.wal_file_bytes,
                 ..Default::default()
             },
             queue_settings: QueueSettings::new(Vec::new(), queue_config)
@@ -152,6 +165,10 @@ impl BenchConfig {
                 None => "none (stays in the WAL)".to_string(),
             }
         );
+        println!(
+            "WAL file size: {:.0} MiB",
+            self.wal_file_bytes as f64 / (1024.0 * 1024.0)
+        );
         println!("Data directory: {}", self.dir.display());
         println!();
     }
@@ -160,13 +177,14 @@ impl BenchConfig {
     /// size, block or format is rejected instead of silently measured.
     fn signature(&self) -> String {
         format!(
-            "blocks={} block_size={} format={:?} compression={:?} encryption={:?} max_queue={:?}\n",
+            "blocks={} block_size={} format={:?} compression={:?} encryption={:?} max_queue={:?} wal_file={}\n",
             self.total_blocks,
             self.block_size,
             self.format,
             self.compression,
             self.encryption,
-            self.max_queue_bytes
+            self.max_queue_bytes,
+            self.wal_file_bytes
         )
     }
 

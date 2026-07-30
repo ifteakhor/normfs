@@ -61,6 +61,10 @@ name = "read_benchmark"
 harness = false
 
 [[bench]]
+name = "recovery_benchmark"
+harness = false
+
+[[bench]]
 name = "subscribe_benchmark"
 harness = false
 
