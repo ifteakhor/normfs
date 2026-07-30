@@ -12,12 +12,18 @@
 //! `UintN` subtract-and-modulo per entry. Whether it is faster at all is the
 //! point of measuring it.
 //!
+//! Both steps run back to back over the same file, so that comparison carries
+//! no build-order effect; only V0 against V1 does.
+//!
 //! Warmup / measurement default to 5 s / 30 s, overridable (seconds) with
-//! WAL_BENCH_WARMUP / WAL_BENCH_MEASURE. Entry counts are overridable with
-//! WAL_BENCH_RANGE_SMALL_N (default 100_000, 64 B records) and
-//! WAL_BENCH_RANGE_LARGE_N (default 20_000, 12 KiB records).
+//! WAL_BENCH_WARMUP / WAL_BENCH_MEASURE. Sizes are overridable with
+//! WAL_BENCH_RANGE_SMALL_N (default 100_000, 64 B records),
+//! WAL_BENCH_RANGE_LARGE_N (default 20_000, 12 KiB records) and
+//! WAL_BENCH_RANGE_GIB (default 2), which sizes the uncached case in GiB — set
+//! it to at least 2x RAM or the file stays in the page cache.
 //!
 //!   cargo bench -p normfs-wal --bench wal_v1_range
+//!   WAL_BENCH_RANGE_GIB=50 cargo bench -p normfs-wal --bench wal_v1_range -- uncached
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -141,16 +147,26 @@ fn bench_range(c: &mut Criterion) {
     g.measurement_time(env_secs("WAL_BENCH_MEASURE", 30));
     g.sample_size(20);
 
+    // The uncached case is sized in GiB rather than entries: it only means
+    // anything if the file cannot fit in the page cache, so it has to be set
+    // against the machine's RAM, not against a fixed entry count.
+    let big_payload = 12 * 1024usize;
+    let range_gib = env_u64("WAL_BENCH_RANGE_GIB", 2);
+    let big_n = (range_gib << 30) / (big_payload as u64 + 28);
+
     let cases = [
         ("small", env_u64("WAL_BENCH_RANGE_SMALL_N", 100_000), 64usize),
         (
             "large",
             env_u64("WAL_BENCH_RANGE_LARGE_N", 20_000),
-            12 * 1024usize,
+            big_payload,
         ),
+        ("uncached", big_n, big_payload),
     ];
 
     for (case, n, payload) in cases {
+        // A multi-GiB read takes seconds per iteration; 10 is criterion's floor.
+        g.sample_size(if case == "uncached" { 10 } else { 20 });
         for (label, format) in [
             ("v0", WalEntryFormat::V0),
             ("v1", WalEntryFormat::V1),
