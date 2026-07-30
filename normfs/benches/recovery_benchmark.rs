@@ -24,7 +24,7 @@
 //! actually for than a clean shutdown is.
 //!
 //!   cargo bench -p normfs --bench recovery_benchmark
-//!   NORMFS_BENCH_WAL_FILE_MIB=1024 NORMFS_BENCH_GIB=2 NORMFS_BENCH_FORMAT=v1 \
+//!   NORMFS_BENCH_WAL_FILE_MIB=1024 \
 //!     cargo bench -p normfs --bench recovery_benchmark
 
 mod common;

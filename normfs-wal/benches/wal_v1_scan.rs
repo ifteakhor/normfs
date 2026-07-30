@@ -1,22 +1,17 @@
-//! Recovery / scan-time benchmark (metric e), V0 vs V1.
+//! Recovery / scan-time benchmark (metric e).
 //!
-//! Builds one WAL file per case and format, then times
-//! `WalStore::get_file_end` — the public call recovery uses to find a file's
-//! last entry id. It reads the header and scans every entry, verifying each
-//! entry's checksum (xxHash64 for V0, CRC32C for V1) and, for V1, deriving the
-//! id positionally. Throughput is reported in entries scanned per second.
+//! Builds one V1 WAL file per case, then times `WalStore::get_file_end` — the
+//! public call recovery uses to find a file's last entry id. It reads the
+//! header and scans every entry, verifying each CRC32C and deriving the id
+//! positionally. Throughput is reported in entries scanned per second.
 //!
 //! Warmup / measurement default to 5 s / 30 s, overridable (seconds) with
 //! WAL_BENCH_WARMUP / WAL_BENCH_MEASURE.
 //!
 //! Other knobs:
 //!   WAL_BENCH_SCAN_GIB   size of the uncached case, in GiB (default 2)
-//!   WAL_BENCH_ORDER      v0v1 (default) or v1v0 — which format is built and
-//!                        scanned first; run both to tell a format difference
-//!                        apart from a running-order one
 //!
 //!   cargo bench -p normfs-wal --bench wal_v1_scan
-//!   WAL_BENCH_ORDER=v1v0 cargo bench -p normfs-wal --bench wal_v1_scan
 
 use std::hint::black_box;
 use std::path::Path;
@@ -153,25 +148,11 @@ fn bench_recovery_scan(c: &mut Criterion) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(2);
     let big_payload = 12 * 1024usize;
-    // Sized against V0's wider 28-byte framing, so neither format exceeds it.
+    // 28 B is the widest framing the entry sizes here have used, so the file
+    // never exceeds the requested size.
     let big_n = (scan_gib << 30) / (big_payload as u64 + 28);
 
-    // Datasets are built one format after the other, so the second inherits the
-    // first's free-space layout and a warmer drive — worth a few percent on a
-    // multi-GiB scan, enough to read as a format difference. Run both orders.
-    //
-    // An unrecognised value aborts: a silent default would hand back a V0-first
-    // run labelled as the swap, and these runs take hours.
-    let order = std::env::var("WAL_BENCH_ORDER").unwrap_or_else(|_| "v0v1".to_string());
-    let formats = match order.replace(['-', '_', ','], "").as_str() {
-        "v0v1" => [("v0", WalEntryFormat::V0), ("v1", WalEntryFormat::V1)],
-        "v1v0" => [("v1", WalEntryFormat::V1), ("v0", WalEntryFormat::V0)],
-        other => panic!("WAL_BENCH_ORDER must be v0v1 or v1v0, got {other:?}"),
-    };
-    eprintln!(
-        "[bench] order={}, scan_gib={scan_gib}",
-        formats.map(|(l, _)| l).join("->")
-    );
+    eprintln!("[bench] scan_gib={scan_gib}");
 
     let cases = [
         ("small_cached", 100_000u64, 64usize),
@@ -184,43 +165,38 @@ fn bench_recovery_scan(c: &mut Criterion) {
         // A multi-GiB scan takes seconds per iteration; 10 is criterion's floor.
         g.sample_size(if n == big_n { 10 } else { 20 });
 
-        for (label, format) in formats {
-            let tmp = tempfile::tempdir().unwrap();
-            let (store, queue_id, file_id) =
-                rt.block_on(build_file(tmp.path(), format, n, payload));
-            eprintln!(
-                "[bench] {case}/{label}: {n} entries, {:.2} GiB on disk",
-                dir_size(tmp.path()) as f64 / (1u64 << 30) as f64
-            );
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, queue_id, file_id) =
+            rt.block_on(build_file(tmp.path(), WalEntryFormat::V1, n, payload));
+        eprintln!(
+            "[bench] {case}: {n} entries, {:.2} GiB on disk",
+            dir_size(tmp.path()) as f64 / (1u64 << 30) as f64
+        );
 
-            // Sanity: the scan finds the last entry id (= n - 1 for both formats).
-            let end = rt
-                .block_on(store.get_file_end(&queue_id, &file_id))
-                .unwrap();
-            assert_eq!(
-                end,
-                Some(UintN::from(n - 1)),
-                "{case}/{label} scan should reach the last entry"
-            );
+        // Sanity: the scan finds the last entry id.
+        let end = rt
+            .block_on(store.get_file_end(&queue_id, &file_id))
+            .unwrap();
+        assert_eq!(
+            end,
+            Some(UintN::from(n - 1)),
+            "{case} scan should reach the last entry"
+        );
 
-            g.bench_function(
-                BenchmarkId::new("get_file_end", format!("{case}/{label}")),
-                |b| {
-                    b.iter_custom(|iters| {
-                        rt.block_on(async {
-                            let start = Instant::now();
-                            for _ in 0..iters {
-                                black_box(store.get_file_end(&queue_id, &file_id).await.unwrap());
-                            }
-                            start.elapsed()
-                        })
-                    });
-                },
-            );
+        g.bench_function(BenchmarkId::new("get_file_end", case), |b| {
+            b.iter_custom(|iters| {
+                rt.block_on(async {
+                    let start = Instant::now();
+                    for _ in 0..iters {
+                        black_box(store.get_file_end(&queue_id, &file_id).await.unwrap());
+                    }
+                    start.elapsed()
+                })
+            });
+        });
 
-            drop(store);
-            drop(tmp);
-        }
+        drop(store);
+        drop(tmp);
     }
     g.finish();
 }

@@ -1,5 +1,5 @@
-//! CPU-bound V0-vs-V1 WAL codec benchmarks (metrics c, d, f):
-//!   * entry_encode   — write throughput (WalEntryHeader vs WalEntryV1)
+//! CPU-bound V1 WAL codec benchmarks (metrics c, d, f):
+//!   * entry_encode   — write throughput
 //!   * entry_iterate  — read/iteration throughput (decode + checksum-verify)
 //!   * checksum       — CRC32C fast-path cost vs the portable path and xxHash64
 //!
@@ -14,9 +14,8 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use bytes::BytesMut;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use normfs_wal::{WalEntryHeader, WalEntryV1, WalHeader, crc32c, crc32c_portable};
-use uintn::UintN;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use normfs_wal::{crc32c, crc32c_portable, WalEntryV1};
 use xxhash_rust::xxh64;
 
 /// Payloads spanning the varint-width boundaries; small sizes expose the
@@ -54,23 +53,10 @@ fn bench_encode(c: &mut Criterion) {
     let mut g = c.benchmark_group("entry_encode");
     g.warm_up_time(warm());
     g.measurement_time(meas());
-    let header = WalHeader::default();
 
     for &p in &PAYLOADS {
         let record = pseudo_random(p);
         g.throughput(Throughput::Bytes(p as u64));
-
-        g.bench_with_input(BenchmarkId::new("v0", p), &record, |b, rec| {
-            let mut buf = BytesMut::with_capacity(64 + rec.len());
-            b.iter(|| {
-                buf.clear();
-                WalEntryHeader::new(UintN::from(0u64), rec)
-                    .write_to_bytes(&mut buf, &header)
-                    .unwrap();
-                buf.extend_from_slice(rec);
-                black_box(&buf);
-            });
-        });
 
         g.bench_with_input(BenchmarkId::new("v1", p), &record, |b, rec| {
             let mut buf = BytesMut::with_capacity(64 + rec.len());
@@ -88,21 +74,10 @@ fn bench_iterate(c: &mut Criterion) {
     let mut g = c.benchmark_group("entry_iterate");
     g.warm_up_time(warm());
     g.measurement_time(meas());
-    let header = WalHeader::default();
     let entries = 2_000u64;
 
     for &p in &PAYLOADS {
         let record = pseudo_random(p);
-
-        // V0 buffer: header (with id + xxhash) followed by the record.
-        let mut v0buf = BytesMut::new();
-        for i in 0..entries {
-            WalEntryHeader::new(UintN::from(i), &record)
-                .write_to_bytes(&mut v0buf, &header)
-                .unwrap();
-            v0buf.extend_from_slice(&record);
-        }
-        let v0 = v0buf.freeze();
 
         // V1 buffer: [varint][record][crc32c], no id.
         let mut v1buf = BytesMut::new();
@@ -113,27 +88,6 @@ fn bench_iterate(c: &mut Criterion) {
 
         g.throughput(Throughput::Elements(entries));
 
-        // Mirrors the reader: decode each header, then verify the xxHash64 over
-        // the record.
-        g.bench_with_input(BenchmarkId::new("v0", p), &v0, |b, buf| {
-            b.iter(|| {
-                let mut cursor = 0usize;
-                let mut count = 0u64;
-                while cursor < buf.len() {
-                    let h = WalEntryHeader::from_bytes(&buf[cursor..], &header).unwrap();
-                    let rs = h.record_size.to_u64().unwrap() as usize;
-                    let hs = h.size(&header);
-                    let rec = &buf[cursor + hs..cursor + hs + rs];
-                    black_box(xxh64::xxh64(rec, 0) == h.xxhash);
-                    cursor += hs + rs;
-                    count += 1;
-                }
-                black_box(count);
-            });
-        });
-
-        // iter_next decodes the frame, derives the id, and CRC32C-verifies
-        // [varint][record] internally.
         g.bench_with_input(BenchmarkId::new("v1", p), &v1, |b, buf| {
             b.iter(|| {
                 let mut cursor = 0usize;

@@ -5,7 +5,7 @@
 //! run, and make sure the target filesystem has room for it.
 //!
 //!   cargo bench -p normfs --bench write_benchmark
-//!   NORMFS_BENCH_GIB=50 NORMFS_BENCH_FORMAT=v1 cargo bench -p normfs --bench write_benchmark
+//!   NORMFS_BENCH_GIB=50 cargo bench -p normfs --bench write_benchmark
 
 mod common;
 

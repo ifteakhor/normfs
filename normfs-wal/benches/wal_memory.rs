@@ -1,4 +1,4 @@
-//! Peak heap use of the WAL write and recovery-scan paths, V0 vs V1 (metric g).
+//! Peak heap use of the WAL write and recovery-scan paths (metric g).
 //!
 //! Not a timed benchmark. A counting global allocator records live and peak
 //! bytes, and the run reports the peak reached while building a file and while
@@ -20,8 +20,8 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
-use std::time::Duration;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use bytes::Bytes;
 use normfs_types::{QueueId, QueueIdResolver};
@@ -180,15 +180,11 @@ fn main() {
     );
     println!("{:->7}-+-{:->14}-+-{:->14}-+-{:->12}", "", "", "", "");
 
-    for (label, format) in [
-        ("V0", WalEntryFormat::V0),
-        ("V1", WalEntryFormat::V1),
-    ] {
+    for (label, format) in [("V1", WalEntryFormat::V1)] {
         let tmp = tempfile::tempdir().unwrap();
 
         reset_peak();
-        let (store, queue_id, file_id) =
-            rt.block_on(build_file(tmp.path(), format, n, payload));
+        let (store, queue_id, file_id) = rt.block_on(build_file(tmp.path(), format, n, payload));
         let build_peak = peak();
 
         let bytes = std::fs::metadata(

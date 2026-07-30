@@ -1,4 +1,4 @@
-//! Full-range iteration throughput, V0 vs V1, at step 1 and step 2 (metric h).
+//! Full-range iteration throughput at step 1 and step 2 (metric h).
 //!
 //! Times `WalStore::read_wal_range` over every entry of a file — the path a
 //! subscriber or replay uses, as opposed to `wal_v1_scan`'s `get_file_end`,
@@ -13,7 +13,7 @@
 //! point of measuring it.
 //!
 //! Both steps run back to back over the same file, so that comparison carries
-//! no build-order effect; only V0 against V1 does.
+//! no build-order effect.
 //!
 //! Warmup / measurement default to 5 s / 30 s, overridable (seconds) with
 //! WAL_BENCH_WARMUP / WAL_BENCH_MEASURE. Sizes are overridable with
@@ -163,55 +163,53 @@ fn bench_range(c: &mut Criterion) {
     for (case, n, payload) in cases {
         // A multi-GiB read takes seconds per iteration; 10 is criterion's floor.
         g.sample_size(if case == "uncached" { 10 } else { 20 });
-        for (label, format) in [("v0", WalEntryFormat::V0), ("v1", WalEntryFormat::V1)] {
-            let tmp = tempfile::tempdir().unwrap();
-            let (store, queue_id, file_id) =
-                rt.block_on(build_file(tmp.path(), format, n, payload));
-            let wal_path =
-                file_id.to_file_path(queue_id.to_wal_dir(tmp.path()).to_str().unwrap(), "wal");
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, queue_id, file_id) =
+            rt.block_on(build_file(tmp.path(), WalEntryFormat::V1, n, payload));
+        let wal_path =
+            file_id.to_file_path(queue_id.to_wal_dir(tmp.path()).to_str().unwrap(), "wal");
 
-            for step in [1usize, 2] {
-                // Every entry is framed and verified regardless of step, so
-                // throughput is quoted over entries *scanned*, not delivered —
-                // otherwise step 2 would look twice as fast for doing the same
-                // work. Deliveries are asserted so a silent filter change shows.
-                let delivered = rt.block_on(read_all(&store, &queue_id, &file_id, step));
-                let expected = if step == 1 { n } else { n.div_ceil(2) };
-                assert_eq!(
-                    delivered, expected,
-                    "{case}/{label} step {step} should deliver {expected} entries"
-                );
+        for step in [1usize, 2] {
+            // Every entry is framed and verified regardless of step, so
+            // throughput is quoted over entries *scanned*, not delivered —
+            // otherwise step 2 would look twice as fast for doing the same
+            // work. Deliveries are asserted so a silent filter change shows.
+            let delivered = rt.block_on(read_all(&store, &queue_id, &file_id, step));
+            let expected = if step == 1 { n } else { n.div_ceil(2) };
+            assert_eq!(
+                delivered, expected,
+                "{case} step {step} should deliver {expected} entries"
+            );
 
-                // Reported after a read has succeeded, not straight after
-                // `close`: the writer's last flush can land a little later, and
-                // measuring too early understates the file by a buffer's worth.
-                if step == 1 {
-                    eprintln!(
-                        "[bench] {case}/{label}: {n} entries x {payload} B, {:.1} MiB on disk",
-                        file_len(&wal_path) as f64 / (1024.0 * 1024.0)
-                    );
-                }
-
-                g.throughput(Throughput::Elements(n));
-                g.bench_function(
-                    BenchmarkId::new("read_wal_range", format!("{case}/{label}/step{step}")),
-                    |b| {
-                        b.iter_custom(|iters| {
-                            rt.block_on(async {
-                                let start = Instant::now();
-                                for _ in 0..iters {
-                                    read_all(&store, &queue_id, &file_id, step).await;
-                                }
-                                start.elapsed()
-                            })
-                        });
-                    },
+            // Reported after a read has succeeded, not straight after
+            // `close`: the writer's last flush can land a little later, and
+            // measuring too early understates the file by a buffer's worth.
+            if step == 1 {
+                eprintln!(
+                    "[bench] {case}: {n} entries x {payload} B, {:.1} MiB on disk",
+                    file_len(&wal_path) as f64 / (1024.0 * 1024.0)
                 );
             }
 
-            drop(store);
-            drop(tmp);
+            g.throughput(Throughput::Elements(n));
+            g.bench_function(
+                BenchmarkId::new("read_wal_range", format!("{case}/step{step}")),
+                |b| {
+                    b.iter_custom(|iters| {
+                        rt.block_on(async {
+                            let start = Instant::now();
+                            for _ in 0..iters {
+                                read_all(&store, &queue_id, &file_id, step).await;
+                            }
+                            start.elapsed()
+                        })
+                    });
+                },
+            );
         }
+
+        drop(store);
+        drop(tmp);
     }
     g.finish();
 }

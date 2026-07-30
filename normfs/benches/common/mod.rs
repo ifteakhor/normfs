@@ -6,7 +6,6 @@
 //! produced it.
 //!
 //!   NORMFS_BENCH_GIB          dataset size in GiB (default 2; 50 for a full run)
-//!   NORMFS_BENCH_FORMAT       v0 or v1 (default: the WAL crate's own default)
 //!   NORMFS_BENCH_COMPRESSION  none, gzip, xz or zstd (default zstd)
 //!   NORMFS_BENCH_ENCRYPTION   none or aes (default aes)
 //!   NORMFS_BENCH_MAX_QUEUE_GIB  per-queue disk cap in GiB, 0 for none (default 1)
@@ -31,7 +30,7 @@ use std::path::PathBuf;
 
 use normfs::{NormFsSettings, QueueConfig, QueueSettings};
 use normfs_types::{CompressionType, EncryptionType};
-use normfs_wal::{WalEntryFormat, WalSettings};
+use normfs_wal::WalSettings;
 
 const MANIFEST: &str = "bench-manifest.txt";
 
@@ -42,7 +41,6 @@ pub struct BenchConfig {
     pub dir: PathBuf,
     pub block_size: usize,
     pub total_blocks: usize,
-    pub format: WalEntryFormat,
     pub compression: CompressionType,
     pub encryption: EncryptionType,
     /// `None` disables the cap, so nothing offloads to the store.
@@ -55,15 +53,6 @@ pub struct BenchConfig {
 impl BenchConfig {
     pub fn from_env() -> Self {
         let gib = env_u64("NORMFS_BENCH_GIB", 2);
-
-        // Abort on an unrecognised value: a silent default would label a run
-        // with a format it did not use.
-        let format = match std::env::var("NORMFS_BENCH_FORMAT").ok().as_deref() {
-            None => WalEntryFormat::default(),
-            Some("v0") | Some("V0") => WalEntryFormat::V0,
-            Some("v1") | Some("V1") => WalEntryFormat::V1,
-            Some(other) => panic!("NORMFS_BENCH_FORMAT must be v0 or v1, got {other:?}"),
-        };
 
         let compression = match std::env::var("NORMFS_BENCH_COMPRESSION").ok().as_deref() {
             None | Some("zstd") => CompressionType::Zstd,
@@ -98,7 +87,6 @@ impl BenchConfig {
             dir,
             block_size: BLOCK_SIZE,
             total_blocks: ((gib << 30) / BLOCK_SIZE as u64) as usize,
-            format,
             compression,
             encryption,
             max_queue_bytes,
@@ -122,7 +110,6 @@ impl BenchConfig {
         NormFsSettings {
             max_disk_usage_per_queue: self.max_queue_bytes,
             wal_settings: WalSettings {
-                wal_entry_format: self.format,
                 max_file_size: self.wal_file_bytes,
                 ..Default::default()
             },
@@ -141,7 +128,6 @@ impl BenchConfig {
             self.total_blocks,
             self.block_size / 1024
         );
-        println!("WAL entry format: {:?}", self.format);
         println!(
             "Compression: {:?} | Encryption: {:?}",
             self.compression, self.encryption
@@ -168,10 +154,9 @@ impl BenchConfig {
     /// rejected rather than silently measured.
     fn signature(&self) -> String {
         format!(
-            "blocks={} block_size={} format={:?} compression={:?} encryption={:?} max_queue={:?} wal_file={}\n",
+            "blocks={} block_size={} compression={:?} encryption={:?} max_queue={:?} wal_file={}\n",
             self.total_blocks,
             self.block_size,
-            self.format,
             self.compression,
             self.encryption,
             self.max_queue_bytes,
