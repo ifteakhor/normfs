@@ -5,6 +5,22 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 use uintn::UintN;
 
+/// Collect up to `expected` entries, waiting briefly for each.
+///
+/// A bare `try_recv` drain races the reader: `read` returning does not
+/// guarantee every entry has already reached the channel, so a loop that stops
+/// at the first `Empty` can miss the tail when the machine is loaded.
+async fn drain_entries(rx: &mut mpsc::Receiver<ReadEntry>, expected: usize) -> Vec<ReadEntry> {
+    let mut entries = Vec::with_capacity(expected);
+    while entries.len() < expected {
+        match tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await {
+            Ok(Some(entry)) => entries.push(entry),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    entries
+}
+
 async fn read_last_id(fs: &NormFS, queue: &str) -> Option<UintN> {
     let (tx, mut rx) = mpsc::channel(1);
     let queue_id = fs.resolve(queue);
@@ -1904,9 +1920,7 @@ async fn test_read_backward_wal_memory_boundary() {
 
     // Collect results
     let mut entries = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 2).await);
 
     assert_eq!(entries.len(), 2, "Should have read exactly 2 entries");
 
@@ -1996,9 +2010,7 @@ async fn test_read_backward_wal_only_after_recovery() {
     assert!(result.is_ok(), "Read should succeed");
 
     let mut entries = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 2).await);
 
     assert_eq!(entries.len(), 2, "Should have read exactly 2 entries");
     assert_eq!(
@@ -2081,10 +2093,7 @@ async fn test_read_backward_multiple_entries_crossing_boundary() {
 
     assert!(result.is_ok(), "Read should succeed");
 
-    let mut entries = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    let entries = drain_entries(&mut rx, 8).await;
 
     assert_eq!(entries.len(), 8, "Should have read exactly 8 entries");
 
@@ -2200,9 +2209,7 @@ async fn test_read_completes_on_last_entry_after_recovery() {
 
     // Collect all received entries
     let mut entries = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 100).await);
 
     // Should have exactly 100 entries (all that exist)
     assert_eq!(
@@ -2316,9 +2323,7 @@ async fn test_read_completes_on_last_entry_after_recovery_readonly() {
 
     // Collect all received entries
     let mut entries = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 100).await);
 
     // Should have exactly 100 entries (all that exist)
     assert_eq!(
@@ -2384,9 +2389,7 @@ async fn test_read_range_from_memory() {
 
     // Collect all received entries
     let mut entries: Vec<ReadEntry> = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 4).await);
 
     assert_eq!(entries.len(), 4, "Should have read exactly 4 entries");
 
@@ -2453,9 +2456,7 @@ async fn test_read_from_memory_with_step() {
 
     // Collect all received entries
     let mut entries: Vec<ReadEntry> = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 3).await);
 
     assert_eq!(entries.len(), 3, "Should have read exactly 3 entries");
 
