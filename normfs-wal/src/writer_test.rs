@@ -454,8 +454,8 @@ async fn test_v1_truncated_tail_is_dropped() {
     assert_eq!(content.num_entries, UintN::from(2u64));
 }
 
-/// Write `n` records of `payload` bytes as V1 into one file and return the
-/// queue's wal dir plus the file id, for tests that then poke at the bytes.
+/// Write `n` records of `payload` bytes as V1 into one file; returns the wal
+/// dir and file id for tests that then poke at the bytes.
 async fn build_v1_file(
     root: &std::path::Path,
     name: &str,
@@ -491,8 +491,7 @@ async fn build_v1_file(
     (queue_id.to_wal_dir(root), file_id)
 }
 
-/// The reader decodes V1 entries out of a fixed-size window, so entries that
-/// span a window boundary are the case that breaks a naive implementation. With
+/// Entries spanning a window boundary are what breaks a naive decoder. With
 /// 12 KiB records and a 64 KiB window, roughly every fifth entry straddles one.
 #[tokio::test]
 async fn test_v1_entries_straddle_window_boundary() {
@@ -507,9 +506,8 @@ async fn test_v1_entries_straddle_window_boundary() {
     assert_eq!(content.num_entries, UintN::from(40u64));
 }
 
-/// A single entry larger than the read window has to force the window to grow,
-/// otherwise the scan would report it as truncated and drop the rest of the
-/// file. 200 KiB against a 64 KiB window.
+/// An entry larger than the window must grow it, or the scan reports it
+/// truncated and drops the rest of the file. 200 KiB against a 64 KiB window.
 #[tokio::test]
 async fn test_v1_entry_larger_than_window() {
     init_logger();
@@ -523,11 +521,9 @@ async fn test_v1_entry_larger_than_window() {
     assert_eq!(content.num_entries, UintN::from(3u64));
 }
 
-/// Cutting the tail anywhere inside the last entry must drop exactly that entry
-/// and keep the rest, and cutting exactly on its boundary must drop nothing
-/// extra. A 200 byte record gives a two-byte length prefix, so the offsets below
-/// land mid-CRC, mid-record and mid-prefix in turn — the three ways a partial
-/// frame can present itself.
+/// Cutting inside the last entry must drop exactly that entry; cutting on its
+/// boundary must drop nothing extra. A 200 byte record gives a two-byte prefix,
+/// so the offsets below land mid-CRC, mid-record and mid-prefix in turn.
 #[tokio::test]
 async fn test_v1_truncation_offsets_across_a_frame() {
     init_logger();
@@ -545,8 +541,7 @@ async fn test_v1_truncation_offsets_across_a_frame() {
             .await
             .unwrap();
 
-        // Either way the fourth entry is gone and the first three remain: a
-        // partial frame is discarded, and a clean cut simply ends the file.
+        // Either way the fourth entry is gone and the first three remain.
         let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
         assert_eq!(
             range,

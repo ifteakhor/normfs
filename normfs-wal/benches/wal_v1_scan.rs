@@ -46,10 +46,9 @@ fn meas() -> Duration {
     env_secs("WAL_BENCH_MEASURE", 30)
 }
 
-/// Cap on enqueued-but-unwritten bytes during a build. Large enough that the
-/// writer still batches efficiently — a small window paces the producer off the
-/// writer's flush timer and costs orders of magnitude of throughput — and small
-/// enough that a build far larger than RAM stays bounded.
+/// Cap on enqueued-but-unwritten bytes. Large enough that the writer still
+/// batches — a small window paces the producer off its flush timer and costs
+/// orders of magnitude — and small enough to bound a build larger than RAM.
 const BUILD_IN_FLIGHT_BYTES: u64 = 256 * 1024 * 1024;
 const CHECK_EVERY: u64 = 1024;
 
@@ -92,13 +91,11 @@ async fn build_file(
             .enqueue(&queue_id, UintN::from(i), record.clone())
             .unwrap();
 
-        // `enqueue` is synchronous and hands the entry to a writer task, so an
+        // `enqueue` is synchronous and hands off to a writer task, so an
         // unthrottled loop produces at memory speed while the writer drains at
-        // disk speed and the difference stays on the heap — peak build heap
-        // otherwise reaches roughly 60% of the dataset, which is what puts a
-        // 100 GiB build out of reach. Gating on bytes actually landed holds it
-        // flat at ~1 GiB. Checked every CHECK_EVERY entries: the stat is not
-        // free and the backlog cannot move far in between.
+        // disk speed and the gap stays on the heap — otherwise ~60% of the
+        // dataset, which puts a 100 GiB build out of reach. Gating on bytes
+        // landed holds it flat at ~1 GiB.
         if i % CHECK_EVERY == 0 {
             let enqueued = (i + 1) * payload as u64;
             let mut stalled = 0u32;
@@ -114,8 +111,7 @@ async fn build_file(
     (store, queue_id, file_id)
 }
 
-/// Total bytes of every file under `dir`, so each case can report the size it
-/// actually scanned rather than the size it asked for.
+/// Total bytes under `dir` — the size actually scanned, not the size asked for.
 fn dir_size(dir: &Path) -> u64 {
     let mut total = 0;
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -162,14 +158,12 @@ fn bench_recovery_scan(c: &mut Criterion) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(400);
 
-    // Each case builds one dataset per format in sequence, so whichever format
-    // runs second inherits the other's free-space layout and a warmer drive. On
-    // a multi-GiB uncached scan that position is worth a few percent — enough to
-    // read as a format difference. Running both orders separates the two.
+    // Datasets are built one format after the other, so the second inherits the
+    // first's free-space layout and a warmer drive — worth a few percent on a
+    // multi-GiB scan, enough to read as a format difference. Run both orders.
     //
-    // An unrecognised value aborts rather than falling back: a silent default
-    // would hand back a V0-first run labelled as the swap, and these runs are
-    // measured in hours.
+    // An unrecognised value aborts: a silent default would hand back a V0-first
+    // run labelled as the swap, and these runs take hours.
     let order = std::env::var("WAL_BENCH_ORDER").unwrap_or_else(|_| "v0v1".to_string());
     let formats = match order.replace(['-', '_', ','], "").as_str() {
         "v0v1" => [("v0", WalEntryFormat::V0), ("v1", WalEntryFormat::V1)],

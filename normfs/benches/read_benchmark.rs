@@ -18,9 +18,8 @@ use uintn::UintN;
 
 const PROGRESS_INTERVAL: usize = 10_000;
 
-/// One pass over a freshly written dataset is not reproducible here — measured
-/// spreads of 3x between runs — so the default takes several and reports every
-/// one alongside the median. A single number would hide that.
+/// One pass is not reproducible here — spreads of 3x between runs — so several
+/// are taken and all reported alongside the median.
 fn passes() -> usize {
     std::env::var("NORMFS_BENCH_PASSES")
         .ok()
@@ -43,8 +42,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = BenchConfig::from_env();
     cfg.print_header("NormFS Read Benchmark");
 
-    // Reading a dataset that does not match this configuration silently
-    // measures the wrong thing, so fail loudly instead.
+    // A mismatched dataset would silently measure the wrong thing.
     if let Err(e) = cfg.check_manifest() {
         eprintln!("Error: {e}");
         std::process::exit(1);
@@ -151,8 +149,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         let total_elapsed = start_time.elapsed();
         let total_mb = bytes_read as f64 / (1024.0 * 1024.0);
 
-        // A short read is a result, not a footnote: fail so it cannot be mistaken
-        // for a throughput number over the whole dataset.
+        // A short read must not pass as throughput over the whole dataset.
         if entries_read != cfg.total_blocks as u64 {
             eprintln!(
                 "ERROR: expected {} entries but read {}",
@@ -187,8 +184,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         sorted[sorted.len() - 1]
     );
     println!("Median speed: {:.2} MB/s", total_mb / median);
-    // The spread is the honest headline when it is wide: a median over passes
-    // that disagree by multiples is not a throughput figure.
+    // A median over passes disagreeing by multiples is not a throughput figure.
     println!(
         "Spread (slowest/fastest): {:.2}x",
         sorted[sorted.len() - 1] / sorted[0]

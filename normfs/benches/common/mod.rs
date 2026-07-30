@@ -1,10 +1,9 @@
 //! Shared setup for the end-to-end NormFS throughput benchmarks.
 //!
-//! These stay manual throughput programs rather than Criterion benches: one
-//! pass over a dataset sized against RAM does not fit Criterion's
-//! repeat-and-sample model. What they borrow from the WAL benches is that a run
-//! is described by the environment instead of by recompiling, and prints its own
-//! configuration, so a pasted log says what produced it.
+//! Manual throughput programs, not Criterion: one pass over a dataset sized
+//! against RAM does not fit its repeat-and-sample model. A run is configured by
+//! the environment and prints that configuration, so a pasted log says what
+//! produced it.
 //!
 //!   NORMFS_BENCH_GIB          dataset size in GiB (default 2; 50 for a full run)
 //!   NORMFS_BENCH_BLOCK_KIB    record size in KiB (default 12)
@@ -15,23 +14,17 @@
 //!   NORMFS_BENCH_WAL_FILE_MIB   max size of one WAL file in MiB (default 128)
 //!   NORMFS_BENCH_DIR          dataset directory (default $TMPDIR/normfs-bench)
 //!
-//! Compression and encryption are explicit because they are easy to get wrong
-//! by omission: a queue's `QueueConfig::default()` is Zstd + AES, so a benchmark
-//! that simply takes the defaults is already compressing and encrypting whether
-//! or not it says so. Set both to `none` for a raw baseline.
+//! Compression and encryption are explicit because omission is easy to get
+//! wrong: `QueueConfig::default()` is Zstd + AES, so taking the defaults
+//! already compresses and encrypts. Set both to `none` for a raw baseline.
 //!
-//! The per-queue cap matters for the same reason. Once a dataset exceeds it the
-//! queue offloads to the store, so a read then measures some mix of WAL, store
-//! and memory that depends on offload timing — comparing two runs across that
-//! boundary compares the mix, not the thing under test. A 50 GiB dataset against
-//! the 1 GiB default is almost entirely store reads. Set it to 0 to keep
-//! everything in the WAL.
+//! Past the per-queue cap the queue offloads to the store, and a read then
+//! measures a WAL/store/memory mix that depends on offload timing — comparing
+//! runs across that boundary compares the mix. Set it to 0 to stay in the WAL.
 //!
-//! The read benchmarks reuse the dataset a write benchmark left behind — at
-//! full scale rewriting it per run would dominate — so the writer records what
-//! it produced and the reader refuses a dataset that does not match what it was
-//! asked to read. Without that, a directory left by an earlier run of a
-//! different size or format is measured silently.
+//! Read benchmarks reuse the dataset a write left behind, so the writer records
+//! what it produced and the reader refuses anything else. Otherwise a directory
+//! from an earlier run of a different size or format is measured silently.
 
 #![allow(dead_code)] // each bench binary uses a subset
 
@@ -50,11 +43,10 @@ pub struct BenchConfig {
     pub format: WalEntryFormat,
     pub compression: CompressionType,
     pub encryption: EncryptionType,
-    /// `None` means no per-queue cap, so nothing offloads to the store.
+    /// `None` disables the cap, so nothing offloads to the store.
     pub max_queue_bytes: Option<u64>,
-    /// Size at which the WAL rotates to a new file. Recovery walks back to the
-    /// newest file holding entries and scans that one, so this — not the
-    /// dataset size — is what bounds how much a restart has to read.
+    /// WAL rotation size. Recovery scans only the newest file holding entries,
+    /// so this — not the dataset size — bounds what a restart reads.
     pub wal_file_bytes: usize,
 }
 
@@ -64,8 +56,8 @@ impl BenchConfig {
         let block_size = env_u64("NORMFS_BENCH_BLOCK_KIB", 12) as usize * 1024;
         assert!(block_size > 0, "NORMFS_BENCH_BLOCK_KIB must be non-zero");
 
-        // An unrecognised value aborts rather than falling back: a silent
-        // default would label a run with a format it did not use.
+        // Abort on an unrecognised value: a silent default would label a run
+        // with a format it did not use.
         let format = match std::env::var("NORMFS_BENCH_FORMAT").ok().as_deref() {
             None => WalEntryFormat::default(),
             Some("v0") | Some("V0") => WalEntryFormat::V0,
@@ -119,9 +111,8 @@ impl BenchConfig {
     }
 
     pub fn settings(&self) -> NormFsSettings {
-        // Compression and encryption reach the WAL writer through the queue
-        // config, not through `wal_settings` — `NormFS` overwrites those two
-        // fields from the queue's config — so they have to be set here.
+        // Compression and encryption reach the writer through the queue config:
+        // `NormFS` overwrites those two fields of `wal_settings` from it.
         let queue_config = QueueConfig {
             compression_type: self.compression,
             enable_fsync: true,
@@ -173,8 +164,8 @@ impl BenchConfig {
         println!();
     }
 
-    /// What a reader compares against, so a dataset written with a different
-    /// size, block or format is rejected instead of silently measured.
+    /// Compared by readers, so a dataset written with different settings is
+    /// rejected rather than silently measured.
     fn signature(&self) -> String {
         format!(
             "blocks={} block_size={} format={:?} compression={:?} encryption={:?} max_queue={:?} wal_file={}\n",
@@ -211,11 +202,9 @@ impl BenchConfig {
         Ok(())
     }
 
-    /// Start from an empty directory — appending to a previous run's data
-    /// measures neither run.
-    ///
-    /// Refuses to delete a directory this benchmark did not write, since
-    /// NORMFS_BENCH_DIR points wherever the caller says.
+    /// Start from an empty directory; appending to a previous run measures
+    /// neither. Refuses to delete a directory this benchmark did not write,
+    /// since NORMFS_BENCH_DIR points wherever the caller says.
     pub fn reset_dir(&self) -> Result<(), String> {
         if self.dir.exists() {
             let empty = std::fs::read_dir(&self.dir)
@@ -244,8 +233,7 @@ fn env_u64(var: &str, default: u64) -> u64 {
     }
 }
 
-/// Bytes on disk under `dir`, so a run can report the size it actually produced
-/// rather than the size it asked for.
+/// Bytes on disk under `dir` — the size produced, not the size asked for.
 pub fn dir_size(dir: &std::path::Path) -> u64 {
     let mut total = 0;
     if let Ok(entries) = std::fs::read_dir(dir) {

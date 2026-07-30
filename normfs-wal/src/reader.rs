@@ -16,31 +16,22 @@ use super::wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V1_VERSION, WalHeaderV1Error,
 };
 
-// Large enough to cover a typical entry (header/prefix + payload) in one
-// fill, so V1's varint length prefix and payload land in the same readahead
-// instead of round-tripping to disk separately on uncached reads.
-//
-// This one sizes the serving path, where a queue can have many readers open at
-// once and the buffer is paid per reader.
+// Serving path: paid per concurrent reader, so kept small.
 const WAL_READ_BUFFER_CAPACITY: usize = 64 * 1024;
 
-// Recovery scans one file at a time, so it can afford a much larger block, and
-// it wants one: `tokio::fs::File` puts every refill through a blocking-pool
-// round trip, and at 12 KiB entries going from 64 KiB to 1 MiB is worth ~1.9x.
+// Recovery scans one file at a time and can afford a big block. Every refill is
+// a blocking-pool round trip, so at 12 KiB entries 64 KiB -> 1 MiB is worth ~1.9x.
 const WAL_SCAN_BLOCK_CAPACITY: usize = 1024 * 1024;
 
-/// Enough to cover the widest header, so it can be parsed out of the first
-/// window instead of byte by byte off the file. A shorter file simply yields
-/// fewer bytes and the header decoder reports the truncation.
+/// Covers the widest header. A shorter file yields fewer bytes and the header
+/// decoder reports the truncation.
 const WAL_HEADER_PROBE: usize = 128;
 
-/// Reads `inner` in blocks and exposes a contiguous window of unread bytes so
-/// entries can be decoded in place — no per-entry allocation, no zero-fill, no
-/// copy, and no byte-at-a-time reads for a length prefix.
+/// A contiguous window of unread bytes, so entries decode in place: no
+/// per-entry allocation, zero-fill or copy.
 ///
-/// `block` is the read granularity. The window grows past it when a single
-/// entry needs more: V1 record sizes are `u32`, so no fixed window can be
-/// assumed sufficient.
+/// `block` is the read granularity. The window grows past it for one oversized
+/// entry — record sizes are `u32`, so no fixed window suffices.
 struct BlockReader<R> {
     inner: R,
     buf: BytesMut,
@@ -58,8 +49,8 @@ impl<R: AsyncRead + Unpin> BlockReader<R> {
         }
     }
 
-    /// The bytes read but not yet consumed. `BytesMut` derefs to exactly that
-    /// range, so consuming is a pointer bump rather than a copy.
+    /// Bytes read but not consumed; `BytesMut` derefs to exactly that range, so
+    /// `consume` is a pointer bump.
     fn unread(&self) -> &[u8] {
         &self.buf
     }
@@ -68,22 +59,19 @@ impl<R: AsyncRead + Unpin> BlockReader<R> {
         self.buf.advance(n);
     }
 
-    /// True once the underlying reader has reported end of file.
     fn at_eof(&self) -> bool {
         self.eof
     }
 
-    /// Read until at least `want` contiguous unread bytes are buffered. Returns
-    /// how many are available, which falls short of `want` only at end of file.
+    /// Buffer at least `want` contiguous unread bytes, returning how many are
+    /// available — short of `want` only at end of file.
     ///
-    /// Callers pass the bytes they actually need, not a block: whenever a read
-    /// does happen the window is topped back up to a full block, so the cost is
-    /// one read per block rather than one per entry.
+    /// Pass the bytes actually needed, not a block: any read tops the window up
+    /// to a full block, so this costs one read per block, not per entry.
     async fn fill(&mut self, want: usize) -> std::io::Result<usize> {
         while self.buf.len() < want && !self.eof {
-            // `reserve` keeps the unread bytes contiguous, reclaiming the
-            // consumed prefix or moving the remainder to a fresh allocation.
-            // Only the straddling tail is ever copied, once per block.
+            // `reserve` keeps the window contiguous; only the straddling tail
+            // is copied, once per block.
             let target = want.max(self.block);
             if self.buf.capacity() < target {
                 self.buf.reserve(target - self.buf.len());
@@ -95,7 +83,6 @@ impl<R: AsyncRead + Unpin> BlockReader<R> {
         Ok(self.buf.len())
     }
 
-    /// Give up the window and the underlying reader.
     fn into_parts(self) -> (BytesMut, R) {
         (self.buf, self.inner)
     }
@@ -111,26 +98,23 @@ enum V1Frame {
     Truncated,
 }
 
-/// Position `block` so the next whole V1 entry — `[record_size varint32]
-/// [record][crc32c]` — is contiguous at the front of its window, growing the
-/// window if one entry needs more than a block.
+/// Make the next whole V1 entry — `[record_size varint32][record][crc32c]` —
+/// contiguous at the front of the window, growing it if one entry needs more
+/// than a block.
 ///
-/// Distinguishing `End` from `Truncated` is the point: a clean end of file on an
-/// entry boundary finishes the scan normally, whereas a partial trailing entry
-/// discards itself and everything after it, whose ids would be unknowable.
+/// `End` and `Truncated` must stay distinct: a clean end of file finishes the
+/// scan, a partial trailing entry discards itself and everything after it,
+/// whose ids would be unknowable.
 async fn next_v1_frame<R: AsyncRead + Unpin>(
     block: &mut BlockReader<R>,
 ) -> std::io::Result<V1Frame> {
-    // Ask only for the smallest possible entry, so this returns without reading
-    // while the window still holds bytes. `fill` tops the window back up to a
-    // whole block when it does read.
+    // Ask for the smallest possible entry so this returns without reading while
+    // the window still holds bytes.
     block.fill(WAL_ENTRY_V1_MIN_SIZE).await?;
     if block.unread().is_empty() {
         return Ok(V1Frame::End);
     }
 
-    // The prefix says how long the entry is; decode it from the window instead
-    // of taking the file a byte at a time.
     let (record_size, prefix) = match varint::decode_u32(block.unread()) {
         Ok(result) => (result.value as usize, result.consumed),
         Err(_) => return Ok(V1Frame::Truncated),
@@ -244,8 +228,8 @@ pub async fn get_wal_range(
                 V1Frame::End | V1Frame::Truncated => break,
             };
 
-            // Decode in place out of the window. Only `Copy` data leaves the
-            // borrow, so the window can be advanced right afterwards.
+            // Only `Copy` data leaves the borrow, so the window can advance
+            // immediately after.
             let decoded =
                 match WalEntryV1::iter_next(&block.unread()[..total], num_entries_before, index) {
                     Ok((_, entry_id, consumed)) => Some((entry_id, consumed)),
@@ -277,9 +261,8 @@ pub async fn get_wal_range(
         return Ok((wal_header, range));
     }
 
-    // V0 keeps its byte-oriented decoder. The window read ahead of the header,
-    // so seek back to the first entry rather than trying to hand those bytes
-    // over — one seek per file against a scan measured in seconds.
+    // V0 keeps its byte-oriented decoder. The window read past the header, so
+    // seek back to the first entry — one seek against a scan measured in seconds.
     let (_, file) = block.into_parts();
     let mut file = file;
     file.seek(SeekFrom::Start(header_size as u64)).await?;
@@ -582,9 +565,8 @@ pub async fn read_wal_file_range(
                 V1Frame::End | V1Frame::Truncated => break,
             };
 
-            // Decode in place. Only `Copy` data leaves the borrow — the record
-            // is located by offset so it can be lifted out of the window later,
-            // once it is known whether this entry is actually being delivered.
+            // Only `Copy` data leaves the borrow; the record is located by
+            // offset so it can be lifted out once delivery is decided.
             let decoded =
                 match WalEntryV1::iter_next(&block.unread()[..total], num_entries_before, index) {
                     Ok((entry, id, consumed)) => {
@@ -617,9 +599,8 @@ pub async fn read_wal_file_range(
                         .map(|until| &entry_id <= until)
                         .unwrap_or(true));
 
-            // Lift the record out of the window before advancing past it, and
-            // only for entries that are actually delivered — a filtered-out
-            // entry costs no copy.
+            // Copied only for entries actually delivered, and before the
+            // window advances past them.
             let record_bytes = if in_range && entry_id.in_step(from_id, step) {
                 Some(Bytes::copy_from_slice(
                     &block.unread()[record_offset..record_offset + record_size],

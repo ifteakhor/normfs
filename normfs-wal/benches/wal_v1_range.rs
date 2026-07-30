@@ -36,12 +36,11 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use uintn::UintN;
 
-/// Matches the delivery channel a served read uses; large enough that the
-/// consumer is not the bottleneck, small enough to stay a real hand-off.
+/// Large enough that the consumer is not the bottleneck, small enough to stay
+/// a real hand-off.
 const CHANNEL_CAPACITY: usize = 1024;
 
-/// Cap on enqueued-but-unwritten bytes while building, so a build much larger
-/// than RAM stays bounded. See wal_memory for what this is worth.
+/// Bounds the build backlog; see wal_memory.
 const BUILD_IN_FLIGHT_BYTES: u64 = 256 * 1024 * 1024;
 const CHECK_EVERY: u64 = 1024;
 
@@ -109,8 +108,7 @@ async fn build_file(
     (store, queue_id, file_id)
 }
 
-/// Read every entry from id 0 with the given `step`, draining deliveries on a
-/// separate task, and return how many entries arrived.
+/// Read every entry from id 0 at `step`, draining on a separate task.
 async fn read_all(store: &WalStore, queue_id: &QueueId, file_id: &UintN, step: usize) -> u64 {
     let (tx, mut rx) = mpsc::channel::<ReadEntry>(CHANNEL_CAPACITY);
     let drain = tokio::spawn(async move {
@@ -134,8 +132,7 @@ async fn read_all(store: &WalStore, queue_id: &QueueId, file_id: &UintN, step: u
         .await
         .unwrap();
 
-    // The reader holds its own borrow of the sender; dropping ours ends the
-    // drain task's loop.
+    // The reader holds its own sender; dropping ours ends the drain loop.
     drop(tx);
     drain.await.unwrap()
 }

@@ -31,9 +31,8 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = BenchConfig::from_env();
     cfg.print_header("NormFS Write Benchmark");
 
-    // A fresh directory each run: appending to a previous dataset would measure
-    // neither it nor this one, and would leave the reader a dataset whose
-    // contents match no single configuration.
+    // Fresh directory: appending to a previous dataset measures neither it nor
+    // this one, and leaves the reader a dataset matching no configuration.
     cfg.reset_dir()?;
 
     let normfs = NormFS::new(cfg.dir.clone(), cfg.settings()).await?;
@@ -88,9 +87,8 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     });
     normfs.close().await?;
 
-    // `enqueue` hands off to a writer task, so the close is where the tail of
-    // the data actually reaches disk. Timing only the loop reports memory speed
-    // for the last stretch.
+    // `enqueue` hands off to a writer task, so the close is where the tail
+    // reaches disk. Timing only the loop reports memory speed.
     let total_elapsed = start_time.elapsed();
     let total_mb = cfg.total_bytes() as f64 / (1024.0 * 1024.0);
 
@@ -112,8 +110,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         dir_size(&cfg.dir) as f64 / (1u64 << 30) as f64
     );
 
-    // Lets the read benchmark verify it is reading this dataset rather than one
-    // left by a run with different settings.
+    // Lets the read benchmark reject a dataset from different settings.
     cfg.write_manifest()?;
 
     println!();

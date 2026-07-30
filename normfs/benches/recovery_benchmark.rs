@@ -66,10 +66,9 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = BenchConfig::from_env();
     cfg.print_header("NormFS Recovery Benchmark");
 
-    // Just under one file, so everything lands in a single full WAL file and
-    // recovery scans all of it. Writing more would only add older files the
-    // backward walk stops before reaching, leaving a near-empty newest file and
-    // a recovery time close to zero — which measures nothing.
+    // Just under one file, so recovery scans a full one. Writing more only adds
+    // older files the backward walk never reaches, leaving a near-empty newest
+    // file and a recovery time near zero.
     let blocks = (cfg.wal_file_bytes as u64 * 95 / 100) / cfg.block_size as u64;
     assert!(
         blocks > 0,
@@ -111,9 +110,8 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    // Measured before the first pass: opening the queue for write starts a new
-    // WAL file, so after a pass the newest file is an empty one and no longer
-    // the file recovery actually scanned.
+    // Before the first pass: opening the queue for write starts a new WAL file,
+    // so afterwards the newest file is an empty one.
     let scanned = newest_wal_len(&cfg.dir).unwrap_or(0);
     println!();
 
@@ -122,8 +120,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     let mut ready_secs: Vec<f64> = Vec::with_capacity(n_passes);
 
     for pass in 1..=n_passes {
-        // A fresh instance per pass: recovery only happens on the way in, so
-        // reusing one would measure nothing after the first.
+        // Fresh instance per pass: recovery only happens on the way in.
         let open_start = Instant::now();
         let normfs = NormFS::new(cfg.dir.clone(), cfg.settings()).await?;
         let open = open_start.elapsed().as_secs_f64();
@@ -145,8 +142,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         ready_secs.push(ready);
     }
 
-    // The first pass reads a cold file and the rest read a warm one, so the
-    // spread is part of the answer rather than noise to average away.
+    // First pass reads cold, the rest warm, so the spread is part of the answer.
     println!();
     println!("Recovery benchmark completed!");
     println!("========================");
@@ -165,8 +161,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
             scanned_mib / ready_median
         );
     }
-    // A small newest file means the walk had almost nothing to do, so the
-    // number above says little about recovery on a real restart.
+    // A small newest file means the walk had almost nothing to do.
     if scanned * 2 < cfg.wal_file_bytes as u64 {
         println!(
             "Note: that file is under half of NORMFS_BENCH_WAL_FILE_MIB, so this run \
@@ -199,8 +194,8 @@ fn report(label: &str, v: &[f64]) {
     );
 }
 
-/// Every `.wal` file under `dir`, newest last by file name length then order —
-/// ids are zero-padded per file, so a plain sort puts the newest at the end.
+/// Every `.wal` file under `dir`, newest last: ids are zero-padded, so a plain
+/// sort orders them.
 fn wal_files(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     collect_wal(dir, &mut found);
@@ -232,8 +227,7 @@ fn newest_wal_len(dir: &std::path::Path) -> Option<u64> {
         .map(|m| m.len())
 }
 
-/// Drop the last few bytes of the newest WAL file, leaving a partial entry for
-/// recovery to discard.
+/// Leave a partial entry at the tail for recovery to discard.
 fn truncate_newest_wal(dir: &std::path::Path) -> Result<PathBuf, String> {
     let path = wal_files(dir)
         .pop()

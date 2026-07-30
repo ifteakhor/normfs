@@ -1750,14 +1750,9 @@ async fn test_recovery_multiple_skipped_files() {
         fs.close().await.unwrap();
     }
 
-    // Verify file 5 was reused for writing (empty latest file).
-    //
-    // Checked after the close rather than while the queue is open: the writer
-    // puts the file header and the entry through `tokio::fs::File`, which
-    // accepts the bytes before the blocking write has actually placed them in
-    // the file. Reading earlier races that write instead of testing anything,
-    // and the race got easier to lose once recovery stopped being slow enough
-    // to hide it.
+    // File 5 should have been reused. Checked after close: the writer goes
+    // through `tokio::fs::File`, which accepts bytes before the blocking write
+    // places them in the file, so reading while the queue is open races it.
     let file_5_content = tokio::fs::read(&file_5).await.unwrap();
     assert!(
         !file_5_content.is_empty(),

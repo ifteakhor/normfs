@@ -33,10 +33,9 @@ use uintn::UintN;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 
-/// Wraps the system allocator to track live bytes and the high-water mark.
-///
-/// `Relaxed` throughout: the counters are statistics, not synchronisation, and
-/// the peak is only read once both phases have finished.
+/// Tracks live bytes and the high-water mark. `Relaxed` throughout: these are
+/// statistics, not synchronisation, and the peak is read only after both
+/// phases finish.
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
@@ -66,11 +65,10 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
-/// Add `size` to the live total and raise the peak if the result exceeds it.
 fn bump(size: usize) {
     let live = LIVE.fetch_add(size, Ordering::Relaxed) + size;
-    // Compare-and-swap rather than a plain store: a concurrent allocation may
-    // have already published a higher mark, and the peak must never go down.
+    // CAS rather than a store: a concurrent allocation may have published a
+    // higher mark, and the peak must never go down.
     let mut peak = PEAK.load(Ordering::Relaxed);
     while live > peak {
         match PEAK.compare_exchange_weak(peak, live, Ordering::Relaxed, Ordering::Relaxed) {
@@ -135,8 +133,8 @@ async fn build_file(
         .await
         .unwrap();
 
-    // One shared payload: `Bytes::clone` is a refcount bump, so the records
-    // themselves cannot be what grows. Anything the build retains is the WAL's.
+    // One shared payload: `Bytes::clone` is a refcount bump, so anything the
+    // build retains is the WAL's, not the records'.
     let record = Bytes::from(vec![0xABu8; payload]);
     let wal_path = file_id.to_file_path(queue_id.to_wal_dir(root).to_str().unwrap(), "wal");
     for i in 0..n {
@@ -144,12 +142,8 @@ async fn build_file(
             .enqueue(&queue_id, UintN::from(i), record.clone())
             .unwrap();
 
-        // `enqueue` is synchronous and hands off to a writer task, so an
-        // unthrottled loop produces at memory speed while the writer drains at
-        // disk speed and the gap stays on the heap. Gate on bytes actually
-        // landed so the backlog cannot exceed BUILD_IN_FLIGHT_BYTES; checked
-        // every CHECK_EVERY entries because the stat is not free and the
-        // backlog cannot move far in between.
+        // Gate on bytes actually landed, or the producer runs at memory speed
+        // while the writer drains at disk speed and the gap stays on the heap.
         if i % CHECK_EVERY == 0 {
             let enqueued = (i + 1) * payload as u64;
             let mut stalled = 0u32;
