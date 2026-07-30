@@ -6,7 +6,6 @@
 //! produced it.
 //!
 //!   NORMFS_BENCH_GIB          dataset size in GiB (default 2; 50 for a full run)
-//!   NORMFS_BENCH_BLOCK_KIB    record size in KiB (default 12)
 //!   NORMFS_BENCH_FORMAT       v0 or v1 (default: the WAL crate's own default)
 //!   NORMFS_BENCH_COMPRESSION  none, gzip, xz or zstd (default zstd)
 //!   NORMFS_BENCH_ENCRYPTION   none or aes (default aes)
@@ -36,6 +35,9 @@ use normfs_wal::{WalEntryFormat, WalSettings};
 
 const MANIFEST: &str = "bench-manifest.txt";
 
+/// Record size. A large sensor block, and the size every reported figure uses.
+const BLOCK_SIZE: usize = 12 * 1024;
+
 pub struct BenchConfig {
     pub dir: PathBuf,
     pub block_size: usize,
@@ -53,8 +55,6 @@ pub struct BenchConfig {
 impl BenchConfig {
     pub fn from_env() -> Self {
         let gib = env_u64("NORMFS_BENCH_GIB", 2);
-        let block_size = env_u64("NORMFS_BENCH_BLOCK_KIB", 12) as usize * 1024;
-        assert!(block_size > 0, "NORMFS_BENCH_BLOCK_KIB must be non-zero");
 
         // Abort on an unrecognised value: a silent default would label a run
         // with a format it did not use.
@@ -96,8 +96,8 @@ impl BenchConfig {
 
         Self {
             dir,
-            block_size,
-            total_blocks: ((gib << 30) / block_size as u64) as usize,
+            block_size: BLOCK_SIZE,
+            total_blocks: ((gib << 30) / BLOCK_SIZE as u64) as usize,
             format,
             compression,
             encryption,

@@ -17,8 +17,6 @@
 //!
 //! Warmup / measurement default to 5 s / 30 s, overridable (seconds) with
 //! WAL_BENCH_WARMUP / WAL_BENCH_MEASURE. Sizes are overridable with
-//! WAL_BENCH_RANGE_SMALL_N (default 100_000, 64 B records),
-//! WAL_BENCH_RANGE_LARGE_N (default 20_000, 12 KiB records) and
 //! WAL_BENCH_RANGE_GIB (default 2), which sizes the uncached case in GiB — set
 //! it to at least 2x RAM or the file stays in the page cache.
 //!
@@ -29,7 +27,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use normfs_types::{DataSource, QueueId, QueueIdResolver, ReadEntry};
 use normfs_wal::{WalEntryFormat, WalHeader, WalSettings, WalStore};
 use tokio::runtime::Runtime;
@@ -43,6 +41,11 @@ const CHANNEL_CAPACITY: usize = 1024;
 /// Bounds the build backlog; see wal_memory.
 const BUILD_IN_FLIGHT_BYTES: u64 = 256 * 1024 * 1024;
 const CHECK_EVERY: u64 = 1024;
+
+/// Entry counts for the two cached shapes: small records, where per-entry cost
+/// dominates, and 12 KiB blocks, where the bytes do.
+const SMALL_N: u64 = 100_000;
+const LARGE_N: u64 = 20_000;
 
 fn env_secs(var: &str, default: u64) -> Duration {
     Duration::from_secs(
@@ -152,22 +155,15 @@ fn bench_range(c: &mut Criterion) {
     let big_n = (range_gib << 30) / (big_payload as u64 + 28);
 
     let cases = [
-        ("small", env_u64("WAL_BENCH_RANGE_SMALL_N", 100_000), 64usize),
-        (
-            "large",
-            env_u64("WAL_BENCH_RANGE_LARGE_N", 20_000),
-            big_payload,
-        ),
+        ("small", SMALL_N, 64usize),
+        ("large", LARGE_N, big_payload),
         ("uncached", big_n, big_payload),
     ];
 
     for (case, n, payload) in cases {
         // A multi-GiB read takes seconds per iteration; 10 is criterion's floor.
         g.sample_size(if case == "uncached" { 10 } else { 20 });
-        for (label, format) in [
-            ("v0", WalEntryFormat::V0),
-            ("v1", WalEntryFormat::V1),
-        ] {
+        for (label, format) in [("v0", WalEntryFormat::V0), ("v1", WalEntryFormat::V1)] {
             let tmp = tempfile::tempdir().unwrap();
             let (store, queue_id, file_id) =
                 rt.block_on(build_file(tmp.path(), format, n, payload));

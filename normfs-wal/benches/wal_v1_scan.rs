@@ -11,7 +11,6 @@
 //!
 //! Other knobs:
 //!   WAL_BENCH_SCAN_GIB   size of the uncached case, in GiB (default 2)
-//!   WAL_BENCH_CACHED_N   entries in the large cached case (default 400)
 //!   WAL_BENCH_ORDER      v0v1 (default) or v1v0 — which format is built and
 //!                        scanned first; run both to tell a format difference
 //!                        apart from a running-order one
@@ -24,7 +23,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use normfs_types::{QueueId, QueueIdResolver};
 use normfs_wal::{WalEntryFormat, WalHeader, WalSettings, WalStore};
 use tokio::runtime::Runtime;
@@ -51,6 +50,10 @@ fn meas() -> Duration {
 /// orders of magnitude — and small enough to bound a build larger than RAM.
 const BUILD_IN_FLIGHT_BYTES: u64 = 256 * 1024 * 1024;
 const CHECK_EVERY: u64 = 1024;
+
+/// Entries in the large cached case. 400 was too few to resolve a few percent —
+/// run-to-run swings of ±0.8 ms swamped the difference.
+const LARGE_CACHED_N: u64 = 20_000;
 
 /// Current on-disk length of the WAL file, or 0 before it exists.
 fn file_len(path: &Path) -> u64 {
@@ -153,11 +156,6 @@ fn bench_recovery_scan(c: &mut Criterion) {
     // Sized against V0's wider 28-byte framing, so neither format exceeds it.
     let big_n = (scan_gib << 30) / (big_payload as u64 + 28);
 
-    let large_cached_n: u64 = std::env::var("WAL_BENCH_CACHED_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(400);
-
     // Datasets are built one format after the other, so the second inherits the
     // first's free-space layout and a warmer drive — worth a few percent on a
     // multi-GiB scan, enough to read as a format difference. Run both orders.
@@ -171,13 +169,13 @@ fn bench_recovery_scan(c: &mut Criterion) {
         other => panic!("WAL_BENCH_ORDER must be v0v1 or v1v0, got {other:?}"),
     };
     eprintln!(
-        "[bench] order={}, scan_gib={scan_gib}, cached_n={large_cached_n}",
+        "[bench] order={}, scan_gib={scan_gib}",
         formats.map(|(l, _)| l).join("->")
     );
 
     let cases = [
         ("small_cached", 100_000u64, 64usize),
-        ("large_cached", large_cached_n, big_payload),
+        ("large_cached", LARGE_CACHED_N, big_payload),
         ("large_uncached", big_n, big_payload),
     ];
 
@@ -212,9 +210,7 @@ fn bench_recovery_scan(c: &mut Criterion) {
                         rt.block_on(async {
                             let start = Instant::now();
                             for _ in 0..iters {
-                                black_box(
-                                    store.get_file_end(&queue_id, &file_id).await.unwrap(),
-                                );
+                                black_box(store.get_file_end(&queue_id, &file_id).await.unwrap());
                             }
                             start.elapsed()
                         })
