@@ -1688,22 +1688,24 @@ async fn test_recovery_skipped_file_in_sequence() {
             "Should continue from ID 10 after finding file 1 with entries 0-9"
         );
 
-        // Verify file 3 was reused for writing (empty latest file)
-        let file_3_content = tokio::fs::read(&file_3).await.unwrap();
-        assert!(
-            !file_3_content.is_empty(),
-            "File 3 should have been reused (empty latest file)"
-        );
-
-        // Verify file 2 was NOT created (gap not filled)
-        let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-        assert!(
-            !tokio::fs::try_exists(&file_2).await.unwrap(),
-            "File 2 should not exist - gaps should not be filled"
-        );
-
         fs.close().await.unwrap();
     }
+
+    // Checked after close: the writer goes through `tokio::fs::File`, which
+    // accepts bytes before the blocking write places them in the file, so
+    // reading while the queue is open races it.
+    let file_3_content = tokio::fs::read(&file_3).await.unwrap();
+    assert!(
+        !file_3_content.is_empty(),
+        "File 3 should have been reused (empty latest file)"
+    );
+
+    // Verify file 2 was NOT created (gap not filled)
+    let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
+    assert!(
+        !tokio::fs::try_exists(&file_2).await.unwrap(),
+        "File 2 should not exist - gaps should not be filled"
+    );
 }
 
 /// Test scenario: Multiple missing files in sequence
