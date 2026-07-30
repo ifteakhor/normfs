@@ -147,39 +147,6 @@ async fn next_v1_frame<R: AsyncRead + Unpin>(
     Ok(V1Frame::Ready(total))
 }
 
-/// Read the bytes of one framed V1 entry — `[record_size varint32][record]
-/// [crc32c u32 LE]` — off `reader` into `buf` (cleared first). Returns
-/// `Ok(false)` at a clean end of file on an entry boundary (no more entries),
-/// `Ok(true)` when a whole frame was read, and `Err(())` when the frame is
-/// truncated or its length prefix is malformed. Only the framing lives here;
-/// the C decoder in `WalEntryV1::iter_next` validates the contents and CRC.
-async fn read_v1_frame<R: AsyncRead + Unpin>(reader: &mut R, buf: &mut Vec<u8>) -> Result<bool, ()> {
-    buf.clear();
-    let mut byte = [0u8; 1];
-    // varint32 length prefix: at most 5 bytes, ending at the byte whose high
-    // bit is clear.
-    loop {
-        match reader.read_exact(&mut byte).await {
-            Ok(_) => {}
-            Err(_) => return if buf.is_empty() { Ok(false) } else { Err(()) },
-        }
-        buf.push(byte[0]);
-        if byte[0] & 0x80 == 0 || buf.len() == 5 {
-            break;
-        }
-    }
-    let record_size = match varint::decode_u32(buf) {
-        Ok(result) => result.value as usize,
-        Err(_) => return Err(()),
-    };
-    let record_start = buf.len();
-    buf.resize(record_start + record_size + WAL_ENTRY_V1_CRC_SIZE, 0);
-    if reader.read_exact(&mut buf[record_start..]).await.is_err() {
-        return Err(());
-    }
-    Ok(true)
-}
-
 pub async fn read_wal_header(base_path: &Path, file_id: &UintN) -> Result<WalHeader, WalError> {
     let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
     log::debug!("WAL reader: reading header from file {}", file_id);
@@ -581,8 +548,10 @@ pub async fn read_wal_file_range(
         });
     }
 
-    let mut reader = BufReader::with_capacity(WAL_READ_BUFFER_CAPACITY, file);
-    let (any_header, _) = AnyWalHeader::from_reader(&mut reader).await?;
+    let mut block = BlockReader::new(file, WAL_READ_BUFFER_CAPACITY);
+    block.fill(WAL_HEADER_PROBE).await?;
+    let (any_header, header_size) = AnyWalHeader::from_bytes(block.unread())?;
+    block.consume(header_size);
     let wal_header = WalHeader::from(&any_header);
 
     // V1: frame-by-frame read from the file, deriving each id from
@@ -601,7 +570,6 @@ pub async fn read_wal_file_range(
         let mut entries_skipped = 0u64;
         let step = step.max(1);
         let mut index = 0u64;
-        let mut frame: Vec<u8> = Vec::new();
 
         loop {
             if target.is_closed() {
@@ -609,16 +577,29 @@ pub async fn read_wal_file_range(
                 return Ok(ReadRangeResult::ChannelClosed);
             }
 
-            match read_v1_frame(&mut reader, &mut frame).await {
-                Ok(true) => {}
-                _ => break,
-            }
+            let total = match next_v1_frame(&mut block).await? {
+                V1Frame::Ready(total) => total,
+                V1Frame::End | V1Frame::Truncated => break,
+            };
 
-            let (entry_id, record): (UintN, &[u8]) =
-                match WalEntryV1::iter_next(&frame, num_entries_before, index) {
-                    Ok((entry, id, _)) => (UintN::from(id), entry.record),
-                    Err(_) => break,
+            // Decode in place. Only `Copy` data leaves the borrow — the record
+            // is located by offset so it can be lifted out of the window later,
+            // once it is known whether this entry is actually being delivered.
+            let decoded =
+                match WalEntryV1::iter_next(&block.unread()[..total], num_entries_before, index) {
+                    Ok((entry, id, consumed)) => {
+                        let record_size = entry.record.len();
+                        let record_offset = consumed - record_size - WAL_ENTRY_V1_CRC_SIZE;
+                        Some((id, record_offset, record_size, consumed))
+                    }
+                    Err(_) => None,
                 };
+            let (id, record_offset, record_size, consumed) = match decoded {
+                Some(v) => v,
+                None => break,
+            };
+
+            let entry_id = UintN::from(id);
             index += 1;
             last_processed_id = Some(entry_id.clone());
 
@@ -636,9 +617,20 @@ pub async fn read_wal_file_range(
                         .map(|until| &entry_id <= until)
                         .unwrap_or(true));
 
+            // Lift the record out of the window before advancing past it, and
+            // only for entries that are actually delivered — a filtered-out
+            // entry costs no copy.
+            let record_bytes = if in_range && entry_id.in_step(from_id, step) {
+                Some(Bytes::copy_from_slice(
+                    &block.unread()[record_offset..record_offset + record_size],
+                ))
+            } else {
+                None
+            };
+            block.consume(consumed);
+
             if in_range {
-                if entry_id.in_step(from_id, step) {
-                    let record_bytes = Bytes::copy_from_slice(record);
+                if let Some(record_bytes) = record_bytes {
                     if target
                         .send(ReadEntry::new(entry_id.clone(), record_bytes, data_source))
                         .await
@@ -694,6 +686,13 @@ pub async fn read_wal_file_range(
 
         return Ok(result);
     }
+
+    // V0 keeps its byte-oriented decoder. The window read past the header, so
+    // seek back to the first entry rather than handing those bytes over.
+    let (_, file) = block.into_parts();
+    let mut file = file;
+    file.seek(SeekFrom::Start(header_size as u64)).await?;
+    let mut reader = BufReader::with_capacity(WAL_READ_BUFFER_CAPACITY, file);
 
     let mut last_read_id: Option<UintN> = None;
     let mut last_processed_id: Option<UintN> = None;
