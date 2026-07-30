@@ -64,13 +64,6 @@ harness = false
 name = "subscribe_benchmark"
 harness = false
 
-[[bench]]
-name = "write_benchmark_compressed_encrypted"
-harness = false
-
-[[bench]]
-name = "read_benchmark_compressed_encrypted"
-harness = false
 
 [[bench]]
 name = "parallel_tail_benchmark"

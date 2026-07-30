@@ -1,13 +1,33 @@
-use normfs::{NormFS, NormFsSettings, ReadPosition};
-use std::path::PathBuf;
+//! End-to-end read throughput through `NormFS::read`, over the dataset a write
+//! benchmark left behind.
+//!
+//! Reuses that dataset rather than rebuilding it — at full scale the write would
+//! dominate — so it checks the dataset's manifest first and refuses one written
+//! with different settings. See `common/mod.rs` for the knobs.
+//!
+//!   cargo bench -p normfs --bench write_benchmark   # produces the dataset
+//!   cargo bench -p normfs --bench read_benchmark    # same NORMFS_BENCH_* values
+
+mod common;
+
+use common::{dir_size, BenchConfig};
+use normfs::{NormFS, ReadPosition};
 use std::sync::Arc;
 use std::time::Instant;
 use uintn::UintN;
 
-const BLOCK_SIZE: usize = 12 * 1024; // 12KB
-const TOTAL_SIZE: usize = 50 * 1024 * 1024 * 1024; // 50GB
-const TOTAL_BLOCKS: usize = TOTAL_SIZE / BLOCK_SIZE;
-const PROGRESS_INTERVAL: usize = 10_000; // Print progress every 10k blocks
+const PROGRESS_INTERVAL: usize = 10_000;
+
+/// One pass over a freshly written dataset is not reproducible here — measured
+/// spreads of 3x between runs — so the default takes several and reports every
+/// one alongside the median. A single number would hide that.
+fn passes() -> usize {
+    std::env::var("NORMFS_BENCH_PASSES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+        .max(1)
+}
 
 #[tokio::main]
 async fn main() {
@@ -20,144 +40,160 @@ async fn main() {
 }
 
 async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
-    let bench_dir = PathBuf::from("/tmp/normfs-bench");
+    let cfg = BenchConfig::from_env();
+    cfg.print_header("NormFS Read Benchmark");
 
-    if !bench_dir.exists() {
-        eprintln!(
-            "Error: Benchmark data directory does not exist: {:?}",
-            bench_dir
-        );
-        eprintln!("Please run the write benchmark first to generate data.");
+    // Reading a dataset that does not match this configuration silently
+    // measures the wrong thing, so fail loudly instead.
+    if let Err(e) = cfg.check_manifest() {
+        eprintln!("Error: {e}");
         std::process::exit(1);
     }
-
-    println!("NormFS Read Benchmark");
-    println!("========================");
-    println!("Block size: {} KB", BLOCK_SIZE / 1024);
-    println!("Total size: {} GB", TOTAL_SIZE / (1024 * 1024 * 1024));
-    println!("Total blocks: {}", TOTAL_BLOCKS);
-    println!("Data directory: {:?}", bench_dir);
+    println!(
+        "Dataset verified, {:.2} GiB on disk",
+        dir_size(&cfg.dir) as f64 / (1u64 << 30) as f64
+    );
     println!();
 
-    let settings = NormFsSettings::default();
-    let normfs = NormFS::new(bench_dir.clone(), settings).await?;
-
+    let normfs = NormFS::new(cfg.dir.clone(), cfg.settings()).await?;
     let normfs = Arc::new(normfs);
     let queue_name = normfs.resolve("write_bench_queue");
-
     normfs.ensure_queue_exists_for_write(&queue_name).await?;
 
-    println!("Reading {} total blocks", TOTAL_BLOCKS);
+    let n_passes = passes();
+    let mut pass_secs: Vec<f64> = Vec::with_capacity(n_passes);
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<normfs::ReadEntry>(1000);
+    for pass in 1..=n_passes {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<normfs::ReadEntry>(1000);
+        let start_offset = UintN::from(0u64);
+        let limit = cfg.total_blocks as u64;
 
-    let start_offset = UintN::from(0u64);
-    let limit = TOTAL_BLOCKS as u64;
+        println!("Starting read pass {pass}/{n_passes}...");
+        let start_time = Instant::now();
+        let mut last_progress_time = start_time;
+        let mut last_progress_blocks = 0;
 
-    println!("Starting read benchmark...");
-    let start_time = Instant::now();
-    let mut last_progress_time = start_time;
-    let mut last_progress_blocks = 0;
+        let normfs_clone = normfs.clone();
+        let queue_for_pass = queue_name.clone();
+        let read_task = tokio::spawn(async move {
+            normfs_clone
+                .read(
+                    &queue_for_pass,
+                    ReadPosition::Absolute(start_offset.clone()),
+                    limit,
+                    1,
+                    tx,
+                )
+                .await
+        });
 
-    let normfs_clone = normfs.clone();
-    let read_task = tokio::spawn(async move {
-        normfs_clone
-            .read(
-                &queue_name,
-                ReadPosition::Absolute(start_offset.clone()),
-                limit,
-                1,
-                tx,
-            )
-            .await
-    });
+        let mut entries_read = 0u64;
+        let mut expected_id: Option<UintN> = None;
+        let mut bytes_read = 0usize;
 
-    let mut entries_read = 0u64;
-    let mut expected_id: Option<UintN> = None;
-    let mut bytes_read = 0usize;
+        while let Some(entry) = rx.recv().await {
+            if expected_id.is_none() {
+                println!("Queue starts at entry ID: {}", entry.id);
+                expected_id = Some(entry.id.clone());
+            }
 
-    while let Some(entry) = rx.recv().await {
-        // On first entry, initialize expected_id
-        if expected_id.is_none() {
-            println!("Queue starts at entry ID: {}", entry.id);
-            expected_id = Some(entry.id.clone());
-        }
+            if let Some(ref exp_id) = expected_id {
+                if &entry.id != exp_id {
+                    panic!(
+                        "Order corruption detected! Expected entry ID: {}, but got: {}",
+                        exp_id, entry.id
+                    );
+                }
+            }
 
-        if let Some(ref exp_id) = expected_id {
-            if &entry.id != exp_id {
+            if entry.data.len() != cfg.block_size {
                 panic!(
-                    "Order corruption detected! Expected entry ID: {}, but got: {}",
-                    exp_id, entry.id
+                    "Unexpected data size! Expected: {} bytes, but got: {} bytes for entry ID: {}",
+                    cfg.block_size,
+                    entry.data.len(),
+                    entry.id
                 );
             }
-        }
 
-        if entry.data.len() != BLOCK_SIZE {
-            panic!(
-                "Unexpected data size! Expected: {} bytes, but got: {} bytes for entry ID: {}",
-                BLOCK_SIZE,
-                entry.data.len(),
-                entry.id
-            );
-        }
+            expected_id = Some(entry.id.increment());
+            entries_read += 1;
+            bytes_read += entry.data.len();
 
-        expected_id = Some(entry.id.increment());
-        entries_read += 1;
-        bytes_read += entry.data.len();
+            if entries_read.is_multiple_of(PROGRESS_INTERVAL as u64)
+                || entries_read == cfg.total_blocks as u64
+            {
+                let current_time = Instant::now();
+                let total_elapsed = current_time.duration_since(start_time);
+                let interval_elapsed = current_time.duration_since(last_progress_time);
 
-        if entries_read.is_multiple_of(PROGRESS_INTERVAL as u64)
-            || entries_read == TOTAL_BLOCKS as u64
-        {
-            let current_time = Instant::now();
-            let total_elapsed = current_time.duration_since(start_time);
-            let interval_elapsed = current_time.duration_since(last_progress_time);
+                let total_mb = bytes_read as f64 / (1024.0 * 1024.0);
+                let progress_pct = entries_read as f64 / cfg.total_blocks as f64 * 100.0;
+                let interval_bytes =
+                    (entries_read - last_progress_blocks) as usize * cfg.block_size;
 
-            let total_mb = bytes_read as f64 / (1024.0 * 1024.0);
-            let total_gb = total_mb / 1024.0;
-            let progress_pct = entries_read as f64 / TOTAL_BLOCKS as f64 * 100.0;
-
-            let interval_bytes = (entries_read - last_progress_blocks) as usize * BLOCK_SIZE;
-            let total_speed_mbps = total_mb / total_elapsed.as_secs_f64();
-            let interval_speed_mbps =
-                (interval_bytes as f64 / (1024.0 * 1024.0)) / interval_elapsed.as_secs_f64();
-
-            println!(
-                "[{:6.2}%] Read: {:.2} GB | Total speed: {:.2} MB/s | Current speed: {:.2} MB/s | Entries: {} | Elapsed: {:.1}s",
+                println!(
+                "[{:6.2}%] Read: {:.2} GiB | Total speed: {:.2} MB/s | Current speed: {:.2} MB/s | Entries: {} | Elapsed: {:.1}s",
                 progress_pct,
-                total_gb,
-                total_speed_mbps,
-                interval_speed_mbps,
+                total_mb / 1024.0,
+                total_mb / total_elapsed.as_secs_f64(),
+                (interval_bytes as f64 / (1024.0 * 1024.0)) / interval_elapsed.as_secs_f64(),
                 entries_read,
                 total_elapsed.as_secs_f64()
             );
 
-            last_progress_time = current_time;
-            last_progress_blocks = entries_read;
+                last_progress_time = current_time;
+                last_progress_blocks = entries_read;
+            }
         }
+
+        read_task.await??;
+
+        let total_elapsed = start_time.elapsed();
+        let total_mb = bytes_read as f64 / (1024.0 * 1024.0);
+
+        // A short read is a result, not a footnote: fail so it cannot be mistaken
+        // for a throughput number over the whole dataset.
+        if entries_read != cfg.total_blocks as u64 {
+            eprintln!(
+                "ERROR: expected {} entries but read {}",
+                cfg.total_blocks, entries_read
+            );
+            std::process::exit(1);
+        }
+
+        println!(
+            "Pass {pass}/{n_passes}: {:.2} s, {:.2} MB/s, {} entries",
+            total_elapsed.as_secs_f64(),
+            total_mb / total_elapsed.as_secs_f64(),
+            entries_read
+        );
+        pass_secs.push(total_elapsed.as_secs_f64());
     }
 
-    read_task.await??;
-
-    let total_elapsed = start_time.elapsed();
-    let total_mb = bytes_read as f64 / (1024.0 * 1024.0);
-    let avg_speed_mbps = total_mb / total_elapsed.as_secs_f64();
+    let total_mb = cfg.total_bytes() as f64 / (1024.0 * 1024.0);
+    let mut sorted = pass_secs.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = sorted[sorted.len() / 2];
 
     println!();
     println!("Read benchmark completed!");
     println!("========================");
-    println!("Total time: {:.2} seconds", total_elapsed.as_secs_f64());
-    println!("Average speed: {:.2} MB/s", avg_speed_mbps);
-    println!("Total entries read: {}", entries_read);
-    println!("Total bytes read: {:.2} GB", total_mb / 1024.0);
-    println!("Data integrity: ✓ All entry IDs are in correct sequential order");
+    println!("Data integrity: all entry IDs in sequential order, all blocks full size");
+    println!(
+        "Passes: {} | fastest {:.2} s | median {:.2} s | slowest {:.2} s",
+        n_passes,
+        sorted[0],
+        median,
+        sorted[sorted.len() - 1]
+    );
+    println!("Median speed: {:.2} MB/s", total_mb / median);
+    // The spread is the honest headline when it is wide: a median over passes
+    // that disagree by multiples is not a throughput figure.
+    println!(
+        "Spread (slowest/fastest): {:.2}x",
+        sorted[sorted.len() - 1] / sorted[0]
+    );
     println!();
-
-    if entries_read != TOTAL_BLOCKS as u64 {
-        eprintln!(
-            "WARNING: Expected {} entries but read {}",
-            TOTAL_BLOCKS, entries_read
-        );
-    }
 
     println!("Closing NormFS...");
     let normfs = Arc::try_unwrap(normfs).unwrap_or_else(|arc| {

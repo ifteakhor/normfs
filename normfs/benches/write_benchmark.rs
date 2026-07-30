@@ -1,13 +1,21 @@
+//! End-to-end write throughput through `NormFS::enqueue`.
+//!
+//! Size, block size, WAL entry format and directory come from the environment —
+//! see `common/mod.rs`. Defaults to 2 GiB; use NORMFS_BENCH_GIB=50 for a full
+//! run, and make sure the target filesystem has room for it.
+//!
+//!   cargo bench -p normfs --bench write_benchmark
+//!   NORMFS_BENCH_GIB=50 NORMFS_BENCH_FORMAT=v1 cargo bench -p normfs --bench write_benchmark
+
+mod common;
+
 use bytes::Bytes;
-use normfs::{NormFS, NormFsSettings};
-use std::path::PathBuf;
+use common::{dir_size, BenchConfig};
+use normfs::NormFS;
 use std::sync::Arc;
 use std::time::Instant;
 
-const BLOCK_SIZE: usize = 12 * 1024; // 12KB
-const TOTAL_SIZE: usize = 50 * 1024 * 1024 * 1024; // 50GB
-const TOTAL_BLOCKS: usize = TOTAL_SIZE / BLOCK_SIZE;
-const PROGRESS_INTERVAL: usize = 10_000; // Print progress every 10k blocks
+const PROGRESS_INTERVAL: usize = 10_000;
 
 #[tokio::main]
 async fn main() {
@@ -20,64 +28,46 @@ async fn main() {
 }
 
 async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
-    let bench_dir = PathBuf::from("/tmp/normfs-bench");
+    let cfg = BenchConfig::from_env();
+    cfg.print_header("NormFS Write Benchmark");
 
-    // Create directory if it doesn't exist
-    std::fs::create_dir_all(&bench_dir)?;
+    // A fresh directory each run: appending to a previous dataset would measure
+    // neither it nor this one, and would leave the reader a dataset whose
+    // contents match no single configuration.
+    cfg.reset_dir()?;
 
-    println!("NormFS Write Benchmark");
-    println!("========================");
-    println!("Block size: {} KB", BLOCK_SIZE / 1024);
-    println!("Total size: {} GB", TOTAL_SIZE / (1024 * 1024 * 1024));
-    println!("Total blocks: {}", TOTAL_BLOCKS);
-    println!("Data directory: {:?}", bench_dir);
-    println!();
-
-    let settings = NormFsSettings {
-        max_disk_usage_per_queue: Some(1024 * 1024 * 1024), // 1GB per queue
-        ..Default::default()
-    };
-    let normfs = NormFS::new(bench_dir.clone(), settings).await?;
-
+    let normfs = NormFS::new(cfg.dir.clone(), cfg.settings()).await?;
     let normfs = Arc::new(normfs);
     let queue_name = normfs.resolve("write_bench_queue");
-
     normfs.ensure_queue_exists_for_write(&queue_name).await?;
 
-    // Create a 12KB block of data
-    let block_data = vec![0u8; BLOCK_SIZE];
-    let block = Bytes::from(block_data);
+    let block = Bytes::from(vec![0u8; cfg.block_size]);
 
     println!("Starting write benchmark...");
     let start_time = Instant::now();
     let mut last_progress_time = start_time;
     let mut last_progress_blocks = 0;
 
-    for i in 0..TOTAL_BLOCKS {
+    for i in 0..cfg.total_blocks {
         normfs.enqueue(&queue_name, block.clone())?;
 
-        if (i + 1) % PROGRESS_INTERVAL == 0 || i == TOTAL_BLOCKS - 1 {
+        if (i + 1) % PROGRESS_INTERVAL == 0 || i == cfg.total_blocks - 1 {
             let current_time = Instant::now();
             let total_elapsed = current_time.duration_since(start_time);
             let interval_elapsed = current_time.duration_since(last_progress_time);
 
-            let total_bytes_written = (i + 1) * BLOCK_SIZE;
-            let interval_bytes = (i + 1 - last_progress_blocks) * BLOCK_SIZE;
+            let total_bytes_written = (i + 1) * cfg.block_size;
+            let interval_bytes = (i + 1 - last_progress_blocks) * cfg.block_size;
 
             let total_mb = total_bytes_written as f64 / (1024.0 * 1024.0);
-            let total_gb = total_mb / 1024.0;
-            let progress_pct = (i + 1) as f64 / TOTAL_BLOCKS as f64 * 100.0;
-
-            let total_speed_mbps = total_mb / total_elapsed.as_secs_f64();
-            let interval_speed_mbps =
-                (interval_bytes as f64 / (1024.0 * 1024.0)) / interval_elapsed.as_secs_f64();
+            let progress_pct = (i + 1) as f64 / cfg.total_blocks as f64 * 100.0;
 
             println!(
-                "[{:6.2}%] Written: {:.2} GB | Total speed: {:.2} MB/s | Current speed: {:.2} MB/s | Elapsed: {:.1}s",
+                "[{:6.2}%] Written: {:.2} GiB | Total speed: {:.2} MB/s | Current speed: {:.2} MB/s | Elapsed: {:.1}s",
                 progress_pct,
-                total_gb,
-                total_speed_mbps,
-                interval_speed_mbps,
+                total_mb / 1024.0,
+                total_mb / total_elapsed.as_secs_f64(),
+                (interval_bytes as f64 / (1024.0 * 1024.0)) / interval_elapsed.as_secs_f64(),
                 total_elapsed.as_secs_f64()
             );
 
@@ -86,18 +76,9 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let total_elapsed = start_time.elapsed();
-    let total_mb = TOTAL_SIZE as f64 / (1024.0 * 1024.0);
-    let avg_speed_mbps = total_mb / total_elapsed.as_secs_f64();
+    let enqueue_elapsed = start_time.elapsed();
 
     println!();
-    println!("Write benchmark completed!");
-    println!("========================");
-    println!("Total time: {:.2} seconds", total_elapsed.as_secs_f64());
-    println!("Average speed: {:.2} MB/s", avg_speed_mbps);
-    println!("Total blocks written: {}", TOTAL_BLOCKS);
-    println!();
-
     println!("Closing NormFS...");
     let normfs = Arc::try_unwrap(normfs).unwrap_or_else(|arc| {
         panic!(
@@ -107,9 +88,37 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     });
     normfs.close().await?;
 
-    println!("NormFS closed successfully.");
-    println!("Data persisted at: {:?}", bench_dir);
-    println!("This data can be used for read benchmarks.");
+    // `enqueue` hands off to a writer task, so the close is where the tail of
+    // the data actually reaches disk. Timing only the loop reports memory speed
+    // for the last stretch.
+    let total_elapsed = start_time.elapsed();
+    let total_mb = cfg.total_bytes() as f64 / (1024.0 * 1024.0);
+
+    println!();
+    println!("Write benchmark completed!");
+    println!("========================");
+    println!(
+        "Enqueue time: {:.2} s | including close: {:.2} s",
+        enqueue_elapsed.as_secs_f64(),
+        total_elapsed.as_secs_f64()
+    );
+    println!(
+        "Average speed: {:.2} MB/s (including close)",
+        total_mb / total_elapsed.as_secs_f64()
+    );
+    println!("Total blocks written: {}", cfg.total_blocks);
+    println!(
+        "On disk: {:.2} GiB",
+        dir_size(&cfg.dir) as f64 / (1u64 << 30) as f64
+    );
+
+    // Lets the read benchmark verify it is reading this dataset rather than one
+    // left by a run with different settings.
+    cfg.write_manifest()?;
+
+    println!();
+    println!("Data persisted at: {}", cfg.dir.display());
+    println!("Run the read benchmark with the same NORMFS_BENCH_* settings.");
 
     Ok(())
 }
