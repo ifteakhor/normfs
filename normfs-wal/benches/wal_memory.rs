@@ -7,35 +7,33 @@
 //! scan that retains per-entry state cannot work at all, and a build whose
 //! backlog grows without bound caps how large a file can be produced.
 //!
+//! Growth is what matters, so the same shape is run over a 64x range of sizes.
+//! One row is a number; a ladder that stays flat is the answer, and it also
+//! shows up the occasional 2x blip from the read buffer's growth policy for the
+//! noise it is.
+//!
 //! Peak *live heap* is deliberately the metric rather than RSS. RSS also counts
 //! pages the allocator has freed but not returned to the OS, so it can track
 //! dataset size while the program holds almost nothing — the two disagreeing is
 //! itself the finding, and only this number says what the code retains.
 //!
-//! Size defaults to 2 GiB, overridable with WAL_BENCH_MEM_GIB. Use at least
-//! 2x RAM to make a scan genuinely uncached.
-//!
 //!   cargo bench -p normfs-wal --bench wal_memory
-//!   WAL_BENCH_MEM_GIB=8 cargo bench -p normfs-wal --bench wal_memory
+
+mod common;
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
-use bytes::Bytes;
-use normfs_types::{QueueId, QueueIdResolver};
-use normfs_wal::{WalEntryFormat, WalHeader, WalSettings, WalStore};
+use common::{build_file, BIG_PAYLOAD, PAYLOAD};
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
 use uintn::UintN;
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 
 /// Tracks live bytes and the high-water mark. `Relaxed` throughout: these are
-/// statistics, not synchronisation, and the peak is read only after both
-/// phases finish.
+/// statistics, not synchronisation, and the peak is read only after a phase
+/// finishes.
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
@@ -97,94 +95,35 @@ fn mib(bytes: usize) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
-/// Cap on enqueued-but-unwritten bytes during a build. Large enough that the
-/// writer still batches efficiently — a small window paces the producer off the
-/// writer's flush timer and costs orders of magnitude of throughput — and small
-/// enough that a build far larger than RAM stays bounded.
-const BUILD_IN_FLIGHT_BYTES: u64 = 256 * 1024 * 1024;
-const CHECK_EVERY: u64 = 1024;
-
-/// Current on-disk length of the WAL file, or 0 before it exists.
-fn file_len(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-}
-
-async fn build_file(
-    root: &Path,
-    format: WalEntryFormat,
-    n: u64,
-    payload: usize,
-) -> (WalStore, QueueId, UintN) {
-    let (written_tx, _written_rx) = mpsc::unbounded_channel();
-    let (complete_tx, _complete_rx) = mpsc::unbounded_channel();
-    let store = WalStore::new(root, written_tx, complete_tx);
-
-    let queue_id = QueueIdResolver::new("bench").resolve("mem");
-    let file_id = UintN::from(1u64);
-    let settings = WalSettings {
-        max_file_size: 1 << 40, // never rotate: one file per measurement
-        write_buffer_size: 8 * 1024 * 1024,
-        enable_fsync: false,
-        wal_entry_format: format,
-        ..Default::default()
-    };
-    store
-        .start_writer(&queue_id, &file_id, WalHeader::default(), settings, None)
-        .await
-        .unwrap();
-
-    // One shared payload: `Bytes::clone` is a refcount bump, so anything the
-    // build retains is the WAL's, not the records'.
-    let record = Bytes::from(vec![0xABu8; payload]);
-    let wal_path = file_id.to_file_path(queue_id.to_wal_dir(root).to_str().unwrap(), "wal");
-    for i in 0..n {
-        store
-            .enqueue(&queue_id, UintN::from(i), record.clone())
-            .unwrap();
-
-        // Gate on bytes actually landed, or the producer runs at memory speed
-        // while the writer drains at disk speed and the gap stays on the heap.
-        if i % CHECK_EVERY == 0 {
-            let enqueued = (i + 1) * payload as u64;
-            let mut stalled = 0u32;
-            while enqueued.saturating_sub(file_len(&wal_path)) > BUILD_IN_FLIGHT_BYTES {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-                stalled += 1;
-                assert!(stalled < 60_000, "writer made no progress for 120 s at {i}");
-            }
-        }
-    }
-    store.close().await.unwrap();
-
-    (store, queue_id, file_id)
-}
+/// The small-record shape from 80 MB to 5 GB, plus one large-record row. A flat
+/// scan peak across the ladder is the result; one that tracked the file size
+/// would be the bug this looks for.
+const CASES: [(usize, u64); 5] = [
+    (PAYLOAD, 1_000_000),
+    (PAYLOAD, 4_000_000),
+    (PAYLOAD, 16_000_000),
+    (PAYLOAD, 64_000_000),
+    (BIG_PAYLOAD, 40_000),
+];
 
 fn main() {
-    let gib: u64 = std::env::var("WAL_BENCH_MEM_GIB")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2);
-    let payload = 12 * 1024usize;
-    // Matches wal_v1_scan's sizing so the two benches describe the same file.
-    let n = (gib << 30) / (payload as u64 + 28);
-
     let rt = Runtime::new().unwrap();
 
+    println!("== WAL peak live heap ==\n");
     println!(
-        "== WAL peak live heap, {} GiB dataset, {} entries of {} B ==\n",
-        gib, n, payload
+        "{:>9} | {:>10} | {:>14} | {:>14} | {:>11}",
+        "payload", "entries", "build peak MiB", "scan peak MiB", "on-disk MiB"
     );
     println!(
-        "{:>7} | {:>14} | {:>14} | {:>12}",
-        "format", "build peak MiB", "scan peak MiB", "on-disk GiB"
+        "{:->9}-+-{:->10}-+-{:->14}-+-{:->14}-+-{:->11}",
+        "", "", "", "", ""
     );
-    println!("{:->7}-+-{:->14}-+-{:->14}-+-{:->12}", "", "", "", "");
 
-    for (label, format) in [("V1", WalEntryFormat::V1)] {
+    for (payload, n) in CASES {
         let tmp = tempfile::tempdir().unwrap();
 
         reset_peak();
-        let (store, queue_id, file_id) = rt.block_on(build_file(tmp.path(), format, n, payload));
+        let (store, queue_id, file_id) = rt.block_on(build_file(tmp.path(), "mem", n, payload));
         let build_peak = peak();
 
         let bytes = std::fs::metadata(
@@ -203,15 +142,16 @@ fn main() {
         assert_eq!(
             end,
             Some(UintN::from(n - 1)),
-            "{label} scan should reach the last entry"
+            "{payload} B x {n} scan should reach the last entry"
         );
 
         println!(
-            "{:>7} | {:>14.1} | {:>14.1} | {:>12.2}",
-            label,
+            "{:>9} | {:>10} | {:>14.1} | {:>14.1} | {:>11.1}",
+            payload,
+            n,
             mib(build_peak),
             mib(scan_peak),
-            bytes as f64 / (1u64 << 30) as f64
+            bytes as f64 / (1024.0 * 1024.0)
         );
 
         drop(store);
@@ -219,11 +159,11 @@ fn main() {
     }
 
     println!(
-        "\nLive heap still held after both formats: {:.1} MiB",
+        "\nLive heap still held after every case: {:.1} MiB",
         mib(live())
     );
     println!(
-        "Scan peak should be flat in the dataset size — recovery reads files\n\
+        "Both peaks should be flat in the dataset size — recovery reads files\n\
          larger than RAM. Compare against RSS: if RSS tracks dataset size while\n\
          these stay flat, the growth is allocator retention, not retained data."
     );

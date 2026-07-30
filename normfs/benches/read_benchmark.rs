@@ -3,10 +3,10 @@
 //!
 //! Reuses that dataset rather than rebuilding it — at full scale the write would
 //! dominate — so it checks the dataset's manifest first and refuses one written
-//! with different settings. See `common/mod.rs` for the knobs.
+//! with a different shape. See `common/mod.rs` for what that shape is.
 //!
 //!   cargo bench -p normfs --bench write_benchmark   # produces the dataset
-//!   cargo bench -p normfs --bench read_benchmark    # same NORMFS_BENCH_* values
+//!   cargo bench -p normfs --bench read_benchmark
 
 mod common;
 
@@ -20,13 +20,7 @@ const PROGRESS_INTERVAL: usize = 10_000;
 
 /// One pass is not reproducible here — spreads of 3x between runs — so several
 /// are taken and all reported alongside the median.
-fn passes() -> usize {
-    std::env::var("NORMFS_BENCH_PASSES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3)
-        .max(1)
-}
+const PASSES: usize = 3;
 
 #[tokio::main]
 async fn main() {
@@ -39,7 +33,7 @@ async fn main() {
 }
 
 async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = BenchConfig::from_env();
+    let cfg = BenchConfig::new();
     cfg.print_header("NormFS Read Benchmark");
 
     // A mismatched dataset would silently measure the wrong thing.
@@ -58,7 +52,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     let queue_name = normfs.resolve("write_bench_queue");
     normfs.ensure_queue_exists_for_write(&queue_name).await?;
 
-    let n_passes = passes();
+    let n_passes = PASSES;
     let mut pass_secs: Vec<f64> = Vec::with_capacity(n_passes);
 
     for pass in 1..=n_passes {
@@ -183,7 +177,13 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         median,
         sorted[sorted.len() - 1]
     );
-    println!("Median speed: {:.2} MB/s", total_mb / median);
+    // Records per second is the figure that matters at this size: a small
+    // record's cost is per-entry work, not bytes moved.
+    println!(
+        "Median speed: {:.2} M records/s | {:.2} MB/s",
+        cfg.total_blocks as f64 / median / 1e6,
+        total_mb / median
+    );
     // A median over passes disagreeing by multiples is not a throughput figure.
     println!(
         "Spread (slowest/fastest): {:.2}x",

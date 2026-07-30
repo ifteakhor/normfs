@@ -3,39 +3,21 @@
 //!   * entry_iterate  — read/iteration throughput (decode + checksum-verify)
 //!   * checksum       — CRC32C fast-path cost vs the portable path and xxHash64
 //!
-//! Every group warms up and then measures for a fixed window; both default to
-//! 5 s / 30 s and are overridable (in seconds) with WAL_BENCH_WARMUP and
-//! WAL_BENCH_MEASURE.
-//!
 //!   cargo bench -p normfs-wal --bench wal_v1_codec
-//!   WAL_BENCH_MEASURE=2 WAL_BENCH_WARMUP=1 cargo bench -p normfs-wal --bench wal_v1_codec
+
+mod common;
 
 use std::hint::black_box;
-use std::time::Duration;
 
 use bytes::BytesMut;
+use common::{BIG_PAYLOAD, MEASUREMENT, PAYLOAD, WARM_UP};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use normfs_wal::{crc32c, crc32c_portable, WalEntryV1};
 use xxhash_rust::xxh64;
 
-/// Payloads spanning the varint-width boundaries; small sizes expose the
-/// per-entry overhead, 12 KiB is a large sensor block.
-const PAYLOADS: [usize; 5] = [8, 64, 256, 1024, 12 * 1024];
-
-fn env_secs(var: &str, default: u64) -> Duration {
-    Duration::from_secs(
-        std::env::var(var)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(default),
-    )
-}
-fn warm() -> Duration {
-    env_secs("WAL_BENCH_WARMUP", 5)
-}
-fn meas() -> Duration {
-    env_secs("WAL_BENCH_MEASURE", 30)
-}
+/// Payloads spanning the varint-width boundaries, from the smallest useful
+/// record up to a large block. PAYLOAD is the workload this is tuned for.
+const PAYLOADS: [usize; 5] = [8, PAYLOAD, 256, 1024, BIG_PAYLOAD];
 
 fn pseudo_random(len: usize) -> Vec<u8> {
     let mut state: u32 = 0x9E37_79B9;
@@ -51,8 +33,8 @@ fn pseudo_random(len: usize) -> Vec<u8> {
 
 fn bench_encode(c: &mut Criterion) {
     let mut g = c.benchmark_group("entry_encode");
-    g.warm_up_time(warm());
-    g.measurement_time(meas());
+    g.warm_up_time(WARM_UP);
+    g.measurement_time(MEASUREMENT);
 
     for &p in &PAYLOADS {
         let record = pseudo_random(p);
@@ -72,8 +54,8 @@ fn bench_encode(c: &mut Criterion) {
 
 fn bench_iterate(c: &mut Criterion) {
     let mut g = c.benchmark_group("entry_iterate");
-    g.warm_up_time(warm());
-    g.measurement_time(meas());
+    g.warm_up_time(WARM_UP);
+    g.measurement_time(MEASUREMENT);
     let entries = 2_000u64;
 
     for &p in &PAYLOADS {
@@ -109,8 +91,8 @@ fn bench_iterate(c: &mut Criterion) {
 
 fn bench_checksum(c: &mut Criterion) {
     let mut g = c.benchmark_group("checksum");
-    g.warm_up_time(warm());
-    g.measurement_time(meas());
+    g.warm_up_time(WARM_UP);
+    g.measurement_time(MEASUREMENT);
 
     // Sizes around the 8-byte word boundary the intrinsic loop uses, up to a
     // large block where the fast path's throughput advantage is clearest.

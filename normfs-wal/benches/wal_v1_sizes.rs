@@ -6,7 +6,10 @@
 //!
 //!   cargo bench -p normfs-wal --bench wal_v1_sizes
 
+mod common;
+
 use bytes::BytesMut;
+use common::{BIG_PAYLOAD, PAYLOAD};
 use normfs_wal::WalEntryV1;
 
 /// Exact on-disk size of one entry: `[record_size varint][record][crc32c]`.
@@ -24,7 +27,7 @@ fn main() {
     // Small payloads dominate the WAL in high-frequency sensor ingestion, which
     // is where the fixed per-entry overhead matters most; 12 KiB is a large
     // block for contrast.
-    let payloads = [8usize, 64, 256, 1024, 12 * 1024];
+    let payloads = [8usize, PAYLOAD, 256, 1024, BIG_PAYLOAD];
 
     println!("== WAL entry framing (bytes) ==");
     println!("{:>9} | {:>8} | {:>9}", "payload", "total", "overhead");

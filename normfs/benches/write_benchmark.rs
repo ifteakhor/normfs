@@ -1,11 +1,10 @@
 //! End-to-end write throughput through `NormFS::enqueue`.
 //!
-//! Size, block size, WAL entry format and directory come from the environment —
-//! see `common/mod.rs`. Defaults to 2 GiB; use NORMFS_BENCH_GIB=50 for a full
-//! run, and make sure the target filesystem has room for it.
+//! The dataset's shape is fixed in `common/mod.rs` — small records, no
+//! compression, nothing offloaded to the store — so two runs are comparable
+//! without asking how each was invoked. Make sure $TMPDIR has room for it.
 //!
 //!   cargo bench -p normfs --bench write_benchmark
-//!   NORMFS_BENCH_GIB=50 cargo bench -p normfs --bench write_benchmark
 
 mod common;
 
@@ -28,7 +27,7 @@ async fn main() {
 }
 
 async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = BenchConfig::from_env();
+    let cfg = BenchConfig::new();
     cfg.print_header("NormFS Write Benchmark");
 
     // Fresh directory: appending to a previous dataset measures neither it nor
@@ -100,11 +99,14 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         enqueue_elapsed.as_secs_f64(),
         total_elapsed.as_secs_f64()
     );
+    // Records per second is the figure that matters at this size: a small
+    // record's cost is per-entry work, not bytes moved.
     println!(
-        "Average speed: {:.2} MB/s (including close)",
+        "Average speed: {:.2} M records/s | {:.2} MB/s (including close)",
+        cfg.total_blocks as f64 / total_elapsed.as_secs_f64() / 1e6,
         total_mb / total_elapsed.as_secs_f64()
     );
-    println!("Total blocks written: {}", cfg.total_blocks);
+    println!("Total records written: {}", cfg.total_blocks);
     println!(
         "On disk: {:.2} GiB",
         dir_size(&cfg.dir) as f64 / (1u64 << 30) as f64
@@ -115,7 +117,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("Data persisted at: {}", cfg.dir.display());
-    println!("Run the read benchmark with the same NORMFS_BENCH_* settings.");
+    println!("Run the read benchmark next; it reuses this dataset.");
 
     Ok(())
 }

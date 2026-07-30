@@ -1,28 +1,29 @@
 //! Shared setup for the end-to-end NormFS throughput benchmarks.
 //!
-//! Manual throughput programs, not Criterion: one pass over a dataset sized
-//! against RAM does not fit its repeat-and-sample model. A run is configured by
-//! the environment and prints that configuration, so a pasted log says what
-//! produced it.
+//! Manual throughput programs, not Criterion: one pass over a multi-GiB dataset
+//! does not fit its repeat-and-sample model.
 //!
-//!   NORMFS_BENCH_GIB          dataset size in GiB (default 2; 50 for a full run)
-//!   NORMFS_BENCH_COMPRESSION  none, gzip, xz or zstd (default zstd)
-//!   NORMFS_BENCH_ENCRYPTION   none or aes (default aes)
-//!   NORMFS_BENCH_MAX_QUEUE_GIB  per-queue disk cap in GiB, 0 for none (default 1)
-//!   NORMFS_BENCH_WAL_FILE_MIB   max size of one WAL file in MiB (default 128)
-//!   NORMFS_BENCH_DIR          dataset directory (default $TMPDIR/normfs-bench)
+//! Nothing here is configurable by environment variable. A benchmark whose
+//! numbers depend on how it was invoked cannot be compared against a pasted log,
+//! so every run has the same shape and prints it.
 //!
-//! Compression and encryption are explicit because omission is easy to get
-//! wrong: `QueueConfig::default()` is Zstd + AES, so taking the defaults
-//! already compresses and encrypts. Set both to `none` for a raw baseline.
+//! Two choices are worth stating because they decide what is being measured:
 //!
-//! Past the per-queue cap the queue offloads to the store, and a read then
-//! measures a WAL/store/memory mix that depends on offload timing — comparing
-//! runs across that boundary compares the mix. Set it to 0 to stay in the WAL.
+//!   * [`BLOCK_SIZE`] is a sensor message. Small records are the workload the
+//!     WAL exists for, and the only size at which per-entry framing is a
+//!     meaningful fraction of the file.
+//!   * Compression and encryption are off. `QueueConfig::default()` is Zstd +
+//!     AES, and leaving them on would measure a codec compressing a synthetic
+//!     block rather than the WAL path. Turn them on in `settings` to measure
+//!     the production stack instead.
+//!
+//! Nothing offloads to the store: the per-queue cap is disabled, so a read stays
+//! in the WAL rather than measuring a WAL/store/memory mix that shifts with
+//! offload timing.
 //!
 //! Read benchmarks reuse the dataset a write left behind, so the writer records
 //! what it produced and the reader refuses anything else. Otherwise a directory
-//! from an earlier run of a different size or format is measured silently.
+//! from an earlier run of a different shape is measured silently.
 
 #![allow(dead_code)] // each bench binary uses a subset
 
@@ -34,8 +35,17 @@ use normfs_wal::WalSettings;
 
 const MANIFEST: &str = "bench-manifest.txt";
 
-/// Record size. A large sensor block, and the size every reported figure uses.
-const BLOCK_SIZE: usize = 12 * 1024;
+/// Record size: a sensor message, and the size every reported figure uses.
+const BLOCK_SIZE: usize = 80;
+
+/// Records written. At [`BLOCK_SIZE`] this is a dataset large enough to leave
+/// the caches and cross several WAL files, and small enough to build in a run
+/// nobody has to plan around.
+const TOTAL_BLOCKS: usize = 20_000_000;
+
+/// WAL rotation size. Recovery scans only the newest file holding entries, so
+/// this — not the dataset size — bounds what a restart reads.
+const WAL_FILE_BYTES: usize = 128 << 20;
 
 pub struct BenchConfig {
     pub dir: PathBuf,
@@ -45,52 +55,19 @@ pub struct BenchConfig {
     pub encryption: EncryptionType,
     /// `None` disables the cap, so nothing offloads to the store.
     pub max_queue_bytes: Option<u64>,
-    /// WAL rotation size. Recovery scans only the newest file holding entries,
-    /// so this — not the dataset size — bounds what a restart reads.
     pub wal_file_bytes: usize,
 }
 
 impl BenchConfig {
-    pub fn from_env() -> Self {
-        let gib = env_u64("NORMFS_BENCH_GIB", 2);
-
-        let compression = match std::env::var("NORMFS_BENCH_COMPRESSION").ok().as_deref() {
-            None | Some("zstd") => CompressionType::Zstd,
-            Some("none") => CompressionType::None,
-            Some("gzip") => CompressionType::Gzip,
-            Some("xz") => CompressionType::Xz,
-            Some(other) => {
-                panic!("NORMFS_BENCH_COMPRESSION must be none, gzip, xz or zstd, got {other:?}")
-            }
-        };
-
-        let encryption = match std::env::var("NORMFS_BENCH_ENCRYPTION").ok().as_deref() {
-            None | Some("aes") => EncryptionType::Aes,
-            Some("none") => EncryptionType::None,
-            Some(other) => panic!("NORMFS_BENCH_ENCRYPTION must be none or aes, got {other:?}"),
-        };
-
-        let max_queue_gib = env_u64("NORMFS_BENCH_MAX_QUEUE_GIB", 1);
-        let max_queue_bytes = (max_queue_gib > 0).then(|| max_queue_gib << 30);
-
-        let wal_file_bytes = (env_u64("NORMFS_BENCH_WAL_FILE_MIB", 128) << 20) as usize;
-        assert!(
-            wal_file_bytes > 0,
-            "NORMFS_BENCH_WAL_FILE_MIB must be non-zero"
-        );
-
-        let dir = std::env::var_os("NORMFS_BENCH_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("normfs-bench"));
-
+    pub fn new() -> Self {
         Self {
-            dir,
+            dir: std::env::temp_dir().join("normfs-bench"),
             block_size: BLOCK_SIZE,
-            total_blocks: ((gib << 30) / BLOCK_SIZE as u64) as usize,
-            compression,
-            encryption,
-            max_queue_bytes,
-            wal_file_bytes,
+            total_blocks: TOTAL_BLOCKS,
+            compression: CompressionType::None,
+            encryption: EncryptionType::None,
+            max_queue_bytes: None,
+            wal_file_bytes: WAL_FILE_BYTES,
         }
     }
 
@@ -123,10 +100,10 @@ impl BenchConfig {
         println!("{title}");
         println!("========================");
         println!(
-            "Dataset: {:.2} GiB in {} blocks of {} KiB",
+            "Dataset: {:.2} GiB in {} records of {} B",
             self.total_bytes() as f64 / (1u64 << 30) as f64,
             self.total_blocks,
-            self.block_size / 1024
+            self.block_size
         );
         println!(
             "Compression: {:?} | Encryption: {:?}",
@@ -172,14 +149,14 @@ impl BenchConfig {
         let path = self.dir.join(MANIFEST);
         let found = std::fs::read_to_string(&path).map_err(|e| {
             format!(
-                "cannot read {} ({e}); run the matching write benchmark first",
+                "cannot read {} ({e}); run the write benchmark first",
                 path.display()
             )
         })?;
         if found.trim() != self.signature().trim() {
             return Err(format!(
                 "dataset does not match this run:\n  on disk: {}\n  wanted:  {}\n\
-                 re-run the write benchmark with the same NORMFS_BENCH_* settings",
+                 re-run the write benchmark",
                 found.trim(),
                 self.signature().trim()
             ));
@@ -188,8 +165,7 @@ impl BenchConfig {
     }
 
     /// Start from an empty directory; appending to a previous run measures
-    /// neither. Refuses to delete a directory this benchmark did not write,
-    /// since NORMFS_BENCH_DIR points wherever the caller says.
+    /// neither. Refuses to delete a directory this benchmark did not write.
     pub fn reset_dir(&self) -> Result<(), String> {
         if self.dir.exists() {
             let empty = std::fs::read_dir(&self.dir)
@@ -198,23 +174,14 @@ impl BenchConfig {
             if !self.dir.join(MANIFEST).exists() && !empty {
                 return Err(format!(
                     "{} exists, is not empty and has no {MANIFEST}, so it was not \
-                     written by this benchmark — refusing to delete it. Remove it \
-                     yourself or point NORMFS_BENCH_DIR elsewhere.",
+                     written by this benchmark — refusing to delete it. Remove \
+                     it yourself.",
                     self.dir.display()
                 ));
             }
             std::fs::remove_dir_all(&self.dir).map_err(|e| e.to_string())?;
         }
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())
-    }
-}
-
-fn env_u64(var: &str, default: u64) -> u64 {
-    match std::env::var(var) {
-        Ok(v) => v
-            .parse()
-            .unwrap_or_else(|_| panic!("{var} must be a number, got {v:?}")),
-        Err(_) => default,
     }
 }
 
