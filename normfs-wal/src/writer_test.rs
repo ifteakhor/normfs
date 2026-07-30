@@ -454,6 +454,108 @@ async fn test_v1_truncated_tail_is_dropped() {
     assert_eq!(content.num_entries, UintN::from(2u64));
 }
 
+/// Write `n` records of `payload` bytes as V1 into one file and return the
+/// queue's wal dir plus the file id, for tests that then poke at the bytes.
+async fn build_v1_file(
+    root: &std::path::Path,
+    name: &str,
+    n: u64,
+    payload: usize,
+) -> (std::path::PathBuf, UintN) {
+    let (written_sender, _) = mpsc::unbounded_channel();
+    let (wal_complete_sender, _) = mpsc::unbounded_channel();
+    let store = WalStore::new(root, written_sender, wal_complete_sender);
+
+    let queue_id = QueueIdResolver::new("test_instance").resolve(name);
+    let file_id = UintN::from(1u64);
+    let settings = WalSettings {
+        max_file_size: 1 << 30, // one file: the reader scans per file
+        write_buffer_size: 64 * 1024,
+        enable_fsync: true,
+        wal_entry_format: WalEntryFormat::V1,
+        ..Default::default()
+    };
+    store
+        .start_writer(&queue_id, &file_id, WalHeader::default(), settings, None)
+        .await
+        .unwrap();
+
+    let record = Bytes::from(vec![0xCDu8; payload]);
+    for i in 0..n {
+        store
+            .enqueue(&queue_id, UintN::from(i), record.clone())
+            .unwrap();
+    }
+    store.close().await.unwrap();
+
+    (queue_id.to_wal_dir(root), file_id)
+}
+
+/// The reader decodes V1 entries out of a fixed-size window, so entries that
+/// span a window boundary are the case that breaks a naive implementation. With
+/// 12 KiB records and a 64 KiB window, roughly every fifth entry straddles one.
+#[tokio::test]
+async fn test_v1_entries_straddle_window_boundary() {
+    init_logger();
+    let tmp_dir = tempdir().unwrap();
+    let (wal_dir, file_id) = build_v1_file(tmp_dir.path(), "v1_straddle", 40, 12 * 1024).await;
+
+    let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
+    assert_eq!(range, Some((UintN::from(0u64), UintN::from(39u64))));
+
+    let content = get_wal_content(&wal_dir, &file_id).await.unwrap();
+    assert_eq!(content.num_entries, UintN::from(40u64));
+}
+
+/// A single entry larger than the read window has to force the window to grow,
+/// otherwise the scan would report it as truncated and drop the rest of the
+/// file. 200 KiB against a 64 KiB window.
+#[tokio::test]
+async fn test_v1_entry_larger_than_window() {
+    init_logger();
+    let tmp_dir = tempdir().unwrap();
+    let (wal_dir, file_id) = build_v1_file(tmp_dir.path(), "v1_big", 3, 200 * 1024).await;
+
+    let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
+    assert_eq!(range, Some((UintN::from(0u64), UintN::from(2u64))));
+
+    let content = get_wal_content(&wal_dir, &file_id).await.unwrap();
+    assert_eq!(content.num_entries, UintN::from(3u64));
+}
+
+/// Cutting the tail anywhere inside the last entry must drop exactly that entry
+/// and keep the rest, and cutting exactly on its boundary must drop nothing
+/// extra. A 200 byte record gives a two-byte length prefix, so the offsets below
+/// land mid-CRC, mid-record and mid-prefix in turn — the three ways a partial
+/// frame can present itself.
+#[tokio::test]
+async fn test_v1_truncation_offsets_across_a_frame() {
+    init_logger();
+    let payload = 200usize;
+    // [prefix 2][record 200][crc 4]
+    let entry_len = 2 + payload + 4;
+
+    for cut in [1usize, 4, 5, 100, 203, 204, entry_len] {
+        let tmp_dir = tempdir().unwrap();
+        let (wal_dir, file_id) =
+            build_v1_file(tmp_dir.path(), "v1_cut", 4, payload).await;
+        let path = file_id.to_file_path(wal_dir.to_str().unwrap(), "wal");
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        tokio::fs::write(&path, &bytes[..bytes.len() - cut])
+            .await
+            .unwrap();
+
+        // Either way the fourth entry is gone and the first three remain: a
+        // partial frame is discarded, and a clean cut simply ends the file.
+        let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
+        assert_eq!(
+            range,
+            Some((UintN::from(0u64), UintN::from(2u64))),
+            "cut of {cut} bytes should leave ids 0..=2"
+        );
+    }
+}
+
 /// A queue may hold a V0 file and a V1 file side by side; the reader dispatches
 /// on each file's header version, so both read back correctly.
 #[tokio::test]
