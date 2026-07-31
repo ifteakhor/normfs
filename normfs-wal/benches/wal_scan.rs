@@ -5,8 +5,8 @@
 //! and scans every entry, verifying each CRC32C and deriving the id positionally.
 //! Throughput is reported in entries scanned per second.
 //!
-//!   cargo bench -p normfs-wal --bench wal_v1_scan
-//!   cargo bench -p normfs-wal --bench wal_v1_scan -- uncached
+//!   cargo bench -p normfs-wal --bench wal_scan
+//!   cargo bench -p normfs-wal --bench wal_scan -- uncached
 //!
 //! The second form adds the uncached case, which writes twice this machine's RAM
 //! to disk — too costly to run unasked, so it is opt-in rather than the default.

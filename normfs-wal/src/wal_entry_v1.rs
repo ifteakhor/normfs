@@ -101,8 +101,6 @@ unsafe extern "C" {
     ) -> CIterResult;
 
     fn normfs_crc32c(crc: u32, data: *const u8, len: usize) -> u32;
-
-    fn normfs_crc32c_portable(crc: u32, data: *const u8, len: usize) -> u32;
 }
 
 fn map_status(status: c_int) -> Result<(), WalEntryV1Error> {
@@ -124,12 +122,6 @@ fn map_status(status: c_int) -> Result<(), WalEntryV1Error> {
 /// seed checksums the concatenation.
 pub fn crc32c(seed: u32, data: &[u8]) -> u32 {
     unsafe { normfs_crc32c(seed, data.as_ptr(), data.len()) }
-}
-
-/// CRC32C over `data` using the portable table-driven path, never a CPU fast
-/// path. Same value as [`crc32c`]; exposed to benchmark the fast-path cost.
-pub fn crc32c_portable(seed: u32, data: &[u8]) -> u32 {
-    unsafe { normfs_crc32c_portable(seed, data.as_ptr(), data.len()) }
 }
 
 /// Entry id for the `index`-th entry of a file whose header records

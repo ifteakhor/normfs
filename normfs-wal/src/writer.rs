@@ -2,12 +2,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::ack_file_writer::{AckFileWriter, AckFileWriterSettings};
-use crate::wal_entry::WalEntryHeader;
 use crate::wal_entry_v1::{self, WalEntryV1, WalEntryV1Error};
 use crate::wal_header::WalHeader;
 use crate::wal_header_v1::WalHeaderV1;
 use crate::writer_buffer::OrderedBuffer;
-use crate::{WalEntryFormat, WalError, WalFile, WalSettings};
+use crate::{WalError, WalFile, WalSettings};
 use bytes::{Bytes, BytesMut};
 use normfs_types::QueueId;
 use tokio::sync::{mpsc, oneshot};
@@ -203,25 +202,15 @@ impl WriterState {
         }
 
         for (entry_id, data) in entries {
-            let format = self.settings.wal_entry_format;
+            // Rotation is decided on the encoded length, not the record length:
+            // the varint prefix and CRC also have to fit. A record wider than a
+            // u32 has no frame at all, so it is an error rather than a rotation.
+            let record_size = u32::try_from(data.len()).map_err(|_| {
+                WalError::WalEntryV1Error(WalEntryV1Error::RecordTooLarge(data.len()))
+            })?;
+            let entry_len = wal_entry_v1::encoded_len(record_size);
 
-            // On-disk length and the rotation test differ by format. V1 stores
-            // no id and frames the size as a varint, so it has no fixed-width
-            // constraint (can_hold_entry) and its size accounting uses the
-            // encoded length rather than the raw record length.
-            let (entry_len, width_ok) = match format {
-                WalEntryFormat::V1 => {
-                    let record_size = u32::try_from(data.len()).map_err(|_| {
-                        WalError::WalEntryV1Error(WalEntryV1Error::RecordTooLarge(data.len()))
-                    })?;
-                    (wal_entry_v1::encoded_len(record_size), true)
-                }
-                WalEntryFormat::V0 => {
-                    (data.len(), self.header.can_hold_entry(&entry_id, data.len()))
-                }
-            };
-
-            if (self.has_written && !self.file_writer.can_add(entry_len).await) || !width_ok {
+            if self.has_written && !self.file_writer.can_add(entry_len).await {
                 log::debug!(
                     "WAL writer: need to rotate file for queue '{}', entry {}, data size: {}",
                     self.queue_id,
@@ -239,19 +228,10 @@ impl WriterState {
                 );
             }
 
+            // [record_size varint32][record][crc32c u32 LE] — the id is not
+            // stored; the reader derives it from num_entries_before + index.
             let mut entry_buf = BytesMut::new();
-            match format {
-                WalEntryFormat::V1 => {
-                    // [record_size varint32][record][crc32c u32 LE] — id is not
-                    // stored; the reader derives it from num_entries_before + index.
-                    WalEntryV1::new(&data).write_to_bytes(&mut entry_buf)?;
-                }
-                WalEntryFormat::V0 => {
-                    let entry_header = WalEntryHeader::new(entry_id.clone(), &data);
-                    entry_header.write_to_bytes(&mut entry_buf, &self.header)?;
-                    entry_buf.extend_from_slice(&data);
-                }
-            }
+            WalEntryV1::new(&data).write_to_bytes(&mut entry_buf)?;
             let entry_buf = entry_buf.freeze();
 
             log::debug!(
@@ -262,17 +242,15 @@ impl WriterState {
                 entry_buf.len()
             );
 
-            // V1 ids are positional. Guard that the caller's id is exactly
+            // Ids are positional. Guard that the caller's id is exactly
             // num_entries_before + index — the equality the reader depends on.
             #[cfg(debug_assertions)]
-            if format == WalEntryFormat::V1
-                && let (Ok(eid), Ok(base)) =
-                    (entry_id.to_u64(), self.header.num_entries_before.to_u64())
+            if let (Ok(eid), Ok(base)) = (entry_id.to_u64(), self.header.num_entries_before.to_u64())
             {
                 debug_assert_eq!(
                     eid,
                     base + self.entry_index,
-                    "V1 entry id must equal num_entries_before + index"
+                    "entry id must equal num_entries_before + index"
                 );
             }
 
@@ -378,18 +356,11 @@ async fn new_file_writer(
 ) -> Result<AckFileWriter, WalError> {
     let file_path = file_id.to_file_path(queue_path.to_str().unwrap(), "wal");
 
-    // The file header version matches the entry format so each file is
-    // self-consistent. Readers dispatch on the version word, so a queue may
-    // hold a mix of V0 and V1 files and keep reading each correctly.
+    // A V1 header over V1 entries, so the file is self-consistent. Readers
+    // dispatch on the version word, so a queue may still hold older V0 files
+    // and keep reading each correctly.
     let mut header_buf = BytesMut::new();
-    match settings.wal_entry_format {
-        WalEntryFormat::V1 => {
-            WalHeaderV1::from_v0(header)?.write_to_bytes(&mut header_buf)?;
-        }
-        WalEntryFormat::V0 => {
-            header.write_to_bytes(&mut header_buf);
-        }
-    }
+    WalHeaderV1::from_v0(header)?.write_to_bytes(&mut header_buf)?;
 
     let writer = AckFileWriter::new(
         file_path,

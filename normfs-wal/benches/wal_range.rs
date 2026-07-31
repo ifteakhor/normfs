@@ -1,7 +1,7 @@
 //! Full-range iteration throughput at step 1 and step 2 (metric h).
 //!
 //! Times `WalStore::read_wal_range` over every entry of a file — the path a
-//! subscriber or replay uses, as opposed to `wal_v1_scan`'s `get_file_end`,
+//! subscriber or replay uses, as opposed to `wal_scan`'s `get_file_end`,
 //! which only needs the last id. Entries are delivered over a bounded channel to
 //! a draining consumer, so the measurement includes the per-entry record copy and
 //! channel hand-off that a real reader pays.
@@ -15,8 +15,8 @@
 //! Both steps run back to back over the same file, so that comparison carries no
 //! build-order effect.
 //!
-//!   cargo bench -p normfs-wal --bench wal_v1_range
-//!   cargo bench -p normfs-wal --bench wal_v1_range -- uncached
+//!   cargo bench -p normfs-wal --bench wal_range
+//!   cargo bench -p normfs-wal --bench wal_range -- uncached
 //!
 //! The second form adds the uncached case, which writes twice this machine's RAM
 //! to disk — too costly to run unasked, so it is opt-in rather than the default.

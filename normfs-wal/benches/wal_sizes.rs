@@ -4,7 +4,7 @@
 //! on-disk byte sizes, so per-entry overhead and whole-file size are concrete
 //! numbers rather than estimates.
 //!
-//!   cargo bench -p normfs-wal --bench wal_v1_sizes
+//!   cargo bench -p normfs-wal --bench wal_sizes
 
 mod common;
 

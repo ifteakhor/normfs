@@ -21,6 +21,9 @@ walkdir = "2"
 cc = "1"
 
 [dev-dependencies]
+# xxh32 is a benchmark comparison only; the runtime dependency above stays at
+# xxh64, which is what the V0 read path uses.
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
 tempfile = "3"
 criterion = "0.5"
 env_logger = { workspace = true }
@@ -28,15 +31,15 @@ rand = "0.8"
 
 # WAL benchmarks. Every case is fixed in code; see benches/common/mod.rs.
 [[bench]]
-name = "wal_v1_codec"
+name = "wal_codec"
 harness = false
 
 [[bench]]
-name = "wal_v1_scan"
+name = "wal_scan"
 harness = false
 
 [[bench]]
-name = "wal_v1_sizes"
+name = "wal_sizes"
 harness = false
 
 [[bench]]
@@ -44,5 +47,9 @@ name = "wal_memory"
 harness = false
 
 [[bench]]
-name = "wal_v1_range"
+name = "wal_range"
+harness = false
+
+[[bench]]
+name = "wal_sweep"
 harness = false
