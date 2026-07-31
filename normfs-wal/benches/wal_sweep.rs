@@ -13,11 +13,13 @@
 //! whole point of the entry format is what it costs to put *one small record*
 //! on disk, and a byte rate hides that behind the record size.
 //!
-//! The dataset is sized from the machine, not from a constant: a sixteenth of
-//! the free space, capped at 4 GiB. That is what lets the same benchmark run on
-//! a laptop and on a board logging to an SD card without a flag to set, and it
-//! is why rates compare across machines but the absolute dataset sizes do not —
-//! every row prints the one it used.
+//! The dataset is the same size on every machine: at most 4 GiB per point and
+//! at most 20 million records, whichever binds first. It used to be derived
+//! from free space, so that a board with a small card could run it unchanged,
+//! and that was a mistake. On a Raspberry Pi, where `/tmp` is a tmpfs and free
+//! space is therefore RAM, it shrank the dataset twelvefold and measured a scan
+//! over 113 ms — while printing a row that looked like every other row. A run
+//! that cannot fit the dataset now stops and says why.
 //!
 //! Sizes are swept rather than fixed because the answer changes shape across
 //! them: framing is a fifth of an 80 B entry and a rounding error on a 12 KiB
@@ -75,10 +77,16 @@ fn requested_sizes() -> Vec<usize> {
 /// something, and not more bytes than the machine should write for one point.
 const MAX_RECORDS: u64 = 20_000_000;
 
-/// Most a point may write on a machine with room to spare, and the least it may
-/// write before the rate stops meaning anything.
+/// Most a point may write, and the free space a run needs before it starts.
+///
+/// Fixed, not derived from the machine. This benchmark exists to compare two
+/// revisions and two machines, and a dataset that quietly resizes itself to fit
+/// the disk invalidates both comparisons while still printing a plausible row.
+/// The headroom above the budget covers framing, which pushes the file a couple
+/// of percent past the payload total; passes run one at a time and delete their
+/// directory, so only one dataset is on disk at once.
 const MAX_BYTES: u64 = 4 << 30;
-const MIN_BYTES: u64 = 128 << 20;
+const REQUIRED_FREE: u64 = 5 << 30;
 
 /// Free bytes where the datasets go. `df -Pk` is POSIX output everywhere this
 /// runs; a parse failure yields `None` rather than a guess.
@@ -93,16 +101,44 @@ fn free_bytes(path: &Path) -> Option<u64> {
     available.parse::<u64>().ok().map(|kb| kb * 1024)
 }
 
-/// Bytes one point may write, taken from the machine rather than a constant. A
-/// laptop gets the full budget; a board logging to an SD card gets a sixteenth
-/// of what is free, which is what lets the same benchmark run on both without a
-/// flag to set. Each pass rewrites the dataset, so the point costs three times
-/// this in writes — worth knowing on flash.
-fn budget_bytes() -> u64 {
-    match free_bytes(&std::env::temp_dir()) {
-        Some(free) => (free / 16).clamp(MIN_BYTES, MAX_BYTES),
-        None => MAX_BYTES,
+/// Stops the run when the datasets will not fit, rather than measuring a
+/// smaller one. The default temporary directory is a tmpfs on several
+/// distributions — Debian 13 among them — where free space is RAM and a
+/// benchmark that adapts to it silently stops measuring storage at all.
+///
+/// A failed check is reported and not fatal: not knowing the free space is a
+/// reason to warn, not to refuse.
+fn require_space(dir: &Path) {
+    let Some(free) = free_bytes(dir) else {
+        eprintln!(
+            "warning: could not read free space at {}; running anyway",
+            dir.display()
+        );
+        return;
+    };
+    if free >= REQUIRED_FREE {
+        return;
     }
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    eprintln!(
+        "This benchmark needs {:.1} GiB free at {}, and found {:.1} GiB.",
+        gib(REQUIRED_FREE),
+        dir.display(),
+        gib(free)
+    );
+    eprintln!();
+    eprintln!("That path is a tmpfs on many systems, in which case it is backed by RAM");
+    eprintln!("and the result would describe memory rather than storage. Point TMPDIR at");
+    eprintln!("real storage and run again:");
+    eprintln!();
+    eprintln!("    TMPDIR=/path/on/disk {}", program_name());
+    std::process::exit(1);
+}
+
+fn program_name() -> String {
+    std::env::args()
+        .next()
+        .unwrap_or_else(|| "wal_sweep".to_string())
 }
 
 /// Repeats per point. Each pass rebuilds the dataset, so this measures the
@@ -213,6 +249,8 @@ async fn measure(root: &Path, payload: usize, records: u64) -> Row {
 
 #[tokio::main]
 async fn main() {
+    require_space(&std::env::temp_dir());
+
     println!(
         "normfs-wal {} — write and scan by record size\n",
         env!("CARGO_PKG_VERSION")
@@ -227,10 +265,11 @@ async fn main() {
         "", "", "", "", "", ""
     );
 
-    let budget = budget_bytes();
+    let budget = MAX_BYTES;
     println!(
-        "up to {:.2} GiB per point, {} passes each\n",
+        "up to {:.2} GiB and {} records per point, {} passes each\n",
         budget as f64 / (1u64 << 30) as f64,
+        MAX_RECORDS,
         PASSES
     );
 
