@@ -23,6 +23,20 @@
 //! slowest-over-fastest spread beside it. One pass is not a result here: on a
 //! laptop the same point moves by a third between runs, and a single number
 //! invites a ratio to be quoted that the next run will not reproduce.
+//!
+//! **Points measured in one process are not independent.** Each one writes and
+//! deletes gigabytes, and a large-record write is bandwidth-bound, so it reads
+//! whatever writeback backlog the points before it left behind. Measured last
+//! after six other sizes, the 12 KiB write came out 24 % below the same point
+//! measured first — and worse for the *faster* build, which reaches the late
+//! points sooner and gives writeback less time to drain. Sizes are therefore
+//! taken one per process: pass the record sizes as arguments and the run does
+//! only those.
+//!
+//!   cargo bench -p normfs-wal --bench wal_sweep -- 12288
+//!
+//! With no arguments it sweeps every size in one process, which is fine for a
+//! quick look and not fine for a number anyone will quote.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -33,10 +47,23 @@ use normfs_wal::{WalHeader, WalSettings, WalStore};
 use tokio::sync::mpsc;
 use uintn::UintN;
 
-/// Record sizes to sweep: a minimal record, the sensor messages the WAL is
-/// for, the band where checksum implementations trade places, and the 12 KiB
-/// block the benchmarks used to default to.
+/// Record sizes swept when none are named: a minimal record, the sensor
+/// messages the WAL is for, the band where checksum implementations trade
+/// places, and a large block.
 const SIZES: [usize; 7] = [16, 64, 80, 256, 1024, 4096, 12 * 1024];
+
+/// Sizes to measure: the ones named on the command line, or all of them.
+fn requested_sizes() -> Vec<usize> {
+    let named: Vec<usize> = std::env::args()
+        .skip(1)
+        .filter_map(|a| a.parse().ok())
+        .collect();
+    if named.is_empty() {
+        SIZES.to_vec()
+    } else {
+        named
+    }
+}
 
 /// Entries per size, capped two ways: enough records for the rate to mean
 /// something, and not more bytes than a run should write for one point.
@@ -165,7 +192,12 @@ async fn main() {
         "", "", "", "", "", ""
     );
 
-    for payload in SIZES {
+    let sizes = requested_sizes();
+    if sizes.len() > 1 {
+        println!("warning: {} sizes in one process — later points inherit the writeback backlog of earlier ones. Pass one size per run for numbers to quote.\n", sizes.len());
+    }
+
+    for payload in sizes {
         let records = MAX_RECORDS.min(MAX_BYTES / payload as u64);
         let mut writes = Vec::with_capacity(PASSES);
         let mut scans = Vec::with_capacity(PASSES);
