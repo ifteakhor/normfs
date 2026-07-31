@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 400" width="760" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+<rect width="760" height="400" fill="#ffffff"/>
+<text x="64" y="26" font-size="16" font-weight="600" fill="#1f2328">WAL scan speed, million records per second</text>
+<rect x="64" y="38" width="12" height="12" fill="#1f77b4"/>
+<text x="82" y="48" font-size="13" fill="#1f2328">0.2</text>
+<rect x="120" y="38" width="12" height="12" fill="#d62728"/>
+<text x="138" y="48" font-size="13" fill="#1f2328">0.1</text>
+<line x1="64" y1="336.0" x2="740" y2="336.0" stroke="#d8dee4" stroke-width="1"/>
+<text x="54" y="340.0" font-size="12" fill="#59636e" text-anchor="end">0</text>
+<line x1="64" y1="271.5" x2="740" y2="271.5" stroke="#d8dee4" stroke-width="1"/>
+<text x="54" y="275.5" font-size="12" fill="#59636e" text-anchor="end">20</text>
+<line x1="64" y1="207.1" x2="740" y2="207.1" stroke="#d8dee4" stroke-width="1"/>
+<text x="54" y="211.1" font-size="12" fill="#59636e" text-anchor="end">40</text>
+<line x1="64" y1="142.6" x2="740" y2="142.6" stroke="#d8dee4" stroke-width="1"/>
+<text x="54" y="146.6" font-size="12" fill="#59636e" text-anchor="end">60</text>
+<line x1="64" y1="78.1" x2="740" y2="78.1" stroke="#d8dee4" stroke-width="1"/>
+<text x="54" y="82.1" font-size="12" fill="#59636e" text-anchor="end">80</text>
+<rect x="95.3" y="85.7" width="50.7" height="250.3" fill="#1f77b4"/>
+<text x="120.6" y="79.7" font-size="12" fill="#1f2328" text-anchor="middle">77.66</text>
+<rect x="151.0" y="305.8" width="50.7" height="30.2" fill="#d62728"/>
+<text x="176.4" y="299.8" font-size="12" fill="#1f2328" text-anchor="middle">9.36</text>
+<text x="148.5" y="358.0" font-size="13" fill="#1f2328" text-anchor="middle">16 B</text>
+<text x="148.5" y="376.0" font-size="12" fill="#59636e" text-anchor="middle">8.3x</text>
+<rect x="264.3" y="152.2" width="50.7" height="183.8" fill="#1f77b4"/>
+<text x="289.6" y="146.2" font-size="12" fill="#1f2328" text-anchor="middle">57.03</text>
+<rect x="320.0" y="314.9" width="50.7" height="21.1" fill="#d62728"/>
+<text x="345.4" y="308.9" font-size="12" fill="#1f2328" text-anchor="middle">6.54</text>
+<text x="317.5" y="358.0" font-size="13" fill="#1f2328" text-anchor="middle">64 B</text>
+<text x="317.5" y="376.0" font-size="12" fill="#59636e" text-anchor="middle">8.7x</text>
+<rect x="433.3" y="163.9" width="50.7" height="172.1" fill="#1f77b4"/>
+<text x="458.6" y="157.9" font-size="12" fill="#1f2328" text-anchor="middle">53.39</text>
+<rect x="489.0" y="317.4" width="50.7" height="18.6" fill="#d62728"/>
+<text x="514.4" y="311.4" font-size="12" fill="#1f2328" text-anchor="middle">5.76</text>
+<text x="486.5" y="358.0" font-size="13" fill="#1f2328" text-anchor="middle">80 B</text>
+<text x="486.5" y="376.0" font-size="12" fill="#59636e" text-anchor="middle">9.3x</text>
+<rect x="602.3" y="272.6" width="50.7" height="63.4" fill="#1f77b4"/>
+<text x="627.6" y="266.6" font-size="12" fill="#1f2328" text-anchor="middle">19.66</text>
+<rect x="658.0" y="326.8" width="50.7" height="9.2" fill="#d62728"/>
+<text x="683.4" y="320.8" font-size="12" fill="#1f2328" text-anchor="middle">2.86</text>
+<text x="655.5" y="358.0" font-size="13" fill="#1f2328" text-anchor="middle">256 B</text>
+<text x="655.5" y="376.0" font-size="12" fill="#59636e" text-anchor="middle">6.9x</text>
+<line x1="64" y1="336" x2="740" y2="336" stroke="#59636e" stroke-width="1"/>
+</svg>
