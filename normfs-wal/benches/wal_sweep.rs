@@ -18,6 +18,11 @@
 //! one. Each size gets its own entry count — a fixed byte budget would mean
 //! billions of records at the small end — so the dataset size is reported per
 //! row rather than implied.
+//!
+//! Every point is measured [`PASSES`] times and reported as a median with the
+//! slowest-over-fastest spread beside it. One pass is not a result here: on a
+//! laptop the same point moves by a third between runs, and a single number
+//! invites a ratio to be quoted that the next run will not reproduce.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -37,6 +42,10 @@ const SIZES: [usize; 7] = [16, 64, 80, 256, 1024, 4096, 12 * 1024];
 /// something, and not more bytes than a run should write for one point.
 const MAX_RECORDS: u64 = 20_000_000;
 const MAX_BYTES: u64 = 4 << 30;
+
+/// Repeats per point. Each pass rebuilds the dataset, so this measures the
+/// variance that matters — whole runs — rather than re-reading one warm file.
+const PASSES: usize = 3;
 
 /// Cap on enqueued-but-unwritten bytes. `enqueue` is synchronous and hands off
 /// to a writer task, so an unthrottled loop produces at memory speed while the
@@ -68,11 +77,22 @@ fn settings() -> WalSettings {
 }
 
 struct Row {
-    payload: usize,
-    records: u64,
     bytes: u64,
     write_secs: f64,
     scan_secs: f64,
+}
+
+/// Median, and slowest over fastest. Rates are derived from the median, so the
+/// spread is what says whether the leading digits mean anything.
+fn median_and_spread(v: &[f64]) -> (f64, f64) {
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let spread = if s[0] > 0.0 {
+        s[s.len() - 1] / s[0]
+    } else {
+        1.0
+    };
+    (s[s.len() / 2], spread)
 }
 
 async fn measure(root: &Path, payload: usize, records: u64) -> Row {
@@ -123,8 +143,6 @@ async fn measure(root: &Path, payload: usize, records: u64) -> Row {
     );
 
     Row {
-        payload,
-        records,
         bytes: file_len(&wal_path),
         write_secs,
         scan_secs,
@@ -137,31 +155,45 @@ async fn main() {
         "normfs-wal {} — write and scan by record size\n",
         env!("CARGO_PKG_VERSION")
     );
+    println!("median of {PASSES} passes, spread is slowest over fastest\n");
     println!(
-        "{:>8} | {:>10} | {:>9} | {:>13} | {:>13} | {:>9}",
+        "{:>8} | {:>10} | {:>8} | {:>20} | {:>20} | {:>9}",
         "payload", "records", "on disk", "write M rec/s", "scan M rec/s", "bytes/rec"
     );
     println!(
-        "{:->8}-+-{:->10}-+-{:->9}-+-{:->13}-+-{:->13}-+-{:->9}",
+        "{:->8}-+-{:->10}-+-{:->8}-+-{:->20}-+-{:->20}-+-{:->9}",
         "", "", "", "", "", ""
     );
 
     for payload in SIZES {
         let records = MAX_RECORDS.min(MAX_BYTES / payload as u64);
-        // A fresh directory per size: the scan must see one file, not a queue
-        // that grew across sizes.
-        let tmp = tempfile::tempdir().unwrap();
-        let row = measure(tmp.path(), payload, records).await;
+        let mut writes = Vec::with_capacity(PASSES);
+        let mut scans = Vec::with_capacity(PASSES);
+        let mut bytes = 0;
 
+        for _ in 0..PASSES {
+            // A fresh directory per pass: the scan must see one file, not a
+            // queue that grew, and the build has to be a build.
+            let tmp = tempfile::tempdir().unwrap();
+            let row = measure(tmp.path(), payload, records).await;
+            writes.push(row.write_secs);
+            scans.push(row.scan_secs);
+            bytes = row.bytes;
+            drop(tmp);
+        }
+
+        let (write_med, write_spread) = median_and_spread(&writes);
+        let (scan_med, scan_spread) = median_and_spread(&scans);
         println!(
-            "{:>8} | {:>10} | {:>8.2}G | {:>13.2} | {:>13.2} | {:>9.1}",
-            row.payload,
-            row.records,
-            row.bytes as f64 / (1u64 << 30) as f64,
-            row.records as f64 / row.write_secs / 1e6,
-            row.records as f64 / row.scan_secs / 1e6,
-            row.bytes as f64 / row.records as f64
+            "{:>8} | {:>10} | {:>7.2}G | {:>13.2} {:>5} | {:>13.2} {:>5} | {:>9.1}",
+            payload,
+            records,
+            bytes as f64 / (1u64 << 30) as f64,
+            records as f64 / write_med / 1e6,
+            format!("{:.2}x", write_spread),
+            records as f64 / scan_med / 1e6,
+            format!("{:.2}x", scan_spread),
+            bytes as f64 / records as f64
         );
-        drop(tmp);
     }
 }
