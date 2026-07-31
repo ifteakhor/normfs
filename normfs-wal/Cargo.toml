@@ -55,8 +55,6 @@ name = "wal_sweep"
 harness = false
 
 # V1 paged ring vs a V0 Vec baseline (mem-store append / range / seek).
-# Warmup / measurement default to 5s / 30s, overridable (seconds) with
-# WAL_BENCH_WARMUP / WAL_BENCH_MEASURE.
 [[bench]]
 name = "mem_ring"
 harness = false
