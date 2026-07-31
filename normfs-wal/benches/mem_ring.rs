@@ -11,15 +11,18 @@
 //! ring pays a small CPU cost on append/read for bounded memory, and wins seek
 //! outright (page arithmetic vs a linear scan).
 //!
-//! Warmup / measurement default to 5s / 30s, overridable (seconds) with
-//! WAL_BENCH_WARMUP / WAL_BENCH_MEASURE.
+//! Warmup and measurement come from [`common`], fixed in code like every other
+//! case here: numbers that depend on how the run was invoked cannot be compared
+//! against a pasted log.
 //!
 //!   cargo bench -p normfs-wal --bench mem_ring
 
+mod common;
+
 use std::hint::black_box;
-use std::time::Duration;
 
 use bytes::Bytes;
+use common::{MEASUREMENT, WARM_UP};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use normfs_wal::{AppendOutcome, WalRing};
 
@@ -27,21 +30,6 @@ const N: u64 = 8_000;
 const PAYLOAD: usize = 64;
 const PAGE_SIZE: usize = 256 * 1024;
 const PAGE_COUNT: usize = 4; // 1 MiB, comfortably holds N * ~69 B entries
-
-fn env_secs(var: &str, default: u64) -> Duration {
-    Duration::from_secs(
-        std::env::var(var)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(default),
-    )
-}
-fn warm() -> Duration {
-    env_secs("WAL_BENCH_WARMUP", 5)
-}
-fn meas() -> Duration {
-    env_secs("WAL_BENCH_MEASURE", 30)
-}
 
 fn record() -> Bytes {
     Bytes::from(vec![0xABu8; PAYLOAD])
@@ -65,8 +53,8 @@ fn filled_vec() -> Vec<(u64, Bytes)> {
 
 fn bench_append(c: &mut Criterion) {
     let mut g = c.benchmark_group("ring_append");
-    g.warm_up_time(warm());
-    g.measurement_time(meas());
+    g.warm_up_time(WARM_UP);
+    g.measurement_time(MEASUREMENT);
     g.throughput(Throughput::Elements(N));
     let rec = record();
 
@@ -100,8 +88,8 @@ fn bench_append(c: &mut Criterion) {
 
 fn bench_collect_range(c: &mut Criterion) {
     let mut g = c.benchmark_group("ring_collect_range");
-    g.warm_up_time(warm());
-    g.measurement_time(meas());
+    g.warm_up_time(WARM_UP);
+    g.measurement_time(MEASUREMENT);
 
     // Read back the middle half of the cache.
     let start = N / 4;
@@ -129,8 +117,8 @@ fn bench_collect_range(c: &mut Criterion) {
 
 fn bench_seek(c: &mut Criterion) {
     let mut g = c.benchmark_group("ring_seek");
-    g.warm_up_time(warm());
-    g.measurement_time(meas());
+    g.warm_up_time(WARM_UP);
+    g.measurement_time(MEASUREMENT);
     let target = N / 2;
 
     let ring = filled_ring();
