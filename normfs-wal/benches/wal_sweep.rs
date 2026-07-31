@@ -13,6 +13,12 @@
 //! whole point of the entry format is what it costs to put *one small record*
 //! on disk, and a byte rate hides that behind the record size.
 //!
+//! The dataset is sized from the machine, not from a constant: a sixteenth of
+//! the free space, capped at 4 GiB. That is what lets the same benchmark run on
+//! a laptop and on a board logging to an SD card without a flag to set, and it
+//! is why rates compare across machines but the absolute dataset sizes do not —
+//! every row prints the one it used.
+//!
 //! Sizes are swept rather than fixed because the answer changes shape across
 //! them: framing is a fifth of an 80 B entry and a rounding error on a 12 KiB
 //! one. Each size gets its own entry count — a fixed byte budget would mean
@@ -66,9 +72,38 @@ fn requested_sizes() -> Vec<usize> {
 }
 
 /// Entries per size, capped two ways: enough records for the rate to mean
-/// something, and not more bytes than a run should write for one point.
+/// something, and not more bytes than the machine should write for one point.
 const MAX_RECORDS: u64 = 20_000_000;
+
+/// Most a point may write on a machine with room to spare, and the least it may
+/// write before the rate stops meaning anything.
 const MAX_BYTES: u64 = 4 << 30;
+const MIN_BYTES: u64 = 128 << 20;
+
+/// Free bytes where the datasets go. `df -Pk` is POSIX output everywhere this
+/// runs; a parse failure yields `None` rather than a guess.
+fn free_bytes(path: &Path) -> Option<u64> {
+    let out = std::process::Command::new("df")
+        .arg("-Pk")
+        .arg(path)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let available = text.lines().nth(1)?.split_whitespace().nth(3)?;
+    available.parse::<u64>().ok().map(|kb| kb * 1024)
+}
+
+/// Bytes one point may write, taken from the machine rather than a constant. A
+/// laptop gets the full budget; a board logging to an SD card gets a sixteenth
+/// of what is free, which is what lets the same benchmark run on both without a
+/// flag to set. Each pass rewrites the dataset, so the point costs three times
+/// this in writes — worth knowing on flash.
+fn budget_bytes() -> u64 {
+    match free_bytes(&std::env::temp_dir()) {
+        Some(free) => (free / 16).clamp(MIN_BYTES, MAX_BYTES),
+        None => MAX_BYTES,
+    }
+}
 
 /// Repeats per point. Each pass rebuilds the dataset, so this measures the
 /// variance that matters — whole runs — rather than re-reading one warm file.
@@ -192,13 +227,20 @@ async fn main() {
         "", "", "", "", "", ""
     );
 
+    let budget = budget_bytes();
+    println!(
+        "up to {:.2} GiB per point, {} passes each\n",
+        budget as f64 / (1u64 << 30) as f64,
+        PASSES
+    );
+
     let sizes = requested_sizes();
     if sizes.len() > 1 {
         println!("warning: {} sizes in one process — later points inherit the writeback backlog of earlier ones. Pass one size per run for numbers to quote.\n", sizes.len());
     }
 
     for payload in sizes {
-        let records = MAX_RECORDS.min(MAX_BYTES / payload as u64);
+        let records = MAX_RECORDS.min(budget / payload as u64).max(1);
         let mut writes = Vec::with_capacity(PASSES);
         let mut scans = Vec::with_capacity(PASSES);
         let mut bytes = 0;
