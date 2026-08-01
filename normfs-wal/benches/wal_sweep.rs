@@ -75,7 +75,11 @@ fn requested_sizes() -> Vec<usize> {
 
 /// Entries per size, capped two ways: enough records for the rate to mean
 /// something, and not more bytes than the machine should write for one point.
-const MAX_RECORDS: u64 = 20_000_000;
+///
+/// The record cap is what keeps the small sizes finite — at 16 B the byte
+/// budget alone would ask for 1.3 billion entries — so 16 B and 64 B write less
+/// than the full budget and the table prints what each row actually wrote.
+const MAX_RECORDS: u64 = 250_000_000;
 
 /// Most a point may write, and the free space a run needs before it starts.
 ///
@@ -85,8 +89,14 @@ const MAX_RECORDS: u64 = 20_000_000;
 /// The headroom above the budget covers framing, which pushes the file a couple
 /// of percent past the payload total; passes run one at a time and delete their
 /// directory, so only one dataset is on disk at once.
-const MAX_BYTES: u64 = 4 << 30;
-const REQUIRED_FREE: u64 = 5 << 30;
+/// 20 GiB is chosen to be larger than the RAM of the machines this runs on, so
+/// the scan reads a file the page cache could not have kept whole. At 4 GiB it
+/// read back out of memory on every machine tested and reported that as storage.
+/// The required-free figure covers the previous release rather than this one:
+/// 0.1 frames each entry in 28 bytes against V1's 5, so it writes about a
+/// quarter more for the same records.
+const MAX_BYTES: u64 = 20 << 30;
+const REQUIRED_FREE: u64 = 30 << 30;
 
 /// Free bytes where the datasets go. `df -Pk` is POSIX output everywhere this
 /// runs; a parse failure yields `None` rather than a guess.
