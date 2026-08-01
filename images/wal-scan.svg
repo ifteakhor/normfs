@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
 <rect width="1200" height="630" fill="#ffffff"/>
-<text x="96" y="76" font-size="40" font-weight="700" fill="#1f2328">NormFS 0.2 scans the WAL up to 9.3x faster</text>
+<text x="96" y="76" font-size="40" font-weight="700" fill="#1f2328">NormFS 0.2 scans the WAL up to 8.8x faster</text>
 <text x="96" y="118" font-size="21" fill="#59636e">Million sensor records recovered per second, by record size &#8212; taller is faster</text>
 <rect x="96" y="146" width="16" height="16" rx="3" fill="#1f77b4"/>
 <text x="122" y="160" font-size="19" font-weight="600" fill="#1f2328">0.2 &#183; new</text>
@@ -16,29 +16,29 @@
 <text x="82" y="316.3" font-size="17" fill="#59636e" text-anchor="end">60</text>
 <line x1="96" y1="238.4" x2="1144" y2="238.4" stroke="#eaeef2" stroke-width="1"/>
 <text x="82" y="245.4" font-size="17" fill="#59636e" text-anchor="end">80</text>
-<rect x="153.4" y="246.7" width="68.1" height="275.3" rx="3" fill="#1f77b4"/>
-<text x="187.5" y="234.7" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">77.66</text>
-<rect x="232.4" y="488.8" width="68.1" height="33.2" rx="3" fill="#d62728"/>
-<text x="266.5" y="476.8" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">9.36</text>
-<text x="227.0" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">16 B</text>
-<text x="227.0" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">8.3x</text>
-<rect x="415.4" y="319.8" width="68.1" height="202.2" rx="3" fill="#1f77b4"/>
-<text x="449.5" y="307.8" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">57.03</text>
-<rect x="494.4" y="498.8" width="68.1" height="23.2" rx="3" fill="#d62728"/>
-<text x="528.5" y="486.8" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">6.54</text>
-<text x="489.0" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">64 B</text>
-<text x="489.0" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">8.7x</text>
-<rect x="677.4" y="332.7" width="68.1" height="189.3" rx="3" fill="#1f77b4"/>
-<text x="711.5" y="320.7" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">53.39</text>
-<rect x="756.4" y="501.6" width="68.1" height="20.4" rx="3" fill="#d62728"/>
-<text x="790.5" y="489.6" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">5.76</text>
-<text x="751.0" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">80 B</text>
-<text x="751.0" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">9.3x</text>
-<rect x="939.4" y="452.3" width="68.1" height="69.7" rx="3" fill="#1f77b4"/>
-<text x="973.5" y="440.3" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">19.66</text>
-<rect x="1018.4" y="511.9" width="68.1" height="10.1" rx="3" fill="#d62728"/>
-<text x="1052.5" y="499.9" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">2.86</text>
-<text x="1013.0" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">256 B</text>
-<text x="1013.0" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">6.9x</text>
+<rect x="153.4" y="279.3" width="68.1" height="242.7" rx="3" fill="#1f77b4"/>
+<text x="187.4" y="267.3" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">68.46</text>
+<rect x="232.4" y="494.3" width="68.1" height="27.7" rx="3" fill="#d62728"/>
+<text x="266.4" y="482.3" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">7.81</text>
+<text x="192.9" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">16 B</text>
+<text x="192.9" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">8.8x</text>
+<rect x="415.4" y="345.2" width="68.1" height="176.8" rx="3" fill="#1f77b4"/>
+<text x="449.4" y="333.2" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">49.87</text>
+<rect x="494.4" y="501.0" width="68.1" height="21.0" rx="3" fill="#d62728"/>
+<text x="528.4" y="489.0" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">5.91</text>
+<text x="454.9" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">64 B</text>
+<text x="454.9" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">8.4x</text>
+<rect x="677.4" y="363.1" width="68.1" height="158.9" rx="3" fill="#1f77b4"/>
+<text x="711.4" y="351.1" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">44.81</text>
+<rect x="756.4" y="502.9" width="68.1" height="19.1" rx="3" fill="#d62728"/>
+<text x="790.4" y="490.9" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">5.39</text>
+<text x="716.9" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">80 B</text>
+<text x="716.9" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">8.3x</text>
+<rect x="939.4" y="460.5" width="68.1" height="61.5" rx="3" fill="#1f77b4"/>
+<text x="973.4" y="448.5" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">17.35</text>
+<rect x="1018.4" y="512.3" width="68.1" height="9.7" rx="3" fill="#d62728"/>
+<text x="1052.5" y="500.3" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">2.74</text>
+<text x="978.9" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">256 B</text>
+<text x="978.9" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">6.3x</text>
 <line x1="96" y1="522" x2="1144" y2="522" stroke="#d0d7de" stroke-width="2"/>
 </svg>
