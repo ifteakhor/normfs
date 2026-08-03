@@ -41,7 +41,7 @@ async fn test_signature_verification() {
     let data = Bytes::from(vec![0u8; entry_size]);
 
     for _ in 0..num_entries {
-        normfs.enqueue(&queue_id, data.clone()).unwrap();
+        normfs.enqueue(&queue_id, data.clone()).await.unwrap();
     }
 
     let instance_id = normfs.get_instance_id().to_string();
@@ -110,7 +110,7 @@ async fn test_signature_verification_fails_on_tampered_header() {
     let data = Bytes::from(vec![0u8; entry_size]);
 
     for _ in 0..num_entries {
-        normfs.enqueue(&queue_id, data.clone()).unwrap();
+        normfs.enqueue(&queue_id, data.clone()).await.unwrap();
     }
 
     let instance_id = normfs.get_instance_id().to_string();
@@ -177,7 +177,7 @@ async fn test_signature_verification_fails_on_tampered_content() {
     let data = Bytes::from(vec![0u8; entry_size]);
 
     for _ in 0..num_entries {
-        normfs.enqueue(&queue_id, data.clone()).unwrap();
+        normfs.enqueue(&queue_id, data.clone()).await.unwrap();
     }
 
     let instance_id = normfs.get_instance_id().to_string();

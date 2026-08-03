@@ -46,7 +46,7 @@ fn subscribe_latency_benchmark(c: &mut Criterion) {
                     tokio::time::sleep(Duration::from_millis(10)).await;
 
                     let start_time = Instant::now();
-                    normfs.enqueue(&queue_name, Bytes::from("hello")).unwrap();
+                    normfs.enqueue(&queue_name, Bytes::from("hello")).await.unwrap();
 
                     if let Some(_entry) = rx.recv().await {
                         let end_time = Instant::now();

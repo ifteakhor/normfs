@@ -63,7 +63,7 @@ async fn test_recovery_empty_latest_file() {
         // Write some entries to file 1
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -93,7 +93,7 @@ async fn test_recovery_empty_latest_file() {
         // Should reuse file 2 (latest file is empty)
         // Next ID after 9 should be 10
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(10u64));
 
@@ -132,7 +132,7 @@ async fn test_recovery_multiple_empty_files() {
         // Write entries
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -162,7 +162,7 @@ async fn test_recovery_multiple_empty_files() {
         // Should reuse file 4 (latest empty file)
         // Wrote entries 0-4, so next should be 5
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(5u64));
 
@@ -199,7 +199,7 @@ async fn test_recovery_header_only_file() {
 
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -230,7 +230,7 @@ async fn test_recovery_header_only_file() {
 
         // Wrote entries 0-9, so next should be 10
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(10u64));
     }
@@ -254,7 +254,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
         // Write entries 0-9 to file 1
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -287,7 +287,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
         // Should reuse file 2 (has header but no entries)
         // Next ID after 9 should be 10
         let new_entry = Bytes::from("new-entry-after-header-only");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(10u64), "Should continue from ID 10");
 
@@ -339,7 +339,7 @@ async fn test_recovery_multiple_header_only_files() {
         // Write entries 0-4 to file 1
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -380,7 +380,7 @@ async fn test_recovery_multiple_header_only_files() {
 
         // Next ID after 4 should be 5
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(5u64), "Should continue from ID 5");
 
@@ -449,7 +449,7 @@ async fn test_recovery_all_empty_files() {
 
         // First entry should be 0 (start from zero)
         let new_entry = Bytes::from("first-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::zero());
     }
@@ -473,7 +473,7 @@ async fn test_recovery_gap_in_files() {
 
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -499,7 +499,7 @@ async fn test_recovery_gap_in_files() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         println!("New ID after gap recovery: {}", new_id);
     }
 }
@@ -525,7 +525,7 @@ async fn test_recovery_old_data_different_session() {
 
         for i in 0..10 {
             let data = Bytes::from(format!("session1-video-{}", i));
-            fs.enqueue(&video_queue_id, data).unwrap();
+            fs.enqueue(&video_queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -556,7 +556,7 @@ async fn test_recovery_old_data_different_session() {
 
         // Write new data - should get ID 10, not reuse old IDs
         let new_data = Bytes::from("session2-video-0");
-        let new_id = fs.enqueue(&video_queue_id, new_data).unwrap();
+        let new_id = fs.enqueue(&video_queue_id, new_data).await.unwrap();
         assert_eq!(new_id, UintN::from(10u64));
 
         // Note: We skip the read-back test because the manually created empty file 3
@@ -582,7 +582,7 @@ async fn test_recovery_store_files_with_empty_wal() {
 
         for i in 0..20 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         // Wait a bit for WAL->Store conversion
@@ -608,7 +608,7 @@ async fn test_recovery_store_files_with_empty_wal() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         // Should continue from where Store left off (wrote 0-19, so next is 20)
         assert_eq!(new_id.to_u64().unwrap(), 20);
@@ -633,7 +633,7 @@ async fn test_recovery_alternating_empty_files() {
 
         for i in 0..3 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -658,7 +658,7 @@ async fn test_recovery_alternating_empty_files() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(3u64));
     }
@@ -682,7 +682,7 @@ async fn test_recovery_large_file_ids() {
 
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -711,7 +711,7 @@ async fn test_recovery_large_file_ids() {
 
         // Should walk back from 1000000 to find file 1
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         assert_eq!(new_id, UintN::from(5u64));
     }
 }
@@ -742,7 +742,7 @@ async fn test_recovery_multiple_restarts() {
         // Write 2 entries per cycle
         for i in 0..2 {
             let data = Bytes::from(format!("cycle-{}-entry-{}", cycle, i));
-            let id = fs.enqueue(&queue_id, data).unwrap();
+            let id = fs.enqueue(&queue_id, data).await.unwrap();
             println!("Cycle {} Entry {}: ID = {}", cycle, i, id);
             assert_eq!(id, UintN::from(expected_id));
             expected_id += 1;
@@ -787,7 +787,7 @@ async fn test_recovery_single_entry_file() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let data = Bytes::from("single-entry");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -810,7 +810,7 @@ async fn test_recovery_single_entry_file() {
 
         // Wrote 1 entry (ID 0), so next should be 1
         let new_entry = Bytes::from("second-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -834,7 +834,7 @@ async fn test_recovery_large_entries() {
 
         // Write 1MB entry
         let large_data = vec![0u8; 1024 * 1024];
-        fs.enqueue(&queue_id, Bytes::from(large_data)).unwrap();
+        fs.enqueue(&queue_id, Bytes::from(large_data)).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -856,7 +856,7 @@ async fn test_recovery_large_entries() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("small-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -877,7 +877,7 @@ async fn test_recovery_empty_directory() {
     fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
     let first_entry = Bytes::from("first");
-    let first_id = fs.enqueue(&queue_id, first_entry).unwrap();
+    let first_id = fs.enqueue(&queue_id, first_entry).await.unwrap();
 
     assert_eq!(first_id, UintN::zero());
 }
@@ -900,7 +900,7 @@ async fn test_recovery_different_header_formats() {
 
         // Write small entry
         let data = Bytes::from("x");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -922,7 +922,7 @@ async fn test_recovery_different_header_formats() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("y");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -946,7 +946,7 @@ async fn test_recovery_readonly_queue() {
 
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -997,7 +997,7 @@ async fn test_recovery_incomplete_write() {
 
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         // Don't close cleanly - simulate crash
@@ -1020,7 +1020,7 @@ async fn test_recovery_incomplete_write() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("post-crash");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         println!("ID after crash recovery: {}", new_id);
     }
 }
@@ -1043,7 +1043,7 @@ async fn test_recovery_scattered_files() {
 
         for i in 0..3 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1068,7 +1068,7 @@ async fn test_recovery_scattered_files() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(3u64));
     }
@@ -1091,7 +1091,7 @@ async fn test_recovery_zero_byte_vs_header_only() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let data = Bytes::from("entry");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -1125,7 +1125,7 @@ async fn test_recovery_zero_byte_vs_header_only() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -1151,13 +1151,13 @@ async fn test_recovery_with_batch_writes() {
         let batch1: Vec<Bytes> = (0..5)
             .map(|i| Bytes::from(format!("batch1-{}", i)))
             .collect();
-        fs.enqueue_batch(&queue_id, batch1).unwrap();
+        fs.enqueue_batch(&queue_id, batch1).await.unwrap();
 
         // Batch 2
         let batch2: Vec<Bytes> = (0..5)
             .map(|i| Bytes::from(format!("batch2-{}", i)))
             .collect();
-        fs.enqueue_batch(&queue_id, batch2).unwrap();
+        fs.enqueue_batch(&queue_id, batch2).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -1183,7 +1183,7 @@ async fn test_recovery_with_batch_writes() {
         assert_eq!(last_id, Some(UintN::from(9u64)));
 
         let new_entry = Bytes::from("after-batch");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(10u64));
     }
@@ -1207,7 +1207,7 @@ async fn test_recovery_corrupted_header() {
 
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1231,7 +1231,7 @@ async fn test_recovery_corrupted_header() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("post-corruption");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         assert_eq!(new_id, UintN::from(5u64));
     }
 }
@@ -1254,7 +1254,7 @@ async fn test_recovery_truncated_file() {
 
         for i in 0..3 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1278,7 +1278,7 @@ async fn test_recovery_truncated_file() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("post-truncation");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(3u64));
     }
@@ -1302,7 +1302,7 @@ async fn test_recovery_multiple_corrupted_files() {
 
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1328,7 +1328,7 @@ async fn test_recovery_multiple_corrupted_files() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("recovered");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         assert_eq!(new_id, UintN::from(5u64));
     }
 }
@@ -1351,7 +1351,7 @@ async fn test_recovery_partial_entry() {
 
         for i in 0..2 {
             let data = Bytes::from(format!("complete-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1384,7 +1384,7 @@ async fn test_recovery_partial_entry() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("post-crash");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         println!("ID after partial entry recovery: {}", new_id);
     }
 }
@@ -1407,7 +1407,7 @@ async fn test_recovery_garbage_at_end() {
 
         for i in 0..3 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1437,7 +1437,7 @@ async fn test_recovery_garbage_at_end() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("clean-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         println!("ID after garbage data: {}", new_id);
     }
 }
@@ -1460,7 +1460,7 @@ async fn test_recovery_corrupted_middle_file() {
 
         for i in 0..3 {
             let data = Bytes::from(format!("file1-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1490,7 +1490,7 @@ async fn test_recovery_corrupted_middle_file() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("file4-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(3u64));
     }
@@ -1532,7 +1532,7 @@ async fn test_recovery_all_files_corrupted() {
 
         // All files corrupted, should start from 0
         let first_entry = Bytes::from("fresh-start");
-        let first_id = fs.enqueue(&queue_id, first_entry).unwrap();
+        let first_id = fs.enqueue(&queue_id, first_entry).await.unwrap();
 
         assert_eq!(first_id, UintN::zero());
     }
@@ -1555,7 +1555,7 @@ async fn test_recovery_wrong_file_type() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let data = Bytes::from("valid-entry");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -1578,7 +1578,7 @@ async fn test_recovery_wrong_file_type() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -1601,7 +1601,7 @@ async fn test_recovery_random_corruption() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let data = Bytes::from("good-data");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -1624,7 +1624,7 @@ async fn test_recovery_random_corruption() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("recovered");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -1650,7 +1650,7 @@ async fn test_recovery_skipped_file_in_sequence() {
         // Write entries 0-9 to file 1
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1680,7 +1680,7 @@ async fn test_recovery_skipped_file_in_sequence() {
 
         // Should continue from entry 10 (after 0-9 in file 1)
         let new_entry = Bytes::from("entry-after-gap");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(
             new_id,
@@ -1727,7 +1727,7 @@ async fn test_recovery_multiple_skipped_files() {
         // Write entries 0-4 to file 1
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1757,7 +1757,7 @@ async fn test_recovery_multiple_skipped_files() {
 
         // Should continue from entry 5 (after 0-4 in file 1)
         let new_entry = Bytes::from("entry-after-large-gap");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(
             new_id,
@@ -1798,7 +1798,7 @@ async fn test_wal_async_old_file_processing() {
         // Note: Actual file rotation depends on WAL size settings
         for i in 0..100 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1838,7 +1838,7 @@ async fn test_wal_async_old_file_processing() {
 
         // Write a new entry to verify queue is operational
         let new_data = Bytes::from("entry-after-recovery");
-        let new_id = fs.enqueue(&queue_id, new_data).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_data).await.unwrap();
         assert!(
             new_id >= UintN::from(100u64),
             "Should continue from where we left off"
@@ -1880,7 +1880,7 @@ async fn test_read_backward_wal_memory_boundary() {
         // Write entries 0-9 to WAL
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            let id = fs.enqueue(&queue_id, data).unwrap();
+            let id = fs.enqueue(&queue_id, data).await.unwrap();
             assert_eq!(id, UintN::from(i as u64));
         }
 
@@ -1896,7 +1896,7 @@ async fn test_read_backward_wal_memory_boundary() {
 
         // Write entry 10 - this goes to memory (and WAL file 2)
         let data = Bytes::from("entry-10");
-        let id = fs.enqueue(&queue_id, data).unwrap();
+        let id = fs.enqueue(&queue_id, data).await.unwrap();
         assert_eq!(id, UintN::from(10u64), "New entry should have ID 10");
 
         fs
@@ -1980,7 +1980,7 @@ async fn test_read_backward_wal_only_after_recovery() {
 
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -2056,7 +2056,7 @@ async fn test_read_backward_multiple_entries_crossing_boundary() {
 
         for i in 0..10 {
             let data = Bytes::from(format!("wal-entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -2071,7 +2071,7 @@ async fn test_read_backward_multiple_entries_crossing_boundary() {
 
         for i in 10..15 {
             let data = Bytes::from(format!("mem-entry-{}", i));
-            let id = fs.enqueue(&queue_id, data).unwrap();
+            let id = fs.enqueue(&queue_id, data).await.unwrap();
             assert_eq!(id, UintN::from(i as u64));
         }
 
@@ -2161,7 +2161,7 @@ async fn test_read_completes_on_last_entry_after_recovery() {
 
         for i in 0..100 {
             let data = Bytes::from(format!("entry-{}", i));
-            let id = fs.enqueue(&queue_id, data).unwrap();
+            let id = fs.enqueue(&queue_id, data).await.unwrap();
             assert_eq!(id, UintN::from(i as u64));
         }
 
@@ -2282,7 +2282,7 @@ async fn test_read_completes_on_last_entry_after_recovery_readonly() {
 
         for i in 0..100 {
             let data = Bytes::from(format!("entry-{}", i));
-            let id = fs.enqueue(&queue_id, data).unwrap();
+            let id = fs.enqueue(&queue_id, data).await.unwrap();
             assert_eq!(id, UintN::from(i as u64));
         }
 
@@ -2375,7 +2375,7 @@ async fn test_read_range_from_memory() {
     // Write 10 entries (IDs 0-9)
     for i in 0..10 {
         let data = Bytes::from(format!("entry-{}", i));
-        let id = fs.enqueue(&queue_id, data).unwrap();
+        let id = fs.enqueue(&queue_id, data).await.unwrap();
         assert_eq!(id, UintN::from(i as u64));
     }
 
@@ -2442,7 +2442,7 @@ async fn test_read_from_memory_with_step() {
     // Write 10 entries (IDs 0-9)
     for i in 0..10 {
         let data = Bytes::from(format!("entry-{}", i));
-        let id = fs.enqueue(&queue_id, data).unwrap();
+        let id = fs.enqueue(&queue_id, data).await.unwrap();
         assert_eq!(id, UintN::from(i as u64));
     }
 
@@ -2508,7 +2508,7 @@ async fn test_wal_async_no_old_files() {
         // Write just a few entries (stay in same file)
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -2525,7 +2525,7 @@ async fn test_wal_async_no_old_files() {
         // Should work normally even with no old files
         // Write a new entry to verify queue is operational
         let new_data = Bytes::from("entry-after-recovery");
-        let new_id = fs.enqueue(&queue_id, new_data).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_data).await.unwrap();
         assert_eq!(new_id, UintN::from(5u64), "Should continue from ID 5");
 
         fs.close().await.unwrap();
@@ -2573,7 +2573,7 @@ async fn test_wal_async_excludes_current_file() {
 
         // Write entry - should go to file 4 (or reuse latest depending on recovery logic)
         let data = Bytes::from("new-entry");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         // Give async processing time to run
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;

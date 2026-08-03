@@ -61,6 +61,8 @@ struct Inner {
 struct MemQueue {
     inner: RwLock<Inner>,
     max_memory_usage: usize,
+    /// Held across an append so the pool sees ids in order.
+    append_gate: tokio::sync::Mutex<()>,
     subscribers: Mutex<HashMap<usize, SubscriberCallback>>,
     next_subscriber_id: Mutex<usize>,
 }
@@ -82,6 +84,7 @@ impl MemQueue {
                 last_acked_id: None,
             }),
             max_memory_usage,
+            append_gate: tokio::sync::Mutex::new(()),
             subscribers: Mutex::new(HashMap::new()),
             next_subscriber_id: Mutex::new(0),
         }
@@ -126,6 +129,42 @@ impl MemQueue {
                 pool.reseed(id_u64.wrapping_add(1));
             }
         }
+    }
+
+    /// Enqueues, waiting for a page rather than dropping the cache when the
+    /// pool is full. The synchronous [`MemQueue::enqueue`] stays for callers
+    /// that cannot await.
+    pub async fn enqueue_awaiting(&self, data: Bytes) -> UintN {
+        let _gate = self.append_gate.lock().await;
+
+        let (id, pool, subscribers_data) = {
+            let mut inner = self.inner.write().unwrap();
+            let id = inner
+                .last_id
+                .as_ref()
+                .map_or(UintN::zero(), |id| id.increment());
+            let subscribers_data = if self.subscribers.lock().unwrap().is_empty() {
+                None
+            } else {
+                Some(data.clone())
+            };
+            inner.last_id = Some(id.clone());
+            (id, inner.pool.clone(), subscribers_data)
+        };
+
+        if let Some(pool) = pool {
+            // TooLarge is not an error here: the record is simply not cached
+            // and is served from the file, as it always was.
+            let _ = pool.append_at(id_to_u64(&id), &data).await;
+        }
+
+        log::debug!(target: "normfs-mem", "Enqueued entry - ID: {}, Data size: {} bytes", id, data.len());
+
+        if let Some(data) = subscribers_data {
+            self.notify_subscribers(&[(id.clone(), data)]);
+        }
+
+        id
     }
 
     pub fn enqueue(&self, data: Bytes) -> UintN {
@@ -753,6 +792,17 @@ impl MemStore {
                 queue, last_id, queue_max_memory);
             let new_queue = Arc::new(MemQueue::new(last_id, queue_max_memory));
             queues.insert(queue.clone(), new_queue);
+        }
+    }
+
+    pub async fn enqueue_awaiting(&self, queue: &QueueId, data: Bytes) -> UintN {
+        let mem_queue = {
+            let queues = self.queues.read().unwrap();
+            queues.get(queue).cloned()
+        };
+        match mem_queue {
+            Some(q) => q.enqueue_awaiting(data).await,
+            None => self.enqueue(queue, data),
         }
     }
 

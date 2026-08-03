@@ -246,9 +246,10 @@ impl CommandProcessor {
         let result = if packets.len() == 1 {
             self.normfs
                 .enqueue(&queue_id, packets[0].clone())
+                .await
                 .map(|id| vec![id])
         } else {
-            self.normfs.enqueue_batch(&queue_id, packets)
+            self.normfs.enqueue_batch(&queue_id, packets).await
         };
 
         match result {

@@ -121,6 +121,46 @@ impl PagePool {
         outcome
     }
 
+    /// Appends the record that must land on `expected_id`, waiting until a
+    /// page can be reclaimed.
+    ///
+    /// The caller owns the id sequence; the pool follows it. They can only
+    /// disagree after a record the pool refused, and re-seeding to catch up
+    /// discards pages, so callers must serialise their appends.
+    pub async fn append_at(&self, expected_id: u64, record: &[u8]) -> Result<(), PoolError> {
+        let mut waited = false;
+        loop {
+            let woken = self.space.notified();
+            {
+                let mut inner = self.inner.lock().unwrap();
+                if inner.ring.next_entry_id() != expected_id {
+                    inner.ring.reinit(expected_id);
+                    inner.written.iter_mut().for_each(|w| *w = 0);
+                }
+                let before = inner.ring.active_page();
+                let outcome = inner.ring.append(record);
+                let after = inner.ring.active_page();
+                if after != before {
+                    inner.written[after] = 0;
+                }
+                match outcome {
+                    AppendOutcome::Cached(_) => {
+                        if waited {
+                            log::debug!(target: "normfs-wal", "page pool: resumed at entry {expected_id}");
+                        }
+                        return Ok(());
+                    }
+                    AppendOutcome::TooLarge => return Err(PoolError::TooLarge),
+                    AppendOutcome::Full => {}
+                }
+            }
+            waited = true;
+            if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {
+                self.warn_stalled();
+            }
+        }
+    }
+
     /// Appends, waiting until a page can be reclaimed.
     ///
     /// Returns only once the record is in a page and has an id. It does not
