@@ -4,7 +4,7 @@ use tokio::sync::mpsc::Sender;
 
 use bytes::Bytes;
 use normfs_types::{DataSource, QueueId, ReadEntry, SubscriberCallback};
-use normfs_wal::{AppendOutcome, WalRing};
+use normfs_wal::{AppendOutcome, PagePool};
 use uintn::UintN;
 
 // Geometry of the in-memory paged store. A record larger than a page is not
@@ -51,7 +51,7 @@ pub struct MemStore {
 struct Inner {
     // The paged store, allocated on first enqueue. It holds a contiguous suffix
     // of recent entries; older acked entries are reclaimed and served from file.
-    ring: Option<WalRing>,
+    pool: Option<Arc<PagePool>>,
     // The last enqueued id. It persists beyond the cache, so it is tracked
     // separately from the ring.
     last_id: Option<UintN>,
@@ -67,9 +67,17 @@ struct MemQueue {
 
 impl MemQueue {
     pub fn new(last_id: Option<UintN>, max_memory_usage: usize) -> Self {
+        // Allocated here, once, so the pool's footprint is fixed for the life
+        // of the queue and the WAL writer can be handed the same one.
+        let first_entry_id = last_id.as_ref().map_or(0, |id| id_to_u64(id).wrapping_add(1));
+        let pool = Arc::new(PagePool::new(
+            ring_page_count(max_memory_usage),
+            MEM_PAGE_SIZE,
+            first_entry_id,
+        ));
         MemQueue {
             inner: RwLock::new(Inner {
-                ring: None,
+                pool: Some(pool),
                 last_id,
                 last_acked_id: None,
             }),
@@ -79,31 +87,43 @@ impl MemQueue {
         }
     }
 
-    // Caches `data` under `id_u64`, allocating the ring on first use and
-    // resyncing it when a previous entry could not be cached. A record that
-    // does not fit a page (TooLarge), or one that arrives when no page can be
-    // reclaimed (Full), is left to the file: the ring resumes caching from the
-    // next id so its contents stay a contiguous suffix.
+    // Caches `data` under `id_u64` in the pre-allocated pool.
+    //
+    // The pool is the id authority: it hands out ids in sequence from where it
+    // was seeded, and `last_id` mirrors them. They can only disagree if a
+    // record went to the file without being cached, and the pool is re-seeded
+    // then so its contents stay a contiguous id suffix.
+    //
+    // `Full` still declines to cache here rather than waiting. Waiting belongs
+    // on the async path (`PagePool::append`), which is what `NormFS::enqueue`
+    // will use; this synchronous one cannot block a runtime thread.
     fn cache_append(&self, inner: &mut Inner, id_u64: u64, data: &[u8]) {
         let max_memory = self.max_memory_usage;
-        let ring = inner.ring.get_or_insert_with(|| {
-            WalRing::new(ring_page_count(max_memory), MEM_PAGE_SIZE, id_u64)
+        let pool = inner.pool.get_or_insert_with(|| {
+            Arc::new(PagePool::new(
+                ring_page_count(max_memory),
+                MEM_PAGE_SIZE,
+                id_u64,
+            ))
         });
 
-        if ring.next_entry_id() != id_u64 {
-            ring.reinit(id_u64);
+        if pool.next_entry_id() != id_u64 {
+            pool.reseed(id_u64);
         }
 
-        match ring.append(data) {
+        match pool.try_append(data) {
             AppendOutcome::Cached(_) => {}
             AppendOutcome::Full => {
-                ring.reinit(id_u64);
-                if !matches!(ring.append(data), AppendOutcome::Cached(_)) {
-                    ring.reinit(id_u64.wrapping_add(1));
+                // Start the cache again at this record and keep it, so what is
+                // held stays the newest contiguous run of ids rather than an
+                // arbitrary older one.
+                pool.reseed(id_u64);
+                if !matches!(pool.try_append(data), AppendOutcome::Cached(_)) {
+                    pool.reseed(id_u64.wrapping_add(1));
                 }
             }
             AppendOutcome::TooLarge => {
-                ring.reinit(id_u64.wrapping_add(1));
+                pool.reseed(id_u64.wrapping_add(1));
             }
         }
     }
@@ -185,12 +205,11 @@ impl MemQueue {
         if inner.last_acked_id.as_ref().is_none_or(|last| id > last) {
             log::debug!(target: "normfs-mem", "Acknowledging entry - ID: {}", id);
             inner.last_acked_id = Some(id.clone());
-            // Entries at or below the acked id may now be reclaimed; the ring
-            // reuses their pages on the next append that needs space.
-            let essential = id_to_u64(id).saturating_add(1);
-            if let Some(ring) = inner.ring.as_mut() {
-                ring.set_essential(essential);
-            }
+            // Deliberately does not free pages. A page may only be reused
+            // once its records are on disk, and that is reported by the WAL
+            // writer through PagePool::mark_durable. Letting a consumer ack
+            // advance the same watermark would hand a page back to be
+            // overwritten while its records were still only in memory.
         }
     }
 
@@ -229,7 +248,7 @@ impl MemQueue {
             }
 
             // Check if entries are actually loaded in memory
-            let ring = match &inner.ring {
+            let ring = match &inner.pool {
                 Some(ring) if !ring.is_empty() => ring,
                 _ => return MemReadResult::fail(), // Not in memory, read from files
             };
@@ -317,7 +336,7 @@ impl MemQueue {
                 last_id.sub(&offset).unwrap_or(UintN::zero())
             };
 
-            let ring = match &inner.ring {
+            let ring = match &inner.pool {
                 Some(ring) if !ring.is_empty() => ring,
                 _ => {
                     // Nothing in memory yet; return start_id for file fallback.
@@ -411,7 +430,7 @@ impl MemQueue {
         let (entries_to_send, last_sent_id) = {
             let inner = self.inner.read().unwrap();
 
-            match &inner.ring {
+            match &inner.pool {
                 Some(ring) if !ring.is_empty() => {
                     if let Some(mem_start) = ring.min_cached_id() {
                         if start_id < UintN::from(mem_start) {
@@ -570,7 +589,7 @@ impl MemQueue {
                 last_id.sub(&offset).unwrap_or(UintN::zero())
             };
 
-            let ring = match &inner.ring {
+            let ring = match &inner.pool {
                 Some(ring) if !ring.is_empty() => ring,
                 _ => {
                     return MemReadResult {
