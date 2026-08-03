@@ -88,6 +88,9 @@ struct Inner {
 
 pub struct PagePool {
     inner: Mutex<Inner>,
+    /// Set once a file writer is draining this pool. Until then nothing can
+    /// report pages durable, so nothing may wait for one to be freed.
+    drainer: std::sync::atomic::AtomicBool,
     /// Woken when [`PagePool::mark_durable`] advances the watermark, which is
     /// the only event that can turn a full pool into a pool with room.
     space: Notify,
@@ -103,7 +106,20 @@ impl PagePool {
                 written: vec![0; page_count],
             }),
             space: Notify::new(),
+            drainer: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Whether a file writer is taking pages from this pool, and therefore
+    /// whether waiting for a page can ever end.
+    pub fn has_drainer(&self) -> bool {
+        self.drainer.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Marks that a file writer has taken responsibility for draining this
+    /// pool. Callers may wait for a page only after this.
+    pub fn set_drainer(&self) {
+        self.drainer.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Appends without waiting. `Full` means every page is either pinned by a
@@ -157,6 +173,33 @@ impl PagePool {
             waited = true;
             if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {
                 self.warn_stalled();
+            }
+        }
+    }
+
+    /// Steps the id sequence over a record the pool could not hold, without
+    /// losing anything it is still holding.
+    ///
+    /// Re-seeding drops whatever the pages contain, so it waits until the
+    /// writer has reported everything durable first. A record too large for a
+    /// page is rare, and paying a drain for it is the price of never dropping
+    /// one that was already accepted.
+    pub async fn skip_to(&self, next_id: u64) {
+        loop {
+            let woken = self.space.notified();
+            {
+                let mut inner = self.inner.lock().unwrap();
+                if inner.ring.min_essential_id() >= inner.ring.next_entry_id() {
+                    inner.ring.reinit(next_id);
+                    inner.written.iter_mut().for_each(|w| *w = 0);
+                    return;
+                }
+            }
+            if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {
+                log::warn!(
+                    target: "normfs-wal",
+                    "waiting to step over an oversized record: pool not yet drained"
+                );
             }
         }
     }

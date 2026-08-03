@@ -134,7 +134,7 @@ impl MemQueue {
     /// Enqueues, waiting for a page rather than dropping the cache when the
     /// pool is full. The synchronous [`MemQueue::enqueue`] stays for callers
     /// that cannot await.
-    pub async fn enqueue_awaiting(&self, data: Bytes) -> UintN {
+    pub async fn enqueue_awaiting(&self, data: Bytes) -> (UintN, bool) {
         let _gate = self.append_gate.lock().await;
 
         let (id, pool, subscribers_data) = {
@@ -152,11 +152,29 @@ impl MemQueue {
             (id, inner.pool.clone(), subscribers_data)
         };
 
+        // Waiting is only safe once the WAL writer drains this pool: the wait
+        // ends when a flush reports pages durable, and nothing reports that
+        // until the writer is started with Some(pool). Until then this uses the
+        // non-blocking cache behaviour, or a full pool would hang the caller
+        // forever with nothing able to free it.
+        let mut cached = false;
         if let Some(pool) = pool {
-            // TooLarge is not an error here: the record is simply not cached
-            // and is served from the file, as it always was.
-            let _ = pool.append_at(id_to_u64(&id), &data).await;
+            if pool.has_drainer() {
+                match pool.append_at(id_to_u64(&id), &data).await {
+                    Ok(()) => cached = true,
+                    Err(_) => {
+                        // Too large for a page: step over this id without
+                        // dropping what the pool holds, and let the file writer
+                        // buffer this one record the old way.
+                        pool.skip_to(id_to_u64(&id).wrapping_add(1)).await;
+                    }
+                }
+            } else {
+                let mut inner = self.inner.write().unwrap();
+                self.cache_append(&mut inner, id_to_u64(&id), &data);
+            }
         }
+
 
         log::debug!(target: "normfs-mem", "Enqueued entry - ID: {}, Data size: {} bytes", id, data.len());
 
@@ -164,7 +182,7 @@ impl MemQueue {
             self.notify_subscribers(&[(id.clone(), data)]);
         }
 
-        id
+        (id, cached)
     }
 
     pub fn enqueue(&self, data: Bytes) -> UintN {
@@ -795,14 +813,14 @@ impl MemStore {
         }
     }
 
-    pub async fn enqueue_awaiting(&self, queue: &QueueId, data: Bytes) -> UintN {
+    pub async fn enqueue_awaiting(&self, queue: &QueueId, data: Bytes) -> (UintN, bool) {
         let mem_queue = {
             let queues = self.queues.read().unwrap();
             queues.get(queue).cloned()
         };
         match mem_queue {
             Some(q) => q.enqueue_awaiting(data).await,
-            None => self.enqueue(queue, data),
+            None => (self.enqueue(queue, data), false),
         }
     }
 
