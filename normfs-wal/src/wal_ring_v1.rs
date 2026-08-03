@@ -336,6 +336,48 @@ impl WalRing {
         self.ring.next_entry_id
     }
 
+    /// Number of pages in the ring.
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// The index of the page currently being appended to.
+    pub fn active_page(&self) -> usize {
+        self.ring.active
+    }
+
+    /// The framed entry bytes of page `page_index`, in append order.
+    ///
+    /// This is the page's forward region only — the backward offset table is a
+    /// memory-only index and is deliberately excluded, so these bytes are
+    /// exactly a run of the V1 entry stream and can go to the file unchanged.
+    /// Handing this out is what lets the writer put a page on disk without
+    /// copying it into a buffer of its own.
+    pub fn page_bytes(&self, page_index: usize) -> &[u8] {
+        &self.buffers[page_index][..self.pages[page_index].used_bytes]
+    }
+
+    /// Entries held by page `page_index`.
+    pub fn page_len(&self, page_index: usize) -> u32 {
+        self.pages[page_index].count
+    }
+
+    /// The last entry id on page `page_index`, or `None` if it is empty.
+    pub fn page_last_entry_id(&self, page_index: usize) -> Option<u64> {
+        let p = &self.pages[page_index];
+        (p.count > 0).then_some(p.last_entry_id)
+    }
+
+    /// How many readers currently hold page `page_index`.
+    pub fn page_pin_count(&self, page_index: usize) -> u32 {
+        self.pages[page_index].pin_count
+    }
+
+    /// The reclaim boundary the ring is currently holding to.
+    pub fn min_essential_id(&self) -> u64 {
+        self.ring.min_essential_id
+    }
+
     /// The page size the ring was built with.
     pub fn page_size(&self) -> usize {
         self.page_size
