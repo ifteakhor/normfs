@@ -733,6 +733,10 @@ impl NormFS {
         log::info!(target: "normfs", "  - Next entry will have ID: {}", header.num_entries_before);
         log::info!(target: "normfs", "----------------------------------------");
 
+        // Started first: the writer is handed this queue's page pool, so the
+        // pool has to exist before it.
+        self.mem.start_queue(queue, last_entry_id.clone());
+
         if !mode.readonly {
             let queue_config = self.get_config_for_queue(queue);
 
@@ -748,6 +752,13 @@ impl NormFS {
                     header,
                     wal_settings.clone(),
                     last_entry_id.clone(),
+                    // Not switched on yet. With a pool the file writer stops
+                    // buffering, and a record too large for a page is never
+                    // cached -- so it would reach no file at all. The writer
+                    // has to fall back to buffering per record before this can
+                    // become Some(pool); test_recovery_large_entries is the
+                    // case that catches it.
+                    None,
                 )
                 .await?;
 
@@ -774,8 +785,6 @@ impl NormFS {
                 }
             });
         }
-
-        self.mem.start_queue(queue, last_entry_id.clone());
 
         // Add queue to disk monitor if enabled
         if let (Some(disk_monitor), Some(max_size)) =

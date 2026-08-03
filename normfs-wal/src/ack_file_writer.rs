@@ -45,6 +45,7 @@ pub struct AckFileWriter {
     writer_handle: Mutex<Option<JoinHandle<()>>>,
     shutdown_tx: mpsc::Sender<()>,
     buffer_full_notify: Arc<Notify>,
+    pooled: bool,
 }
 
 /// Writes out everything the pool has appended since the last flush, then
@@ -155,6 +156,7 @@ impl AckFileWriter {
         let buffer_full_notify = Arc::new(Notify::new());
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
+        let pooled = pool.is_some();
         let writer_handle = tokio::spawn(writer_task(
             path.clone(),
             Arc::new(Mutex::new(file)),
@@ -172,6 +174,7 @@ impl AckFileWriter {
             writer_handle: Mutex::new(Some(writer_handle)),
             shutdown_tx,
             buffer_full_notify,
+            pooled,
         })
     }
 
@@ -180,14 +183,22 @@ impl AckFileWriter {
         state.current_size + (size as u64) <= self.settings.max_file_size
     }
 
+    /// Records that an entry belongs to this file.
+    ///
+    /// With a pool, the bytes are already in a page and are not copied here:
+    /// this only keeps the accounting that decides when the file is full, so
+    /// rotation still happens at the same point it always did. Without one,
+    /// the entry is buffered as before.
     pub async fn write(&self, queue_id: QueueId, entry_id: UintN, entry: Bytes) {
         let mut state = self.state.lock().await;
 
-        state.buffer.extend_from_slice(&entry);
+        if !self.pooled {
+            state.buffer.extend_from_slice(&entry);
+        }
         state.acks.push((queue_id, entry_id));
         state.current_size += entry.len() as u64;
 
-        if state.buffer.len() >= self.settings.max_buffer_size {
+        if !self.pooled && state.buffer.len() >= self.settings.max_buffer_size {
             self.buffer_full_notify.notify_one();
         }
     }

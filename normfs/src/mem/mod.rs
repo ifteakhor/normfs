@@ -736,6 +736,15 @@ impl MemStore {
         }
     }
 
+    /// The queue's page pool, so the WAL writer can put those same pages on
+    /// disk instead of copying their contents into a buffer of its own.
+    pub fn pool(&self, queue: &QueueId) -> Option<Arc<PagePool>> {
+        let queues = self.queues.read().unwrap();
+        let q = queues.get(queue)?;
+        let inner = q.inner.read().unwrap();
+        inner.pool.clone()
+    }
+
     pub fn start_queue(&self, queue: &QueueId, last_id: Option<UintN>) {
         let mut queues = self.queues.write().unwrap();
         if !queues.contains_key(queue) {

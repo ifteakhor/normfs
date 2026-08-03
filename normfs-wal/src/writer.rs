@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use std::sync::Arc;
+
+use crate::page_pool::PagePool;
 use crate::ack_file_writer::{AckFileWriter, AckFileWriterSettings};
 use crate::wal_entry_v1::{self, WalEntryV1, WalEntryV1Error};
 use crate::wal_header::WalHeader;
@@ -39,6 +42,10 @@ struct WriterState {
     // rotation. Unused by the V0 path.
     entry_index: u64,
     buffer: OrderedBuffer,
+    // Handed to every file writer this queue opens, including after a
+    // rotation, so the bytes always come from the pages the records were
+    // appended into rather than from a copy.
+    pool: Option<Arc<PagePool>>,
 }
 
 impl WalWriter {
@@ -51,6 +58,7 @@ impl WalWriter {
         written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
         wal_complete_sender: mpsc::UnboundedSender<WalFile>,
         last_entry_id: Option<UintN>,
+        pool: Option<Arc<PagePool>>,
     ) -> Result<Self, WalError> {
         log::info!(
             "WAL writer: creating new writer for queue '{}', file: {}, last_entry_id: {:?}",
@@ -70,6 +78,7 @@ impl WalWriter {
             &header,
             &settings,
             written_sender.clone(),
+            pool.clone(),
         )
         .await?;
 
@@ -85,6 +94,7 @@ impl WalWriter {
             has_written: false,
             entry_index: 0,
             buffer: OrderedBuffer::new(last_entry_id, queue.clone()),
+            pool,
         };
 
         let queue_log_str = queue.to_string();
@@ -331,6 +341,7 @@ impl WriterState {
             &self.header,
             &self.settings,
             self.written_sender.clone(),
+            self.pool.clone(),
         )
         .await?;
         self.has_written = false;
@@ -353,6 +364,7 @@ async fn new_file_writer(
     header: &WalHeader,
     settings: &WalSettings,
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
+    pool: Option<Arc<PagePool>>,
 ) -> Result<AckFileWriter, WalError> {
     let file_path = file_id.to_file_path(queue_path.to_str().unwrap(), "wal");
 
@@ -372,9 +384,7 @@ async fn new_file_writer(
         },
         written_sender,
         header_buf.freeze(),
-        // No pool on this path yet: the writer still receives entries one at a
-        // time. Passing Some(pool) is what switches this file to page writes.
-        None,
+        pool,
     )
     .await?;
 
