@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+<rect width="1200" height="630" fill="#ffffff"/>
+<text x="96" y="76" font-size="40" font-weight="700" fill="#1f2328">NormFS 0.2 spends the WAL on data, not framing</text>
+<text x="96" y="118" font-size="21" fill="#59636e">Share of the file that is your record, by record size &#8212; taller is better</text>
+<rect x="96" y="146" width="16" height="16" rx="3" fill="#1f77b4"/>
+<text x="122" y="160" font-size="19" font-weight="600" fill="#1f2328">0.2 &#183; new</text>
+<rect x="246" y="146" width="16" height="16" rx="3" fill="#d62728"/>
+<text x="272" y="160" font-size="19" fill="#59636e">0.1 &#183; previous</text>
+<line x1="96" y1="522.0" x2="1144" y2="522.0" stroke="#eaeef2" stroke-width="1"/>
+<text x="82" y="529.0" font-size="17" fill="#59636e" text-anchor="end">0%</text>
+<line x1="96" y1="451.1" x2="1144" y2="451.1" stroke="#eaeef2" stroke-width="1"/>
+<text x="82" y="458.1" font-size="17" fill="#59636e" text-anchor="end">25%</text>
+<line x1="96" y1="380.2" x2="1144" y2="380.2" stroke="#eaeef2" stroke-width="1"/>
+<text x="82" y="387.2" font-size="17" fill="#59636e" text-anchor="end">50%</text>
+<line x1="96" y1="309.3" x2="1144" y2="309.3" stroke="#eaeef2" stroke-width="1"/>
+<text x="82" y="316.3" font-size="17" fill="#59636e" text-anchor="end">75%</text>
+<line x1="96" y1="238.4" x2="1144" y2="238.4" stroke="#eaeef2" stroke-width="1"/>
+<text x="82" y="245.4" font-size="17" fill="#59636e" text-anchor="end">100%</text>
+<rect x="153.4" y="305.9" width="68.1" height="216.1" rx="3" fill="#1f77b4"/>
+<text x="187.4" y="293.9" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">76%</text>
+<rect x="232.4" y="418.9" width="68.1" height="103.1" rx="3" fill="#d62728"/>
+<text x="266.4" y="406.9" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">36%</text>
+<text x="192.9" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">16 B</text>
+<text x="192.9" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">-52% on disk</text>
+<rect x="415.4" y="259.0" width="68.1" height="263.0" rx="3" fill="#1f77b4"/>
+<text x="449.4" y="247.0" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">93%</text>
+<rect x="494.4" y="324.7" width="68.1" height="197.3" rx="3" fill="#d62728"/>
+<text x="528.4" y="312.7" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">70%</text>
+<text x="454.9" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">64 B</text>
+<text x="454.9" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">-25% on disk</text>
+<rect x="677.4" y="255.1" width="68.1" height="266.9" rx="3" fill="#1f77b4"/>
+<text x="711.4" y="243.1" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">94%</text>
+<rect x="756.4" y="311.9" width="68.1" height="210.1" rx="3" fill="#d62728"/>
+<text x="790.4" y="299.9" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">74%</text>
+<text x="716.9" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">80 B</text>
+<text x="716.9" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">-21% on disk</text>
+<rect x="939.4" y="244.9" width="68.1" height="277.1" rx="3" fill="#1f77b4"/>
+<text x="973.4" y="232.9" font-size="19" font-weight="700" fill="#1f2328" text-anchor="middle">98%</text>
+<rect x="1018.4" y="266.4" width="68.1" height="255.6" rx="3" fill="#d62728"/>
+<text x="1052.5" y="254.4" font-size="19" font-weight="400" fill="#1f2328" text-anchor="middle">90%</text>
+<text x="978.9" y="556.0" font-size="22" font-weight="600" fill="#1f2328" text-anchor="middle">256 B</text>
+<text x="978.9" y="586.0" font-size="26" font-weight="700" fill="#1f77b4" text-anchor="middle">-8% on disk</text>
+<line x1="96" y1="522" x2="1144" y2="522" stroke="#d0d7de" stroke-width="2"/>
+</svg>

@@ -74,11 +74,6 @@ impl WalHeader {
         new_header
     }
 
-    pub fn can_hold_entry(&self, entry_id: &UintN, data_size: usize) -> bool {
-        entry_id.can_fit(self.id_size_bytes)
-            && UintN::from(data_size as u64).can_fit(self.data_size_bytes)
-    }
-
     pub fn new(
         data_size_bytes: u64,
         id_size_bytes: u64,

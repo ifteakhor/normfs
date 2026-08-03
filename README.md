@@ -44,6 +44,7 @@ Storage engine with automatic data lifecycle management across memory, disk, and
 - 📖 **Flexible Reads**: Absolute/relative positioning, tail reads, subscriptions, step queries
 - ⏱️ **Time Sync**: Nanosecond-precision timestamps for distributed coordination
 - 🔄 **Crash Recovery**: Write-ahead logging with automatic replay
+- ✅ **Proven Codecs**: The WAL entry and header codecs are C, verified with Frama-C WP and run in CI — a corrupt entry is detected, not decoded
 
 ## 🏗️ Architecture
 
@@ -134,7 +135,7 @@ cargo zigbuild --release --features server-bin --bin normfs-server --target x86_
 ## 📦 Components
 
 - **normfs**: Core Rust library and server
-- **normfs-wal**: Write-ahead log
+- **normfs-wal**: Write-ahead log, with a formally verified C entry codec
 - **normfs-store**: Compressed/encrypted persistent storage
 - **normfs-cloud**: S3-compatible cloud integration
 - **normfs-crypto**: Encryption and signing
@@ -143,7 +144,10 @@ cargo zigbuild --release --features server-bin --bin normfs-server --target x86_
 
 ## 📊 Status
 
-**v0.1.0-beta.0** - Active development, API may change before 1.0
+**v0.2.0-beta.0** - Active development, API may change before 1.0
+
+WAL files written by 0.1 are read by 0.2 unchanged. 0.2 writes a smaller entry
+format that 0.1 cannot read, so a downgrade needs the queue drained first.
 
 ## 📄 License
 

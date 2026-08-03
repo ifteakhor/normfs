@@ -41,6 +41,31 @@ impl From<WalError> for LookupError {
     }
 }
 
+/// Re-checks the Store for a file the WAL has just reported missing.
+///
+/// A completed WAL file is renamed into the Store and only then deleted from
+/// the WAL, so it is never absent from both on disk. A lookup can still see it
+/// as absent from both: it queries the Store before the rename and the WAL
+/// after the delete, and those two queries are not one snapshot. The file then
+/// resolves to nothing and the read fails with NotFound even though the data
+/// was there the whole time.
+///
+/// Migration only ever moves WAL -> Store, so asking the Store once more after
+/// the WAL says "gone" closes the window.
+async fn store_range_after_wal_miss(
+    queue: &QueueId,
+    file_id: &UintN,
+    store: &PersistStore,
+) -> Result<Option<(UintN, UintN)>, LookupError> {
+    let range = store.get_file_range(queue, file_id).await?;
+    if range.is_some() {
+        log::debug!(target: "normfs-lookup",
+            "File {} for queue '{}' migrated into the Store during lookup",
+            file_id, queue);
+    }
+    Ok(range)
+}
+
 /// Walk backward from `start_file_id` to find a file with valid entry data,
 /// checking both Store and WAL (mirrors recovery's continue_queue logic).
 /// Returns (effective_file_id, start, end) or None if no file with data found.
@@ -61,6 +86,11 @@ async fn find_valid_file_backward(
         match wal.get_entries_before(queue, &search_id).await {
             Ok(start) => return Ok(Some((search_id, start, None))),
             Err(WalError::WalNotFound | WalError::WalEmpty(_)) => {
+                if let Some((start, end)) =
+                    store_range_after_wal_miss(queue, &search_id, store).await?
+                {
+                    return Ok(Some((search_id, start, Some(end))));
+                }
                 if search_id <= *min_file_id {
                     return Ok(None);
                 }
@@ -160,8 +190,11 @@ pub async fn find_file_with_s3(
             match wal.get_entries_before(queue, &first_file_id).await {
                 Ok(start) => (start, None),
                 Err(WalError::WalNotFound) => {
-                    // Not in WAL, check S3 if available
-                    if let Some(s3) = cloud_downloader {
+                    if let Some((start, end)) =
+                        store_range_after_wal_miss(queue, &first_file_id, store).await?
+                    {
+                        (start, Some(end))
+                    } else if let Some(s3) = cloud_downloader {
                         match s3.get_file_range(queue, &first_file_id).await {
                             Ok(Some((start, end))) => {
                                 log::debug!(target: "normfs-lookup",
@@ -320,8 +353,11 @@ async fn binary_search(
                 match wal.get_entries_before(queue, &mid_file_id).await {
                     Ok(start) => (start, None),
                     Err(WalError::WalNotFound) => {
-                        // Not in WAL, check S3 if available
-                        if let Some(s3) = cloud_downloader {
+                        if let Some((start, end)) =
+                            store_range_after_wal_miss(queue, &mid_file_id, store).await?
+                        {
+                            (start, Some(end))
+                        } else if let Some(s3) = cloud_downloader {
                             match s3.get_file_range(queue, &mid_file_id).await {
                                 Ok(Some((start, end))) => {
                                     log::debug!(target: "normfs-lookup",
@@ -428,8 +464,11 @@ async fn binary_search(
                         match wal.get_entries_before(queue, &next_mid).await {
                             Ok(start) => start,
                             Err(WalError::WalNotFound) => {
-                                // Not in WAL, check S3 if available
-                                if let Some(s3) = cloud_downloader {
+                                if let Some((start, _)) =
+                                    store_range_after_wal_miss(queue, &next_mid, store).await?
+                                {
+                                    start
+                                } else if let Some(s3) = cloud_downloader {
                                     match s3.get_file_range(queue, &next_mid).await {
                                         Ok(Some((start, _))) => start,
                                         Ok(None) => {

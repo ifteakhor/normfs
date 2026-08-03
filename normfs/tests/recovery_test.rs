@@ -5,6 +5,22 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 use uintn::UintN;
 
+/// Collect up to `expected` entries, waiting briefly for each.
+///
+/// A bare `try_recv` drain races the reader: `read` returning does not
+/// guarantee every entry has already reached the channel, so a loop that stops
+/// at the first `Empty` can miss the tail when the machine is loaded.
+async fn drain_entries(rx: &mut mpsc::Receiver<ReadEntry>, expected: usize) -> Vec<ReadEntry> {
+    let mut entries = Vec::with_capacity(expected);
+    while entries.len() < expected {
+        match tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await {
+            Ok(Some(entry)) => entries.push(entry),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    entries
+}
+
 async fn read_last_id(fs: &NormFS, queue: &str) -> Option<UintN> {
     let (tx, mut rx) = mpsc::channel(1);
     let queue_id = fs.resolve(queue);
@@ -329,17 +345,26 @@ async fn test_recovery_multiple_header_only_files() {
         fs.close().await.unwrap();
     }
 
-    // Start again without writing - creates file 2 with only header
-    {
+    // Start again without writing - creates file 2 with only header. Record
+    // its header-only size so the reuse check below is independent of the
+    // entry format (V1 headers/entries are smaller than the old V0 ones).
+    let header_only_size = {
         let settings = NormFsSettings::default();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+        let instance_id = fs.get_instance_id().to_string();
 
         // Don't write anything - file 2 now has header but no entries
         fs.close().await.unwrap();
-    }
+
+        let resolver = QueueIdResolver::new(&instance_id);
+        let queue_id = resolver.resolve("test-queue");
+        let wal_path = get_queue_wal_path(&path, &queue_id);
+        let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
+        tokio::fs::read(&file_2).await.unwrap().len()
+    };
 
     // Recovery: Should reuse file 2 (header-only)
     let instance_id = {
@@ -370,10 +395,11 @@ async fn test_recovery_multiple_header_only_files() {
     let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
     let file_2_content = tokio::fs::read(&file_2).await.unwrap();
 
-    let header_size = 32;
     assert!(
-        file_2_content.len() > header_size,
-        "File 2 should have been reused and now contain entries"
+        file_2_content.len() > header_only_size,
+        "File 2 should have been reused and now contain entries (was {} bytes header-only, now {} bytes)",
+        header_only_size,
+        file_2_content.len()
     );
     println!(
         "File 2 size after recovery: {} bytes (reused header-only file)",
@@ -1662,22 +1688,24 @@ async fn test_recovery_skipped_file_in_sequence() {
             "Should continue from ID 10 after finding file 1 with entries 0-9"
         );
 
-        // Verify file 3 was reused for writing (empty latest file)
-        let file_3_content = tokio::fs::read(&file_3).await.unwrap();
-        assert!(
-            !file_3_content.is_empty(),
-            "File 3 should have been reused (empty latest file)"
-        );
-
-        // Verify file 2 was NOT created (gap not filled)
-        let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
-        assert!(
-            !tokio::fs::try_exists(&file_2).await.unwrap(),
-            "File 2 should not exist - gaps should not be filled"
-        );
-
         fs.close().await.unwrap();
     }
+
+    // Checked after close: the writer goes through `tokio::fs::File`, which
+    // accepts bytes before the blocking write places them in the file, so
+    // reading while the queue is open races it.
+    let file_3_content = tokio::fs::read(&file_3).await.unwrap();
+    assert!(
+        !file_3_content.is_empty(),
+        "File 3 should have been reused (empty latest file)"
+    );
+
+    // Verify file 2 was NOT created (gap not filled)
+    let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
+    assert!(
+        !tokio::fs::try_exists(&file_2).await.unwrap(),
+        "File 2 should not exist - gaps should not be filled"
+    );
 }
 
 /// Test scenario: Multiple missing files in sequence
@@ -1737,15 +1765,17 @@ async fn test_recovery_multiple_skipped_files() {
             "Should continue from ID 5 after finding file 1 with entries 0-4"
         );
 
-        // Verify file 5 was reused for writing (empty latest file)
-        let file_5_content = tokio::fs::read(&file_5).await.unwrap();
-        assert!(
-            !file_5_content.is_empty(),
-            "File 5 should have been reused (empty latest file)"
-        );
-
         fs.close().await.unwrap();
     }
+
+    // File 5 should have been reused. Checked after close: the writer goes
+    // through `tokio::fs::File`, which accepts bytes before the blocking write
+    // places them in the file, so reading while the queue is open races it.
+    let file_5_content = tokio::fs::read(&file_5).await.unwrap();
+    assert!(
+        !file_5_content.is_empty(),
+        "File 5 should have been reused (empty latest file)"
+    );
 }
 
 /// Test scenario: Multiple old WAL files exist that should be processed async after startup
@@ -1892,9 +1922,7 @@ async fn test_read_backward_wal_memory_boundary() {
 
     // Collect results
     let mut entries = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 2).await);
 
     assert_eq!(entries.len(), 2, "Should have read exactly 2 entries");
 
@@ -1984,9 +2012,7 @@ async fn test_read_backward_wal_only_after_recovery() {
     assert!(result.is_ok(), "Read should succeed");
 
     let mut entries = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 2).await);
 
     assert_eq!(entries.len(), 2, "Should have read exactly 2 entries");
     assert_eq!(
@@ -2069,10 +2095,7 @@ async fn test_read_backward_multiple_entries_crossing_boundary() {
 
     assert!(result.is_ok(), "Read should succeed");
 
-    let mut entries = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    let entries = drain_entries(&mut rx, 8).await;
 
     assert_eq!(entries.len(), 8, "Should have read exactly 8 entries");
 
@@ -2188,9 +2211,7 @@ async fn test_read_completes_on_last_entry_after_recovery() {
 
     // Collect all received entries
     let mut entries = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 100).await);
 
     // Should have exactly 100 entries (all that exist)
     assert_eq!(
@@ -2304,9 +2325,7 @@ async fn test_read_completes_on_last_entry_after_recovery_readonly() {
 
     // Collect all received entries
     let mut entries = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 100).await);
 
     // Should have exactly 100 entries (all that exist)
     assert_eq!(
@@ -2372,9 +2391,7 @@ async fn test_read_range_from_memory() {
 
     // Collect all received entries
     let mut entries: Vec<ReadEntry> = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 4).await);
 
     assert_eq!(entries.len(), 4, "Should have read exactly 4 entries");
 
@@ -2441,9 +2458,7 @@ async fn test_read_from_memory_with_step() {
 
     // Collect all received entries
     let mut entries: Vec<ReadEntry> = Vec::new();
-    while let Ok(entry) = rx.try_recv() {
-        entries.push(entry);
-    }
+    entries.extend(drain_entries(&mut rx, 3).await);
 
     assert_eq!(entries.len(), 3, "Should have read exactly 3 entries");
 

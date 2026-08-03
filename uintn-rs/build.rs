@@ -4,11 +4,13 @@ use std::path::PathBuf;
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let include_dir = manifest_dir.join("c/include");
+    let source = manifest_dir.join("c/src/varint.c");
 
     println!("cargo:rerun-if-changed={}", include_dir.display());
+    println!("cargo:rerun-if-changed={}", source.display());
 
     cc::Build::new()
-        .file(manifest_dir.join("c/src/varint.c"))
+        .file(&source)
         .include(&include_dir)
         .flag("-std=c99")
         .flag("-Wall")

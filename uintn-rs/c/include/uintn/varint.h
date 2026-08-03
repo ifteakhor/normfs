@@ -141,6 +141,30 @@ struct normfs_uintn_varint64_decode_result {
         normfs_uintn_varint64_len(p) ==
           normfs_uintn_varint64_size_logic(normfs_uintn_varint64_value(p)) &&
         (normfs_uintn_varint64_len(p) < 10 || p[9] < 2);
+
+      logic integer normfs_uintn_varint32_len{L}(uint8_t *p) =
+        p[0] < 128 ? 1 :
+        p[1] < 128 ? 2 :
+        p[2] < 128 ? 3 :
+        p[3] < 128 ? 4 :
+        5;
+
+      logic integer normfs_uintn_varint32_value{L}(uint8_t *p) =
+        p[0] < 128 ? p[0] :
+        p[1] < 128 ? (p[0] - 128) + 128 * p[1] :
+        p[2] < 128 ? (p[0] - 128) + 128 * (p[1] - 128) + 16384 * p[2] :
+        p[3] < 128 ? (p[0] - 128) + 128 * (p[1] - 128) +
+                     16384 * (p[2] - 128) + 2097152 * p[3] :
+                     (p[0] - 128) + 128 * (p[1] - 128) +
+                     16384 * (p[2] - 128) + 2097152 * (p[3] - 128) +
+                     268435456 * p[4];
+
+      // p holds the canonical encoding of some u32: its byte length is the
+      // canonical size of the value it spells, and it does not overflow u32.
+      predicate normfs_uintn_varint32_canonical{L}(uint8_t *p) =
+        normfs_uintn_varint32_len(p) ==
+          normfs_uintn_varint32_size_logic(normfs_uintn_varint32_value(p)) &&
+        (normfs_uintn_varint32_len(p) < 5 || p[4] < 16);
     }
 */
 
@@ -181,11 +205,16 @@ normfs_uintn_varint64_size(uint64_t value)
     assigns out[0 .. out_len - 1];
     ensures \result.status == NORMFS_UINTN_VARINT_OK ||
             \result.status == NORMFS_UINTN_VARINT_ERR_NO_SPACE;
+    ensures \result.status == NORMFS_UINTN_VARINT_OK <==>
+              normfs_uintn_varint32_size_logic(value) <= out_len;
     ensures \result.status == NORMFS_UINTN_VARINT_OK ==>
               \result.written == normfs_uintn_varint32_size_logic(value);
     ensures \result.status == NORMFS_UINTN_VARINT_ERR_NO_SPACE ==>
               \result.written == 0;
     ensures \result.written <= out_len;
+    ensures \result.status == NORMFS_UINTN_VARINT_OK ==>
+              normfs_uintn_varint32_len(out) == \result.written &&
+              normfs_uintn_varint32_value(out) == value;
     ensures \result.status == NORMFS_UINTN_VARINT_OK &&
             value < 0x80 ==>
               out[0] == (uint8_t)value;
@@ -222,26 +251,46 @@ normfs_uintn_varint32_encode(uint32_t value, uint8_t *out, size_t out_len)
 	size_t n = normfs_uintn_varint32_size(value);
 	if (out_len < n) return r;
 
+	/*@ assert value == value % 128 + 128 * (value / 128); */
+	/*@ assert (value / 128) / 128 == value / 0x4000; */
+	/*@ assert value / 128 == (value / 128) % 128 + 128 * (value / 0x4000); */
+	/*@ assert (value / 0x4000) / 128 == value / 0x200000; */
+	/*@ assert value / 0x4000 ==
+	           (value / 0x4000) % 128 + 128 * (value / 0x200000); */
+	/*@ assert (value / 0x200000) / 128 == value / 0x10000000; */
+	/*@ assert value / 0x200000 ==
+	           (value / 0x200000) % 128 + 128 * (value / 0x10000000); */
+
 	if (value < 0x80u) {
 		out[0] = (uint8_t)value;
+		/*@ assert normfs_uintn_varint32_len(out) == 1; */
+		/*@ assert normfs_uintn_varint32_value(out) == value; */
 	} else if (value < 0x4000u) {
 		out[0] = (uint8_t)(128u + value % 128u);
 		out[1] = (uint8_t)(value / 128u);
+		/*@ assert normfs_uintn_varint32_len(out) == 2; */
+		/*@ assert normfs_uintn_varint32_value(out) == value; */
 	} else if (value < 0x200000u) {
 		out[0] = (uint8_t)(128u + value % 128u);
 		out[1] = (uint8_t)(128u + (value / 128u) % 128u);
 		out[2] = (uint8_t)(value / 0x4000u);
+		/*@ assert normfs_uintn_varint32_len(out) == 3; */
+		/*@ assert normfs_uintn_varint32_value(out) == value; */
 	} else if (value < 0x10000000u) {
 		out[0] = (uint8_t)(128u + value % 128u);
 		out[1] = (uint8_t)(128u + (value / 128u) % 128u);
 		out[2] = (uint8_t)(128u + (value / 0x4000u) % 128u);
 		out[3] = (uint8_t)(value / 0x200000u);
+		/*@ assert normfs_uintn_varint32_len(out) == 4; */
+		/*@ assert normfs_uintn_varint32_value(out) == value; */
 	} else {
 		out[0] = (uint8_t)(128u + value % 128u);
 		out[1] = (uint8_t)(128u + (value / 128u) % 128u);
 		out[2] = (uint8_t)(128u + (value / 0x4000u) % 128u);
 		out[3] = (uint8_t)(128u + (value / 0x200000u) % 128u);
 		out[4] = (uint8_t)(value / 0x10000000u);
+		/*@ assert normfs_uintn_varint32_len(out) == 5; */
+		/*@ assert normfs_uintn_varint32_value(out) == value; */
 	}
 
 	r.written = n;
@@ -500,6 +549,8 @@ normfs_uintn_varint64_encode(uint64_t value, uint8_t *out, size_t out_len)
 }
 
 /*@ assigns \nothing;
+    ensures \result.status == NORMFS_UINTN_VARINT_OK <==>
+              consumed == normfs_uintn_varint32_size_logic(value);
     ensures \result.status == NORMFS_UINTN_VARINT_OK ||
             \result.status == NORMFS_UINTN_VARINT_ERR_NON_CANONICAL;
     ensures \result.status == NORMFS_UINTN_VARINT_OK ==>
@@ -567,6 +618,13 @@ normfs_uintn_varint64_decode_ok(uint64_t value, size_t consumed)
               1 <= \result.consumed <= 5 && \result.consumed <= len;
     ensures \result.status == NORMFS_UINTN_VARINT_OK ==>
               \result.consumed == normfs_uintn_varint32_size_logic(\result.value);
+    ensures \result.status == NORMFS_UINTN_VARINT_OK ==>
+              \result.consumed == normfs_uintn_varint32_len(buf) &&
+              \result.value == normfs_uintn_varint32_value(buf);
+    // completeness: a canonical encoding with enough bytes always decodes
+    ensures (normfs_uintn_varint32_len(buf) <= len &&
+             normfs_uintn_varint32_canonical(buf)) ==>
+              \result.status == NORMFS_UINTN_VARINT_OK;
     ensures \result.status == NORMFS_UINTN_VARINT_OK &&
             \result.consumed == 1 ==>
               buf[0] < 128 &&
@@ -604,42 +662,68 @@ normfs_uintn_varint32_decode(const uint8_t *buf, size_t len)
 	    NORMFS_UINTN_VARINT_ERR_TRUNCATED
 	};
 
+	uint32_t value;
+
 	if (len < 1u) return r;
 	uint8_t b0 = buf[0];
-	if (b0 < 128u) return normfs_uintn_varint32_decode_ok((uint32_t)b0, 1u);
-	uint32_t value = (uint32_t)b0 - 128u;
+	if (b0 < 128u) {
+		/*@ assert (uint32_t)b0 == normfs_uintn_varint32_value(buf); */
+		/*@ assert normfs_uintn_varint32_len(buf) == 1; */
+		return normfs_uintn_varint32_decode_ok((uint32_t)b0, 1u);
+	}
+	value = (uint32_t)b0 - 128u;
 
-	if (len < 2u) return r;
+	if (len < 2u) {
+		/*@ assert normfs_uintn_varint32_len(buf) >= 2; */
+		return r;
+	}
 	uint8_t b1 = buf[1];
 	if (b1 < 128u) {
 		value += (uint32_t)b1 * 128u;
+		/*@ assert value == normfs_uintn_varint32_value(buf); */
+		/*@ assert normfs_uintn_varint32_len(buf) == 2; */
 		return normfs_uintn_varint32_decode_ok(value, 2u);
 	}
 	value += ((uint32_t)b1 - 128u) * 128u;
 
-	if (len < 3u) return r;
+	if (len < 3u) {
+		/*@ assert normfs_uintn_varint32_len(buf) >= 3; */
+		return r;
+	}
 	uint8_t b2 = buf[2];
 	if (b2 < 128u) {
 		value += (uint32_t)b2 * 0x4000u;
+		/*@ assert value == normfs_uintn_varint32_value(buf); */
+		/*@ assert normfs_uintn_varint32_len(buf) == 3; */
 		return normfs_uintn_varint32_decode_ok(value, 3u);
 	}
 	value += ((uint32_t)b2 - 128u) * 0x4000u;
 
-	if (len < 4u) return r;
+	if (len < 4u) {
+		/*@ assert normfs_uintn_varint32_len(buf) >= 4; */
+		return r;
+	}
 	uint8_t b3 = buf[3];
 	if (b3 < 128u) {
 		value += (uint32_t)b3 * 0x200000u;
+		/*@ assert value == normfs_uintn_varint32_value(buf); */
+		/*@ assert normfs_uintn_varint32_len(buf) == 4; */
 		return normfs_uintn_varint32_decode_ok(value, 4u);
 	}
 	value += ((uint32_t)b3 - 128u) * 0x200000u;
 
-	if (len < 5u) return r;
+	if (len < 5u) {
+		/*@ assert normfs_uintn_varint32_len(buf) >= 5; */
+		return r;
+	}
 	uint8_t b4 = buf[4];
+	/*@ assert normfs_uintn_varint32_len(buf) == 5; */
 	if (b4 >= 16u) {
 		r.status = NORMFS_UINTN_VARINT_ERR_OVERFLOW;
 		return r;
 	}
 	value += (uint32_t)b4 * 0x10000000u;
+	/*@ assert value == normfs_uintn_varint32_value(buf); */
 	return normfs_uintn_varint32_decode_ok(value, 5u);
 }
 

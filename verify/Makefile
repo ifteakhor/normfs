@@ -33,7 +33,8 @@ BUILDDIRS   = $(subst /,_,$(1))
 # second registry, and the failure when it falls behind is silent: no target
 # means no log means nothing for check-proved.sh to rule on.
 TARGETS    :=
-FIND_TARGETS := sed -n 's/^[[:space:]]*\(add_custom_target\|normfs_add_wp_target\)([[:space:]]*\(verify-[A-Za-z0-9_-]\+\).*/\2/p'
+# -E: \| and \+ are GNU extensions, so under BSD sed this matches nothing.
+FIND_TARGETS := sed -nE 's/^[[:space:]]*(add_custom_target|normfs_add_wp_target)\([[:space:]]*(verify-[A-Za-z0-9_-]+).*/\2/p'
 $(foreach m,$(MODULES),$(foreach t,$(shell $(FIND_TARGETS) $(ROOT)/$(m)/CMakeLists.txt),$(eval TARGETS += $(t))$(eval dir-$(t) := $(call BUILDDIRS,$(m)))))
 
 CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release
@@ -57,11 +58,20 @@ build: configure
 	    cmake --build "$(BUILD)/$$(echo $$m | tr / _)" || exit 1; \
 	done
 
-# The proofs cannot check their own gate: a report check-proved.sh wrongly
-# accepts is indistinguishable from one it rightly accepts. Needs no frama-c,
-# so it runs on the plain build job.
+# test covers the two things the proof job cannot: the CRC32C differential test
+# (hardware intrinsics against the proven portable path, which WP cannot reach)
+# and check-proved.sh itself, since a report it wrongly accepts looks exactly
+# like one it rightly accepts. --no-tests=ignore lets the modules that carry no
+# tests pass rather than error, keeping this discovered.
 test: build
 	@"$(ROOT)/verify/check-proved-test.sh"
+	@rc=0; \
+	for m in $(MODULES); do \
+	    echo "== test $$m =="; \
+	    ctest --test-dir "$(BUILD)/$$(echo $$m | tr / _)" \
+	          --output-on-failure --no-tests=ignore || rc=1; \
+	done; \
+	exit $$rc
 
 # frama-c exits 0 whether or not it discharges every goal, so each target rules
 # on its JSON report instead, which carries a verdict per goal. The log is kept

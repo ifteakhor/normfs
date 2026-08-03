@@ -1,16 +1,135 @@
-use bytes::Bytes;
+use bytes::{Buf, Bytes, BytesMut};
 use normfs_types::{DataSource, ReadEntry};
+use std::io::SeekFrom;
 use std::path::Path;
 use tokio::fs;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::sync::mpsc;
-use uintn::UintN;
+use uintn::{UintN, varint};
 use xxhash_rust::xxh64;
 
 use super::errors::WalError;
 use super::wal_entry::WalEntryHeader;
+use super::wal_entry_v1::{WAL_ENTRY_V1_CRC_SIZE, WAL_ENTRY_V1_MIN_SIZE, WalEntryV1};
 use super::wal_header::{WalHeader, WalHeaderError};
-use super::wal_header_v1::{AnyWalHeader, AnyWalHeaderError, WalHeaderV1Error};
+use super::wal_header_v1::{
+    AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V1_VERSION, WalHeaderV1Error,
+};
+
+// Serving path: paid per concurrent reader, so kept small.
+const WAL_READ_BUFFER_CAPACITY: usize = 64 * 1024;
+
+// Recovery scans one file at a time and can afford a big block. Every refill is
+// a blocking-pool round trip, so at 12 KiB entries 64 KiB -> 1 MiB is worth ~1.9x.
+const WAL_SCAN_BLOCK_CAPACITY: usize = 1024 * 1024;
+
+/// Covers the widest header. A shorter file yields fewer bytes and the header
+/// decoder reports the truncation.
+const WAL_HEADER_PROBE: usize = 128;
+
+/// A contiguous window of unread bytes, so entries decode in place: no
+/// per-entry allocation, zero-fill or copy.
+///
+/// `block` is the read granularity. The window grows past it for one oversized
+/// entry — record sizes are `u32`, so no fixed window suffices.
+struct BlockReader<R> {
+    inner: R,
+    buf: BytesMut,
+    eof: bool,
+    block: usize,
+}
+
+impl<R: AsyncRead + Unpin> BlockReader<R> {
+    fn new(inner: R, block: usize) -> Self {
+        Self {
+            inner,
+            buf: BytesMut::with_capacity(block),
+            eof: false,
+            block,
+        }
+    }
+
+    /// Bytes read but not consumed; `BytesMut` derefs to exactly that range, so
+    /// `consume` is a pointer bump.
+    fn unread(&self) -> &[u8] {
+        &self.buf
+    }
+
+    fn consume(&mut self, n: usize) {
+        self.buf.advance(n);
+    }
+
+    fn at_eof(&self) -> bool {
+        self.eof
+    }
+
+    /// Buffer at least `want` contiguous unread bytes, returning how many are
+    /// available — short of `want` only at end of file.
+    ///
+    /// Pass the bytes actually needed, not a block: any read tops the window up
+    /// to a full block, so this costs one read per block, not per entry.
+    async fn fill(&mut self, want: usize) -> std::io::Result<usize> {
+        while self.buf.len() < want && !self.eof {
+            // `reserve` keeps the window contiguous; only the straddling tail
+            // is copied, once per block.
+            let target = want.max(self.block);
+            if self.buf.capacity() < target {
+                self.buf.reserve(target - self.buf.len());
+            }
+            if self.inner.read_buf(&mut self.buf).await? == 0 {
+                self.eof = true;
+            }
+        }
+        Ok(self.buf.len())
+    }
+
+    fn into_parts(self) -> (BytesMut, R) {
+        (self.buf, self.inner)
+    }
+}
+
+/// Where `next_v1_frame` left the window.
+enum V1Frame {
+    /// A whole frame of this many bytes sits at the front of the window.
+    Ready(usize),
+    /// The file ended cleanly on an entry boundary.
+    End,
+    /// Trailing bytes that cannot form a whole entry, or a malformed prefix.
+    Truncated,
+}
+
+/// Make the next whole V1 entry — `[record_size varint32][record][crc32c]` —
+/// contiguous at the front of the window, growing it if one entry needs more
+/// than a block.
+///
+/// `End` and `Truncated` must stay distinct: a clean end of file finishes the
+/// scan, a partial trailing entry discards itself and everything after it,
+/// whose ids would be unknowable.
+async fn next_v1_frame<R: AsyncRead + Unpin>(
+    block: &mut BlockReader<R>,
+) -> std::io::Result<V1Frame> {
+    // Ask for the smallest possible entry so this returns without reading while
+    // the window still holds bytes.
+    block.fill(WAL_ENTRY_V1_MIN_SIZE).await?;
+    if block.unread().is_empty() {
+        return Ok(V1Frame::End);
+    }
+
+    let (record_size, prefix) = match varint::decode_u32(block.unread()) {
+        Ok(result) => (result.value as usize, result.consumed),
+        Err(_) => return Ok(V1Frame::Truncated),
+    };
+
+    let total = prefix + record_size + WAL_ENTRY_V1_CRC_SIZE;
+    if block.unread().len() < total {
+        block.fill(total).await?;
+        if block.unread().len() < total {
+            debug_assert!(block.at_eof());
+            return Ok(V1Frame::Truncated);
+        }
+    }
+    Ok(V1Frame::Ready(total))
+}
 
 pub async fn read_wal_header(base_path: &Path, file_id: &UintN) -> Result<WalHeader, WalError> {
     let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
@@ -76,9 +195,10 @@ pub async fn get_wal_range(
         return Err(WalError::WalEmpty(file_id.clone()));
     }
 
-    let mut reader = BufReader::new(file);
+    let mut block = BlockReader::new(file, WAL_SCAN_BLOCK_CAPACITY);
+    block.fill(WAL_HEADER_PROBE).await?;
 
-    let (any_header, _) = match AnyWalHeader::from_reader(&mut reader).await {
+    let (any_header, header_size) = match AnyWalHeader::from_bytes(block.unread()) {
         Ok(v) => v,
         Err(AnyWalHeaderError::V0(WalHeaderError::SliceTooShort))
         | Err(AnyWalHeaderError::V1(WalHeaderV1Error::Truncated)) => {
@@ -86,7 +206,67 @@ pub async fn get_wal_range(
         }
         Err(e) => return Err(e.into()),
     };
+    block.consume(header_size);
     let wal_header = WalHeader::from(&any_header);
+
+    // V1: entries store no id; iterate frames and derive id from the header's
+    // num_entries_before plus a running index. A truncated or corrupt entry
+    // stops the scan — the ids of everything after it would be unknowable.
+    if any_header.version() == WAL_HEADER_V1_VERSION {
+        let num_entries_before = wal_header
+            .num_entries_before
+            .to_u64()
+            .map_err(|_| WalHeaderV1Error::ValueTooLarge)?;
+        let mut first_id: Option<UintN> = None;
+        let mut last_id: Option<UintN> = None;
+        let mut entry_count = 0u64;
+        let mut index = 0u64;
+
+        loop {
+            let total = match next_v1_frame(&mut block).await? {
+                V1Frame::Ready(total) => total,
+                V1Frame::End | V1Frame::Truncated => break,
+            };
+
+            // Only `Copy` data leaves the borrow, so the window can advance
+            // immediately after.
+            let decoded =
+                match WalEntryV1::iter_next(&block.unread()[..total], num_entries_before, index) {
+                    Ok((_, entry_id, consumed)) => Some((entry_id, consumed)),
+                    Err(_) => None,
+                };
+
+            match decoded {
+                Some((entry_id, consumed)) => {
+                    let id = UintN::from(entry_id);
+                    if first_id.is_none() {
+                        first_id = Some(id.clone());
+                    }
+                    last_id = Some(id);
+                    entry_count += 1;
+                    index += 1;
+                    block.consume(consumed);
+                }
+                None => break,
+            }
+        }
+
+        let range = first_id.and_then(|first| last_id.map(|last| (first, last)));
+        log::debug!(
+            "WAL reader: file {} contains {} valid V1 entries, range: {:?}",
+            file_id,
+            entry_count,
+            range
+        );
+        return Ok((wal_header, range));
+    }
+
+    // V0 keeps its byte-oriented decoder. The window read past the header, so
+    // seek back to the first entry — one seek against a scan measured in seconds.
+    let (_, file) = block.into_parts();
+    let mut file = file;
+    file.seek(SeekFrom::Start(header_size as u64)).await?;
+    let mut reader = BufReader::with_capacity(WAL_READ_BUFFER_CAPACITY, file);
 
     let mut first_id: Option<UintN> = None;
     let mut last_id: Option<UintN> = None;
@@ -183,6 +363,51 @@ pub async fn get_wal_content(base_path: &Path, file_id: &UintN) -> Result<WalCon
 
     let (any_header, header_size) = AnyWalHeader::from_bytes(&content)?;
     let wal_header = WalHeader::from(&any_header);
+
+    // V1: iterate frames from the byte buffer, deriving each id from
+    // num_entries_before + running index; stop at the first corrupt entry.
+    if any_header.version() == WAL_HEADER_V1_VERSION {
+        let num_entries_before = wal_header
+            .num_entries_before
+            .to_u64()
+            .map_err(|_| WalHeaderV1Error::ValueTooLarge)?;
+        let mut num_entries: u64 = 0;
+        let mut cursor = header_size;
+        let mut index = 0u64;
+        let mut first_entry_id: Option<UintN> = None;
+        let mut last_entry_id: Option<UintN> = None;
+
+        while cursor < content.len() {
+            match WalEntryV1::iter_next(&content[cursor..], num_entries_before, index) {
+                Ok((_, entry_id, consumed)) => {
+                    let id = UintN::from(entry_id);
+                    if first_entry_id.is_none() {
+                        first_entry_id = Some(id.clone());
+                    }
+                    last_entry_id = Some(id);
+                    cursor += consumed;
+                    num_entries += 1;
+                    index += 1;
+                }
+                Err(_) => break,
+            }
+        }
+
+        log::debug!(
+            "WAL reader: file {} contains {} valid V1 entries, range: {:?} - {:?}, size: {} bytes",
+            file_id,
+            num_entries,
+            first_entry_id,
+            last_entry_id,
+            content.len()
+        );
+
+        return Ok(WalContent {
+            entries_before: wal_header.num_entries_before,
+            num_entries: UintN::from(num_entries),
+            content,
+        });
+    }
 
     let mut num_entries: u64 = 0;
     let mut cursor = header_size;
@@ -306,9 +531,149 @@ pub async fn read_wal_file_range(
         });
     }
 
-    let mut reader = BufReader::new(file);
-    let (any_header, _) = AnyWalHeader::from_reader(&mut reader).await?;
+    let mut block = BlockReader::new(file, WAL_READ_BUFFER_CAPACITY);
+    block.fill(WAL_HEADER_PROBE).await?;
+    let (any_header, header_size) = AnyWalHeader::from_bytes(block.unread())?;
+    block.consume(header_size);
     let wal_header = WalHeader::from(&any_header);
+
+    // V1: frame-by-frame read from the file, deriving each id from
+    // num_entries_before + running index. The same range/step filtering as V0,
+    // but the id comes from the position rather than the entry bytes; the CRC
+    // check lives inside iter_next, so a corrupt entry stops the scan.
+    if any_header.version() == WAL_HEADER_V1_VERSION {
+        let num_entries_before = wal_header
+            .num_entries_before
+            .to_u64()
+            .map_err(|_| WalHeaderV1Error::ValueTooLarge)?;
+        let mut last_read_id: Option<UintN> = None;
+        let mut last_processed_id: Option<UintN> = None;
+        let mut found_complete = false;
+        let mut entries_sent = 0u64;
+        let mut entries_skipped = 0u64;
+        let step = step.max(1);
+        let mut index = 0u64;
+
+        loop {
+            if target.is_closed() {
+                log::debug!("WAL reader: channel closed during V1 range read");
+                return Ok(ReadRangeResult::ChannelClosed);
+            }
+
+            let total = match next_v1_frame(&mut block).await? {
+                V1Frame::Ready(total) => total,
+                V1Frame::End | V1Frame::Truncated => break,
+            };
+
+            // Only `Copy` data leaves the borrow; the record is located by
+            // offset so it can be lifted out once delivery is decided.
+            let decoded =
+                match WalEntryV1::iter_next(&block.unread()[..total], num_entries_before, index) {
+                    Ok((entry, id, consumed)) => {
+                        let record_size = entry.record.len();
+                        let record_offset = consumed - record_size - WAL_ENTRY_V1_CRC_SIZE;
+                        Some((id, record_offset, record_size, consumed))
+                    }
+                    Err(_) => None,
+                };
+            let (id, record_offset, record_size, consumed) = match decoded {
+                Some(v) => v,
+                None => break,
+            };
+
+            let entry_id = UintN::from(id);
+            index += 1;
+            last_processed_id = Some(entry_id.clone());
+
+            if let Some(until) = until_id
+                && &entry_id > until
+            {
+                found_complete = true;
+                break;
+            }
+
+            let in_range = &entry_id >= from_id
+                && (until_id.is_none()
+                    || until_id
+                        .as_ref()
+                        .map(|until| &entry_id <= until)
+                        .unwrap_or(true));
+
+            // Copied only for entries actually delivered, and before the
+            // window advances past them.
+            let record_bytes = if in_range && entry_id.in_step(from_id, step) {
+                Some(Bytes::copy_from_slice(
+                    &block.unread()[record_offset..record_offset + record_size],
+                ))
+            } else {
+                None
+            };
+            block.consume(consumed);
+
+            if in_range {
+                if let Some(record_bytes) = record_bytes {
+                    if target
+                        .send(ReadEntry::new(entry_id.clone(), record_bytes, data_source))
+                        .await
+                        .is_err()
+                    {
+                        return Ok(ReadRangeResult::ChannelClosed);
+                    }
+
+                    if let Some(until) = until_id
+                        && &entry_id >= until
+                    {
+                        found_complete = true;
+                        last_read_id = Some(entry_id);
+                        entries_sent += 1;
+                        break;
+                    }
+
+                    last_read_id = Some(entry_id);
+                    entries_sent += 1;
+                }
+            } else {
+                entries_skipped += 1;
+            }
+        }
+
+        let result = if found_complete
+            || (last_processed_id.is_some()
+                && until_id
+                    .as_ref()
+                    .map(|until| last_processed_id.as_ref().unwrap() >= until)
+                    .unwrap_or(false))
+        {
+            log::debug!(
+                "WAL reader: completed V1 range read, sent {} entries, skipped {}",
+                entries_sent,
+                entries_skipped
+            );
+            ReadRangeResult::Complete
+        } else {
+            let last_id_in_file = last_processed_id.unwrap_or_else(|| from_id.clone());
+            log::debug!(
+                "WAL reader: partial V1 range read, sent {} entries, last read: {:?}, last in file: {}, skipped {}",
+                entries_sent,
+                last_read_id,
+                last_id_in_file,
+                entries_skipped
+            );
+            ReadRangeResult::PartialRead {
+                last_read_id,
+                last_id_in_file,
+            }
+        };
+
+        return Ok(result);
+    }
+
+    // V0 keeps its byte-oriented decoder. The window read past the header, so
+    // seek back to the first entry rather than handing those bytes over.
+    let (_, file) = block.into_parts();
+    let mut file = file;
+    file.seek(SeekFrom::Start(header_size as u64)).await?;
+    let mut reader = BufReader::with_capacity(WAL_READ_BUFFER_CAPACITY, file);
 
     let mut last_read_id: Option<UintN> = None;
     let mut last_processed_id: Option<UintN> = None;
@@ -499,6 +864,122 @@ pub async fn read_wal_bytes_range(
         Err(e) => return Err(e.into()),
     };
     let wal_header = WalHeader::from(&any_header);
+
+    // V1: iterate frames from the in-memory buffer with zero-copy record
+    // slices, deriving each id from num_entries_before + running index.
+    if any_header.version() == WAL_HEADER_V1_VERSION {
+        let num_entries_before = wal_header
+            .num_entries_before
+            .to_u64()
+            .map_err(|_| WalHeaderV1Error::ValueTooLarge)?;
+        let mut cursor = header_size;
+        let mut last_read_id: Option<UintN> = None;
+        let mut last_processed_id: Option<UintN> = None;
+        let mut found_complete = false;
+        let step = step.max(1);
+        let mut entries_sent = 0u64;
+        let mut entries_skipped = 0u64;
+        let mut index = 0u64;
+
+        loop {
+            if target.is_closed() {
+                return Ok(ReadRangeResult::ChannelClosed);
+            }
+            if cursor >= content.len() {
+                break;
+            }
+
+            let (entry_id, record_size, consumed) =
+                match WalEntryV1::iter_next(&content[cursor..], num_entries_before, index) {
+                    Ok((entry, id, consumed)) => (UintN::from(id), entry.record.len(), consumed),
+                    Err(_) => break,
+                };
+            index += 1;
+            last_processed_id = Some(entry_id.clone());
+
+            if let Some(until) = until_id
+                && &entry_id > until
+            {
+                found_complete = true;
+                break;
+            }
+
+            // record_offset is the varint length prefix; slice zero-copy.
+            let record_offset = consumed - record_size - WAL_ENTRY_V1_CRC_SIZE;
+            let record_bytes =
+                content.slice(cursor + record_offset..cursor + record_offset + record_size);
+            cursor += consumed;
+
+            let in_range = &entry_id >= from_id
+                && (until_id.is_none()
+                    || until_id
+                        .as_ref()
+                        .map(|until| &entry_id <= until)
+                        .unwrap_or(true));
+
+            if in_range {
+                if entry_id.in_step(from_id, step) {
+                    if target
+                        .send(ReadEntry::new(entry_id.clone(), record_bytes, data_source))
+                        .await
+                        .is_err()
+                    {
+                        return Ok(ReadRangeResult::ChannelClosed);
+                    }
+
+                    if let Some(until) = until_id
+                        && &entry_id >= until
+                    {
+                        found_complete = true;
+                        last_read_id = Some(entry_id);
+                        entries_sent += 1;
+                        break;
+                    }
+
+                    last_read_id = Some(entry_id);
+                    entries_sent += 1;
+                }
+            } else {
+                entries_skipped += 1;
+            }
+        }
+
+        let result = if found_complete
+            || (last_processed_id.is_some()
+                && until_id
+                    .as_ref()
+                    .map(|until| last_processed_id.as_ref().unwrap() >= until)
+                    .unwrap_or(false))
+        {
+            log::info!(
+                "WAL reader: completed V1 bytes range read, sent {} entries, skipped {}, from {} to {:?} step {}",
+                entries_sent,
+                entries_skipped,
+                from_id,
+                until_id,
+                step
+            );
+            ReadRangeResult::Complete
+        } else {
+            let last_id_in_file = last_processed_id.unwrap_or_else(|| from_id.clone());
+            log::info!(
+                "WAL reader: partial V1 bytes range read, sent {} entries, last read: {:?}, last in file: {}, skipped {}, from {} to {:?} step {}",
+                entries_sent,
+                last_read_id,
+                last_id_in_file,
+                entries_skipped,
+                from_id,
+                until_id,
+                step
+            );
+            ReadRangeResult::PartialRead {
+                last_read_id,
+                last_id_in_file,
+            }
+        };
+
+        return Ok(result);
+    }
 
     let mut cursor = header_size;
     let mut last_read_id: Option<UintN> = None;

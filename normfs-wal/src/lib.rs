@@ -11,6 +11,7 @@ mod ack_file_writer;
 mod errors;
 mod reader;
 mod wal_entry;
+mod wal_entry_v1;
 mod wal_header;
 mod wal_header_v1;
 mod writer;
@@ -18,6 +19,11 @@ mod writer_buffer;
 
 pub use errors::*;
 pub use reader::{ReadRangeResult, WalContent, get_wal_header};
+pub use wal_entry::{WAL_ENTRY_HEADER_FIXED_OVERHEAD, WalEntryHeader};
+pub use wal_entry_v1::{
+    WAL_ENTRY_V1_CRC_SIZE, WAL_ENTRY_V1_MAX_OVERHEAD, WAL_ENTRY_V1_MIN_SIZE, WalEntryV1,
+    WalEntryV1Error, crc32c, derive_entry_id, encoded_len,
+};
 pub use wal_header::{WalHeader, WalHeaderError};
 pub use wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_MAX_SIZE,
@@ -32,6 +38,9 @@ mod wal_header_test;
 mod wal_header_v1_test;
 
 #[cfg(test)]
+mod wal_entry_v1_test;
+
+#[cfg(test)]
 mod wal_entry_test;
 
 #[cfg(test)]
@@ -42,6 +51,12 @@ mod reader_test;
 #[cfg(test)]
 mod writer_test;
 
+/// New files are always written as V1: `[record_size varint32][record][crc32c
+/// u32 LE]`, with the entry id derived from the header's `num_entries_before`
+/// plus the entry index rather than stored. V0 files stay readable — readers
+/// dispatch on the file header's version word, so a queue may hold a mix — but
+/// the format is not a setting, so a deployment cannot be configured into
+/// writing the old one.
 #[derive(Debug, Clone)]
 pub struct WalSettings {
     pub max_file_size: usize,
