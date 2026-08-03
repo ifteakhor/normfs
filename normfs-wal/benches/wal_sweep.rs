@@ -204,7 +204,9 @@ fn median_and_spread(v: &[f64]) -> (f64, f64) {
 }
 
 async fn measure(root: &Path, payload: usize, records: u64) -> Row {
-    let (written_tx, _written_rx) = mpsc::unbounded_channel();
+    // Kept and drained: these acks are the writer's progress, and the build
+    // loop throttles on them.
+    let (written_tx, mut written_rx) = mpsc::unbounded_channel();
     let (complete_tx, _complete_rx) = mpsc::unbounded_channel();
     let store = WalStore::new(root, written_tx, complete_tx);
 
@@ -220,6 +222,12 @@ async fn measure(root: &Path, payload: usize, records: u64) -> Row {
 
     // Timed through `close`: `enqueue` only hands off, so the tail reaches disk
     // during the close and timing the loop alone would report memory speed.
+    // Entries the producer may be ahead by. Capped in records as well as bytes:
+    // 256 MiB of 16 B records is sixteen million queue entries, and their
+    // per-item overhead is the cost, not the payload they point at.
+    let max_in_flight = (BUILD_IN_FLIGHT_BYTES / payload as u64).clamp(1024, 2_000_000);
+    let mut acked: u64 = 0;
+
     let start = Instant::now();
     for i in 0..records {
         store
@@ -227,9 +235,26 @@ async fn measure(root: &Path, payload: usize, records: u64) -> Row {
             .unwrap();
 
         if i % CHECK_EVERY == 0 {
-            let enqueued = (i + 1) * payload as u64;
             let mut stalled = 0u32;
-            while enqueued.saturating_sub(file_len(&wal_path)) > BUILD_IN_FLIGHT_BYTES {
+            loop {
+                // The writer acks the last entry of every flush, which is its
+                // progress counted in records — the same unit the producer
+                // counts in. Comparing payload bytes against the file's length
+                // instead, as this once did, compares different units: framing
+                // makes the file grow faster than the payload total, so the
+                // difference saturated at zero and the throttle never engaged
+                // until the writer was a fixed *fraction* of the run behind.
+                // At 0.1's 28 B framing on an 80 B record that fraction is 26 %
+                // — seven gigabytes of queue at this dataset size, which is
+                // what the OOM killer ended on an 8 GB board.
+                while let Ok((_, id)) = written_rx.try_recv() {
+                    if let Ok(n) = id.to_u64() {
+                        acked = acked.max(n);
+                    }
+                }
+                if i.saturating_sub(acked) <= max_in_flight {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(2)).await;
                 stalled += 1;
                 assert!(stalled < 60_000, "writer made no progress for 120 s at {i}");
