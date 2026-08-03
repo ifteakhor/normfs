@@ -190,15 +190,28 @@ impl AckFileWriter {
     /// rotation still happens at the same point it always did. Without one,
     /// the entry is buffered as before.
     pub async fn write(&self, queue_id: QueueId, entry_id: UintN, entry: Bytes) {
+        self.write_maybe_pooled(queue_id, entry_id, entry, false).await
+    }
+
+    /// `in_pool` says the record is already in a page, so its bytes reach the
+    /// file from there. Anything else still has to be buffered, or a record the
+    /// pool refused -- one larger than a page -- would reach no file at all.
+    pub async fn write_maybe_pooled(
+        &self,
+        queue_id: QueueId,
+        entry_id: UintN,
+        entry: Bytes,
+        in_pool: bool,
+    ) {
         let mut state = self.state.lock().await;
 
-        if !self.pooled {
+        if !(self.pooled && in_pool) {
             state.buffer.extend_from_slice(&entry);
         }
         state.acks.push((queue_id, entry_id));
         state.current_size += entry.len() as u64;
 
-        if !self.pooled && state.buffer.len() >= self.settings.max_buffer_size {
+        if state.buffer.len() >= self.settings.max_buffer_size {
             self.buffer_full_notify.notify_one();
         }
     }
@@ -252,9 +265,13 @@ async fn flush(
     pool: &Option<Arc<PagePool>>,
     fsync: bool,
 ) {
-    match pool {
-        Some(pool) => flush_pool(path, file, pool, fsync).await,
-        None => flush_buffer(path, file, state, ack_sender, fsync).await,
+    // Buffer first, then pages. A record only lands in the buffer when it was
+    // too large for a page, and stepping the pool over such a record drains it
+    // first -- so whatever is buffered is always older than whatever the pages
+    // hold, and this order is the id order the reader depends on.
+    flush_buffer(path, file, state, ack_sender, fsync).await;
+    if let Some(pool) = pool {
+        flush_pool(path, file, pool, fsync).await;
     }
 }
 

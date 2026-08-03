@@ -742,12 +742,11 @@ impl NormFS {
                     header,
                     wal_settings.clone(),
                     last_entry_id.clone(),
-                    // Not switched on yet. With a pool the file writer stops
-                    // buffering, and a record too large for a page is never
-                    // cached -- so it would reach no file at all. The writer
-                    // has to fall back to buffering per record before this can
-                    // become Some(pool); test_recovery_large_entries is the
-                    // case that catches it.
+                    // Still None. write_maybe_pooled exists but writer.rs
+                    // does not yet carry the in-pool flag from the enqueue
+                    // path, so every record would be buffered *and* written
+                    // from its page -- duplicates in the file. Threading that
+                    // one bool through WalStore::enqueue is what remains.
                     None,
                 )
                 .await?;
@@ -799,7 +798,7 @@ impl NormFS {
     /// not yet on disk. That wait is the back-pressure: the queue declines to
     /// run ahead of the disk rather than dropping what it already took.
     pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
-        let entry_id = self.mem.enqueue_awaiting(queue, data.clone()).await;
+        let (entry_id, _cached) = self.mem.enqueue_awaiting(queue, data.clone()).await;
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
             queue, entry_id, data.len());
