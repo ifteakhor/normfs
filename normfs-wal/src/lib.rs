@@ -261,6 +261,7 @@ impl WalStore {
         header: wal_header::WalHeader,
         settings: WalSettings,
         last_entry_id: Option<UintN>,
+        pool: Option<std::sync::Arc<PagePool>>,
     ) -> Result<(), WalError> {
         log::info!(
             "WalStore: starting writer for queue '{}', file: {}, last_entry_id: {:?}, data size = {} bytes, id size = {} bytes",
@@ -290,6 +291,7 @@ impl WalStore {
             self.written_sender.clone(),
             self.wal_complete_sender.clone(),
             last_entry_id,
+            pool,
         )
         .await?;
 

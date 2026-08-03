@@ -49,7 +49,7 @@ async fn test_enqueue_and_read() {
     };
 
     store
-        .start_writer(&queue_id, &file_id, header, settings, None)
+        .start_writer(&queue_id, &file_id, header, settings, None, None)
         .await
         .unwrap();
 
@@ -119,7 +119,7 @@ async fn test_enqueue_batch_and_read() {
     };
 
     store
-        .start_writer(&queue_id, &file_id, header, settings, None)
+        .start_writer(&queue_id, &file_id, header, settings, None, None)
         .await
         .unwrap();
 
@@ -187,7 +187,7 @@ async fn test_size_based_rotation() {
     };
 
     store
-        .start_writer(&queue_id, &file_id, header, settings, None)
+        .start_writer(&queue_id, &file_id, header, settings, None, None)
         .await
         .unwrap();
 
@@ -240,7 +240,7 @@ async fn test_v1_enqueue_read_and_scan() {
         compression_type: normfs_types::CompressionType::Zstd,
     };
     store
-        .start_writer(&queue_id, &file_id, header, settings, None)
+        .start_writer(&queue_id, &file_id, header, settings, None, None)
         .await
         .unwrap();
 
@@ -348,7 +348,7 @@ async fn test_v1_truncated_tail_is_dropped() {
         compression_type: normfs_types::CompressionType::Zstd,
     };
     store
-        .start_writer(&queue_id, &file_id, WalHeader::default(), settings, None)
+        .start_writer(&queue_id, &file_id, WalHeader::default(), settings, None, None)
         .await
         .unwrap();
     for i in 0..3u64 {
@@ -399,7 +399,7 @@ async fn build_v1_file(
         ..Default::default()
     };
     store
-        .start_writer(&queue_id, &file_id, WalHeader::default(), settings, None)
+        .start_writer(&queue_id, &file_id, WalHeader::default(), settings, None, None)
         .await
         .unwrap();
 
@@ -529,6 +529,7 @@ async fn test_mixed_v0_and_v1_files_in_one_queue() {
             header2,
             settings,
             Some(UintN::from(1u64)),
+            None,
         )
         .await
         .unwrap();
@@ -615,7 +616,7 @@ async fn test_v1_rotates_on_file_size_not_field_width() {
     };
 
     store
-        .start_writer(&queue_id, &file_id, header, settings, None)
+        .start_writer(&queue_id, &file_id, header, settings, None, None)
         .await
         .unwrap();
 
