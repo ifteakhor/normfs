@@ -99,6 +99,53 @@ struct normfs_wal_ring_seek_result {
     }
 */
 
+/*
+ * Durability
+ * ==========
+ *
+ * The property this ring exists to guarantee: **a record the ring accepted is
+ * not overwritten in memory before it is on disk.**
+ *
+ * The ring cannot check that by itself -- it has no idea what a file is, and
+ * that is on purpose. What it does instead is refuse to reuse a page until it
+ * is told the page's records are safe, and the telling is `min_essential_id`.
+ * The caller's obligation, and the other half of the theorem, is that
+ * `normfs_wal_ring_set_essential(r, m)` is called only once every entry with id
+ * `< m` has been written and synced. In this tree that call has exactly one
+ * source: the WAL file writer, after `fsync` returns.
+ *
+ * Given that obligation, the C side of the theorem is already discharged, and
+ * `normfs_wal_ring_reuse_is_safe` below is its statement. Reuse happens in one
+ * place -- `normfs_wal_ring_rotate_to` -- and its `requires` is exactly this
+ * predicate. So there is no path through this module that overwrites a page
+ * holding a record below the durable watermark, and none that overwrites a page
+ * a reader is holding.
+ *
+ * The two conjuncts answer two different questions, and both must hold:
+ *
+ *   pin_count == 0        nobody is reading these bytes right now
+ *   last_entry_id < m     these bytes are on disk
+ *
+ * Dropping either one loses records: without the first, a stream reads a page
+ * out from under itself; without the second, an accepted record is gone before
+ * it was ever written.
+ */
+/*@ axiomatic NormfsWalRingDurability {
+      // Everything this page holds has been reported durable. An empty page
+      // trivially qualifies -- it holds nothing to lose.
+      predicate normfs_wal_page_all_durable{L}(struct normfs_wal_page *p,
+                                               integer m) =
+        p->count == 0 || p->last_entry_id < m;
+
+      // Page k may be handed back to be written over.
+      predicate normfs_wal_ring_reuse_is_safe{L}(struct normfs_wal_ring *r,
+                                                 integer k) =
+        0 <= k < r->page_count &&
+        r->pages[k].pin_count == 0 &&
+        normfs_wal_page_all_durable(&r->pages[k], r->min_essential_id);
+    }
+*/
+
 /*@ requires \valid(ring);
     requires page_count >= 1;
     requires page_size >= NORMFS_WAL_ENTRY_V1_MIN_SIZE + 4;
@@ -178,6 +225,10 @@ normfs_wal_ring_find_reusable(struct normfs_wal_ring *ring);
  * the note on try_append); its callee page_reset is fully proven. */
 /*@ requires normfs_wal_ring_wf(ring);
     requires index < ring->page_count;
+    // The durability theorem, at its one point of use: this is the only place
+    // a page's contents are discarded, and it may not happen while a reader
+    // holds the page or while it holds a record that is not yet on disk.
+    requires normfs_wal_ring_reuse_is_safe(ring, index);
     requires normfs_wal_page_is_reusable(&ring->pages[index],
                                          ring->min_essential_id);
     assigns ring->active, ring->next_page_id,
