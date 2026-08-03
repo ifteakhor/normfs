@@ -253,4 +253,30 @@ impl PagePool {
     pub fn with_ring<T>(&self, f: impl FnOnce(&WalRing) -> T) -> T {
         f(&self.inner.lock().unwrap().ring)
     }
+
+    /// Whether the pool holds no records.
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().unwrap().ring.is_empty()
+    }
+
+    /// The lowest id still held in memory, or `None` when nothing is.
+    pub fn min_cached_id(&self) -> Option<u64> {
+        self.inner.lock().unwrap().ring.min_cached_id()
+    }
+
+    /// Every held record with id in `[start, end]`, in id order.
+    pub fn collect_range(&self, start: u64, end: u64) -> Vec<(u64, Vec<u8>)> {
+        self.inner.lock().unwrap().ring.collect_range(start, end)
+    }
+
+    /// Restarts the pool empty, numbering from `first_entry_id`.
+    ///
+    /// This drops whatever the pages held, so it is only for resynchronising a
+    /// pool that has fallen out of step with the id sequence — never for making
+    /// room. Making room is what waiting is for.
+    pub fn reseed(&self, first_entry_id: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.ring.reinit(first_entry_id);
+        inner.written.iter_mut().for_each(|w| *w = 0);
+    }
 }
