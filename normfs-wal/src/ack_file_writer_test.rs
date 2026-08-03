@@ -28,7 +28,7 @@ async fn test_write_single_entry_and_ack() {
         fsync: true,
     };
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new())
+    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None)
         .await
         .unwrap();
 
@@ -66,7 +66,7 @@ async fn test_write_multiple_entries_and_ack() {
         fsync: true,
     };
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new())
+    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None)
         .await
         .unwrap();
 
@@ -117,7 +117,7 @@ async fn test_buffer_full_triggers_write_and_ack() {
         fsync: true,
     };
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new())
+    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None)
         .await
         .unwrap();
 
@@ -189,7 +189,7 @@ async fn test_writer_with_header() {
     let (ack_sender, mut ack_receiver) = mpsc::unbounded_channel();
     let header = Bytes::from_static(b"test header");
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, header.clone())
+    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, header.clone(), None)
         .await
         .unwrap();
 
@@ -209,4 +209,74 @@ async fn test_writer_with_header() {
 
     let ack = ack_receiver.recv().await.unwrap();
     assert_eq!(ack, (queue_id, entry_id));
+}
+
+/// The page-write path: bytes reach the file straight from the pages they were
+/// appended into, and the durable watermark moves only once they are there.
+#[tokio::test]
+async fn pages_reach_the_file_before_the_watermark_moves() {
+    use crate::page_pool::PagePool;
+    use crate::wal_ring_v1::AppendOutcome;
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("paged.wal");
+    let (ack_sender, _ack_receiver) = mpsc::unbounded_channel();
+
+    let pool = Arc::new(PagePool::new(4, 4096, 0));
+    let settings = AckFileWriterSettings {
+        max_buffer_size: 1024,
+        max_file_size: 10 * 1024 * 1024,
+        write_interval: Duration::from_millis(10),
+        fsync: true,
+    };
+
+    let header = Bytes::from_static(b"HDR!");
+    let mut writer = AckFileWriter::new(
+        &file_path,
+        settings,
+        ack_sender,
+        header.clone(),
+        Some(Arc::clone(&pool)),
+    )
+    .await
+    .unwrap();
+
+    // Nothing is durable before anything has been appended.
+    assert_eq!(pool.durable_before(), 0);
+
+    let record = b"a paged record";
+    for _ in 0..3 {
+        assert!(matches!(
+            pool.try_append(record),
+            AppendOutcome::Cached(_)
+        ));
+    }
+    let appended_through = pool.next_entry_id();
+
+    // The flush is on a timer; wait for the watermark rather than for a
+    // duration, so the test asserts the ordering instead of racing it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while pool.durable_before() < appended_through {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "writer never reported the pages durable"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    writer.close().await.unwrap();
+
+    // Once the watermark has moved, the bytes really are in the file: header
+    // first, then each record's payload in append order.
+    let content = read_file_content(&file_path).await;
+    assert!(content.starts_with(&header), "header should lead the file");
+    let occurrences = content
+        .windows(record.len())
+        .filter(|w| *w == record)
+        .count();
+    assert_eq!(
+        occurrences, 3,
+        "every appended record should appear exactly once in the file"
+    );
 }

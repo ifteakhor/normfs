@@ -10,6 +10,8 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use uintn::UintN;
 
+use crate::page_pool::PagePool;
+
 #[derive(Debug, Clone)]
 pub struct AckFileWriterSettings {
     pub max_buffer_size: usize,
@@ -45,6 +47,78 @@ pub struct AckFileWriter {
     buffer_full_notify: Arc<Notify>,
 }
 
+/// Writes out everything the pool has appended since the last flush, then
+/// reports what is now durable.
+///
+/// The bytes come straight from the pages the records were written into, so
+/// there is no second copy of the data on its way to the file — which is the
+/// point of the pool holding pages rather than the writer holding a buffer.
+///
+/// `mark_durable` is called **only** after both the write and the sync have
+/// succeeded, and only for the ids that run actually covered. That ordering is
+/// the whole guarantee: the watermark is what allows the C ring to hand a page
+/// back to be overwritten, so advancing it early would let a record be lost
+/// between being accepted and being on disk.
+async fn flush_pool(
+    path: &Path,
+    file: &Arc<Mutex<File>>,
+    pool: &Arc<PagePool>,
+    fsync: bool,
+) {
+    let pending = pool.take_pending();
+    if pending.is_empty() {
+        return;
+    }
+
+    let total: usize = pending.iter().map(|(_, b)| b.len()).sum();
+    log::debug!(
+        target: "normfs",
+        "Writing {} page run(s), {} bytes, to {}",
+        pending.len(),
+        total,
+        path.display()
+    );
+
+    // Runs come out in id order, so stopping at the first failure leaves the
+    // file a prefix of the id sequence rather than a hole.
+    let mut durable_through: Option<u64> = None;
+    let mut file_guard = file.lock().await;
+    for (write, bytes) in &pending {
+        if let Err(e) = file_guard.write_all(bytes).await {
+            log::error!(
+                target: "normfs",
+                "Failed to write page {} to {}: {}",
+                write.page_index,
+                path.display(),
+                e
+            );
+            break;
+        }
+        durable_through = Some(write.last_entry_id);
+    }
+
+    let Some(last) = durable_through else {
+        return;
+    };
+
+    // Without this the bytes are only in the kernel's cache. The page may still
+    // be reused after a plain write -- a process crash cannot lose them -- but
+    // surviving power loss is what fsync buys, and it is the default.
+    if fsync && let Err(e) = file_guard.sync_all().await {
+        log::error!(
+            target: "normfs",
+            "Failed to sync {} after writing pages: {}. Not advancing the durable \
+             watermark; those pages stay held.",
+            path.display(),
+            e
+        );
+        return;
+    }
+    drop(file_guard);
+
+    pool.mark_durable(last.saturating_add(1));
+}
+
 const MAX_RETRIES: u32 = 1000;
 const RETRY_DELAY: Duration = Duration::from_millis(10);
 
@@ -54,6 +128,7 @@ impl AckFileWriter {
         settings: AckFileWriterSettings,
         ack_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
         header: Bytes,
+        pool: Option<Arc<PagePool>>,
     ) -> std::io::Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -68,6 +143,7 @@ impl AckFileWriter {
 
         let initial_size = header.len() as u64;
         file.write_all(&header).await?;
+        file.flush().await?;
 
         let path = path.as_ref().to_path_buf();
 
@@ -87,6 +163,7 @@ impl AckFileWriter {
             shutdown_rx,
             buffer_full_notify.clone(),
             ack_sender,
+            pool,
         ));
 
         Ok(Self {
@@ -132,6 +209,7 @@ async fn writer_task(
     mut shutdown_rx: mpsc::Receiver<()>,
     buffer_full_notify: Arc<Notify>,
     ack_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
+    pool: Option<Arc<PagePool>>,
 ) {
     let mut interval = tokio::time::interval(settings.write_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
@@ -140,16 +218,32 @@ async fn writer_task(
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => {
-                flush_buffer(&path, &file, &state, &ack_sender, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, settings.fsync).await;
                 break;
             }
             _ = buffer_full_notify.notified() => {
-                flush_buffer(&path, &file, &state, &ack_sender, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, settings.fsync).await;
             }
             _ = interval.tick() => {
-                flush_buffer(&path, &file, &state, &ack_sender, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, settings.fsync).await;
             }
         }
+    }
+}
+
+/// Sends the flush to whichever holds the unwritten bytes: the pool if this
+/// writer was given one, the entry buffer otherwise.
+async fn flush(
+    path: &Path,
+    file: &Arc<Mutex<File>>,
+    state: &Arc<Mutex<WriterState>>,
+    ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
+    pool: &Option<Arc<PagePool>>,
+    fsync: bool,
+) {
+    match pool {
+        Some(pool) => flush_pool(path, file, pool, fsync).await,
+        None => flush_buffer(path, file, state, ack_sender, fsync).await,
     }
 }
 

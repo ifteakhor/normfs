@@ -372,6 +372,9 @@ async fn new_file_writer(
         },
         written_sender,
         header_buf.freeze(),
+        // No pool on this path yet: the writer still receives entries one at a
+        // time. Passing Some(pool) is what switches this file to page writes.
+        None,
     )
     .await?;
 
