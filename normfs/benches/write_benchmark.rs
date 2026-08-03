@@ -47,7 +47,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_progress_blocks = 0;
 
     for i in 0..cfg.total_blocks {
-        normfs.enqueue(&queue_name, block.clone())?;
+        normfs.enqueue(&queue_name, block.clone()).await?;
 
         if (i + 1) % PROGRESS_INTERVAL == 0 || i == cfg.total_blocks - 1 {
             let current_time = Instant::now();

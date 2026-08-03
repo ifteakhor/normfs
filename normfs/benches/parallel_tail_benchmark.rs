@@ -51,7 +51,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
 
     // Publish initial entry
     let initial_data = format!("entry-{}", 0);
-    normfs.enqueue(&queue_name, Bytes::from(initial_data))?;
+    normfs.enqueue(&queue_name, Bytes::from(initial_data)).await?;
 
     println!("Starting {} parallel clients...", NUM_CLIENTS);
 
@@ -124,7 +124,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         let entry_data = format!("entry-{}", i);
 
         let publish_time = Instant::now();
-        normfs.enqueue(&queue_name, Bytes::from(entry_data))?;
+        normfs.enqueue(&queue_name, Bytes::from(entry_data)).await?;
 
         // Wait for all clients to see this entry
         let mut all_seen = false;

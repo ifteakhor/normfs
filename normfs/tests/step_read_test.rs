@@ -33,7 +33,7 @@ async fn test_step_read_with_prefetch() {
         for i in 0..10 {
             let entry_num = batch * 10 + i;
             let data = format!("entry_{}", entry_num);
-            normfs.enqueue(&queue_id_obj, Bytes::from(data)).unwrap();
+            normfs.enqueue(&queue_id_obj, Bytes::from(data)).await.unwrap();
         }
         println!(
             "Wrote batch {} (entries {} to {})",

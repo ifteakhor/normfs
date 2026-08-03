@@ -736,7 +736,7 @@ impl NormFS {
             wal_settings.encryption_type = queue_config.encryption_type;
 
             self.wal
-                .start_writer(
+                .start_writer_with_pool(
                     queue,
                     &file_id,
                     header,
@@ -795,8 +795,11 @@ impl NormFS {
         Ok(())
     }
 
-    pub fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
-        let entry_id = self.mem.enqueue(queue, data.clone());
+    /// Accepts a record, waiting if every page is occupied by records that are
+    /// not yet on disk. That wait is the back-pressure: the queue declines to
+    /// run ahead of the disk rather than dropping what it already took.
+    pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
+        let entry_id = self.mem.enqueue_awaiting(queue, data.clone()).await;
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
             queue, entry_id, data.len());
@@ -808,7 +811,7 @@ impl NormFS {
         Ok(entry_id)
     }
 
-    pub fn enqueue_batch(&self, queue: &QueueId, data: Vec<Bytes>) -> Result<Vec<UintN>, Error> {
+    pub async fn enqueue_batch(&self, queue: &QueueId, data: Vec<Bytes>) -> Result<Vec<UintN>, Error> {
         if data.is_empty() {
             return Ok(Vec::new());
         }

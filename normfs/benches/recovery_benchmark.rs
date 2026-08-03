@@ -86,7 +86,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         normfs.ensure_queue_exists_for_write(&queue).await?;
         let block = Bytes::from(vec![0u8; cfg.block_size]);
         for _ in 0..blocks {
-            normfs.enqueue(&queue, block.clone())?;
+            normfs.enqueue(&queue, block.clone()).await?;
         }
         normfs.close().await?;
     }

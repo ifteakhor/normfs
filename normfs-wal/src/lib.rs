@@ -261,6 +261,24 @@ impl WalStore {
         header: wal_header::WalHeader,
         settings: WalSettings,
         last_entry_id: Option<UintN>,
+    ) -> Result<(), WalError> {
+        self.start_writer_with_pool(queue, file_id, header, settings, last_entry_id, None)
+            .await
+    }
+
+    /// As [`WalStore::start_writer`], but the writer takes its bytes from this
+    /// queue's page pool rather than from entries copied into a buffer.
+    ///
+    /// `start_writer` keeps its five-argument shape on purpose: `wal_sweep` is
+    /// compiled against released revisions of this crate to compare them, and a
+    /// changed signature would stop that benchmark building against 0.1.
+    pub async fn start_writer_with_pool(
+        &self,
+        queue: &QueueId,
+        file_id: &UintN,
+        header: wal_header::WalHeader,
+        settings: WalSettings,
+        last_entry_id: Option<UintN>,
         pool: Option<std::sync::Arc<PagePool>>,
     ) -> Result<(), WalError> {
         log::info!(

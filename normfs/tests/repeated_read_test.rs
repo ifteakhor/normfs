@@ -25,7 +25,7 @@ async fn test_repeated_backward_read_with_concurrent_writes() {
     // Write initial entries
     for i in 0..100 {
         let data = Bytes::from(format!("entry-{}", i));
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
     }
 
     // Spawn background task that continuously writes (simulating st3215 driver)
@@ -38,7 +38,7 @@ async fn test_repeated_backward_read_with_concurrent_writes() {
         let mut counter = 100;
         while !stop_writing_clone.load(Ordering::Relaxed) {
             let data = Bytes::from(format!("bg-entry-{}", counter));
-            fs_writer.enqueue(&queue_id_writer, data).unwrap();
+            fs_writer.enqueue(&queue_id_writer, data).await.unwrap();
             counter += 1;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -104,7 +104,7 @@ async fn test_repeated_backward_read_loop() {
     // Write initial entries
     for i in 0..50 {
         let data = Bytes::from(format!("entry-{}", i));
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
     }
 
     // Simulate motors-mirroring pattern: repeated reads every 20ms
@@ -135,7 +135,7 @@ async fn test_repeated_backward_read_loop() {
 
         // Write new entry
         let data = Bytes::from(format!("entry-{}", 50 + iteration));
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         // Wait 20ms like motors-mirroring
         tokio::time::sleep(Duration::from_millis(20)).await;
