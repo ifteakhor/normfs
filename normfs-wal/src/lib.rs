@@ -9,6 +9,7 @@ use writer::WalWriter;
 
 mod ack_file_writer;
 mod errors;
+mod page_pool;
 mod reader;
 mod wal_entry;
 mod wal_entry_v1;
@@ -26,6 +27,7 @@ pub use wal_entry_v1::{
     WalEntryV1Error, crc32c, derive_entry_id, encoded_len,
 };
 pub use wal_header::{WalHeader, WalHeaderError};
+pub use page_pool::{PagePool, PendingWrite, PoolError};
 pub use wal_ring_v1::{AppendOutcome, WalRing};
 pub use wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_MAX_SIZE,
@@ -41,6 +43,9 @@ mod wal_header_v1_test;
 
 #[cfg(test)]
 mod wal_entry_v1_test;
+
+#[cfg(test)]
+mod page_pool_test;
 
 #[cfg(test)]
 mod wal_ring_v1_test;
