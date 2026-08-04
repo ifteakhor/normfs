@@ -3,11 +3,9 @@
  * given to Frama-C, and the only file in the module that includes a system
  * header; seed_sys.h explains why that matters.
  *
- * -std=c99 sets __STRICT_ANSI__, which hides every POSIX declaration used here.
- * getentropy and explicit_bzero are not even POSIX-2008: glibc puts them behind
- * _DEFAULT_SOURCE, Darwin behind __DARWIN_C_FULL. Without the lines below the
- * build dies at -Werror=implicit-function-declaration naming the function
- * rather than the cause. They must precede every #include.
+ * -std=c99 sets __STRICT_ANSI__, which hides every POSIX declaration used here;
+ * getentropy and explicit_bzero are not even POSIX-2008. The macros below must
+ * precede every #include.
  */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE 1
@@ -32,10 +30,9 @@
 #endif
 
 /*
- * explicit_bzero exists on glibc >= 2.25 and the BSDs, and not on macOS at all.
- * The volatile store loop below is not decoration: it is the only branch
- * guaranteed to compile everywhere under -std=c99 -pedantic -Werror.
- * test_zero_wipes is the arbiter.
+ * explicit_bzero exists on glibc >= 2.25 and the BSDs, and not on macOS at all,
+ * so the volatile store loop below is the only branch guaranteed to compile
+ * everywhere. test_zero_wipes is the arbiter.
  */
 #if defined(__GLIBC__) && \
     (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25))
@@ -54,11 +51,8 @@
 #define O_CLOEXEC 0
 #endif
 
-/*
- * A failing syscall that left errno at 0 would break the Rust side's
- * io::Error::from_raw_os_error, so normalise to EIO here rather than check at
- * every call site.
- */
+/* A failing syscall that left errno at 0 would break the Rust side's
+ * io::Error::from_raw_os_error, so normalise to EIO. */
 static int
 normfs_seed_sys_fail(int *os_error)
 {
@@ -82,8 +76,8 @@ normfs_seed_sys_entropy(uint8_t *buf, size_t len, int *os_error)
 
 	return 0;
 #else
-	/* No getentropy: read /dev/urandom instead. For older glibc, where the
-	 * symbol arrived in 2.25, more than for exotic targets. */
+	/* For older glibc, where getentropy arrived in 2.25, more than for
+	 * exotic targets. */
 	int fd;
 	size_t total = 0u;
 
@@ -130,8 +124,6 @@ normfs_seed_sys_create_excl(const char *path, size_t path_len, int *os_error)
 	*os_error = 0;
 
 	errno = 0;
-	/* The mode is masked by the process umask, exactly as Rust's
-	 * OpenOptions::mode(0o600) was. */
 	fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 	if (fd < 0)
 		return normfs_seed_sys_fail(os_error);

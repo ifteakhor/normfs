@@ -7,8 +7,6 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -pedantic")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# src/seed.c is the proved half; src/seed_sys.c is the syscall boundary. No
-# uintn include path: the seed has no varints in it.
 add_library(normfs_crypto_c STATIC src/seed.c src/seed_sys.c)
 target_include_directories(normfs_crypto_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

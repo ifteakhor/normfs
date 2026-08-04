@@ -3,9 +3,6 @@
  * proved by WP, but every syscall it reaches is an assumed contract in
  * normfs/seed_sys.h. These tests discharge them. They also pin the literal
  * ".crypto_seed", whose length the ACSL fixes but whose bytes it does not.
- *
- * Same feature test macros as src/seed_sys.c: mkdtemp is POSIX-2008 and
- * -std=c99 hides it.
  */
 #define _POSIX_C_SOURCE 200809L
 #if defined(__APPLE__)
@@ -47,9 +44,7 @@ static const char *const test_dirs[] = {
 
 static char root[512];
 
-/* Registered with atexit, so a failing CHECK's early return still cleans up.
- * A fixed list rather than a directory walk: the only files created are one
- * .crypto_seed per name above. */
+/* Registered with atexit, so a failing CHECK's early return still cleans up. */
 static void
 cleanup_root(void)
 {
@@ -107,7 +102,6 @@ test_path_join(void)
 	CHECK(normfs_seed_path("/tmp/data", 9u, out, sizeof(out), &used) ==
 	    NORMFS_SEED_OK);
 	CHECK(used == 9u + 1u + (size_t)NORMFS_SEED_FILE_NAME_LEN);
-	/* ACSL pins the name's length, this pins its bytes. */
 	CHECK(strcmp(out, "/tmp/data/.crypto_seed") == 0);
 	CHECK(out[used] == '\0');
 	return 0;
@@ -119,8 +113,6 @@ test_path_trailing_slash(void)
 	char out[64];
 	size_t used = 0u;
 
-	/* Leading "//" is implementation defined in POSIX, so the separator is
-	 * not doubled. */
 	CHECK(normfs_seed_path("/", 1u, out, sizeof(out), &used) ==
 	    NORMFS_SEED_OK);
 	CHECK(strcmp(out, "/.crypto_seed") == 0);
@@ -164,15 +156,12 @@ test_path_too_long(void)
 	for (i = 0u; i < sizeof(out); i++)
 		CHECK((unsigned char)out[i] == 0x5Au);
 
-	/* One more byte is exactly enough: the boundary is where the contract
-	 * says, not one either side of it. */
 	CHECK(normfs_seed_path("/tmp/data", 9u, out, need, &used) ==
 	    NORMFS_SEED_OK);
 	CHECK(used == need - 1u);
 	return 0;
 }
 
-/* Discharges the getentropy assumption. */
 static int
 test_generate_is_entropy(void)
 {
@@ -203,13 +192,12 @@ test_generate_rejects_wrong_size(void)
 	r = normfs_seed_generate(buf, sizeof(buf) - 1u);
 	CHECK(r.status == NORMFS_SEED_ERR_INVALID_ARG);
 	CHECK(r.os_error == 0);
-	/* Nothing partial escapes, even on a rejected call. */
 	CHECK(is_all_zero(buf, sizeof(buf)));
 	return 0;
 }
 
-/* Discharges the explicit_bzero contract, on whichever fallback this platform
- * compiled: if the stores were optimised away, this fails. */
+/* Fails if the wipe's stores were optimised away, on whichever fallback this
+ * platform compiled. */
 static int
 test_zero_wipes(void)
 {
@@ -260,14 +248,12 @@ test_second_save_fails(void)
 	r = normfs_seed_save(dir, strlen(dir), first, sizeof(first));
 	CHECK(r.status == NORMFS_SEED_OK);
 
-	/* Discharges the O_CREAT|O_EXCL assumption, the one that matters most:
-	 * a second writer must lose, because every byte already on disk is
+	/* A second writer must lose, because every byte already on disk is
 	 * encrypted under the first seed. */
 	r = normfs_seed_save(dir, strlen(dir), second, sizeof(second));
 	CHECK(r.status == NORMFS_SEED_ERR_IO);
 	CHECK(r.os_error == EEXIST);
 
-	/* And lose without having clobbered anything. */
 	r = normfs_seed_load(dir, strlen(dir), out, sizeof(out));
 	CHECK(r.status == NORMFS_SEED_OK);
 	CHECK(memcmp(first, out, sizeof(first)) == 0);
@@ -291,8 +277,6 @@ test_file_mode_is_0600(void)
 
 	(void)snprintf(path, sizeof(path), "%s/%s", dir, NORMFS_SEED_FILE_NAME);
 	CHECK(stat(path, &st) == 0);
-	/* main() clears the umask, so this asserts the requested mode rather
-	 * than what the environment's umask left of it. */
 	CHECK((st.st_mode & 07777) == 0600);
 	return 0;
 }
@@ -317,7 +301,6 @@ test_load_short_file(void)
 	memset(out, 0xFF, sizeof(out));
 	r = normfs_seed_load(dir, strlen(dir), out, sizeof(out));
 	CHECK(r.status == NORMFS_SEED_ERR_INVALID_SEED);
-	/* Half a root secret must never reach the caller. */
 	CHECK(is_all_zero(out, sizeof(out)));
 	return 0;
 }
@@ -334,8 +317,8 @@ test_load_missing(void)
 	memset(out, 0xFF, sizeof(out));
 	r = normfs_seed_load(dir, strlen(dir), out, sizeof(out));
 	CHECK(r.status == NORMFS_SEED_ERR_IO);
-	/* Pins the errno pipeline SeedError::Io depends on: without a real
-	 * ENOENT, from_raw_os_error cannot reproduce ErrorKind::NotFound. */
+	/* Without a real ENOENT, from_raw_os_error cannot reproduce
+	 * ErrorKind::NotFound on the Rust side. */
 	CHECK(r.os_error == ENOENT);
 	CHECK(is_all_zero(out, sizeof(out)));
 	return 0;

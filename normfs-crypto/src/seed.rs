@@ -84,9 +84,9 @@ impl From<io::Error> for SeedError {
     }
 }
 
-/// Why the C layer carries `errno` out: without it `ErrorKind::NotFound` and
-/// `AlreadyExists` would be lost at the FFI boundary, and both `Seed::open` and
-/// its callers classify on exactly those.
+/// Without the C layer's `errno`, `ErrorKind::NotFound` and `AlreadyExists`
+/// would be lost at the FFI boundary, and both `Seed::open` and its callers
+/// classify on exactly those.
 fn os_error(raw: c_int) -> io::Error {
     if raw != 0 {
         io::Error::from_raw_os_error(raw)
@@ -114,7 +114,6 @@ fn map_status(r: CSeedResult) -> Result<(), SeedError> {
     }
 }
 
-/// `CString::new` also rejects an interior NUL, as `File::open` did.
 fn c_dir(data_dir: &Path) -> Result<CString, SeedError> {
     CString::new(data_dir.as_os_str().as_bytes()).map_err(|_| {
         SeedError::Io(io::Error::new(
@@ -142,9 +141,8 @@ impl zeroize::ZeroizeOnDrop for Seed {}
 
 impl Seed {
     pub fn generate() -> Result<Self, SeedError> {
-        // Built first and filled in place: `let mut b = [0u8; SEED_SIZE]; ...;
-        // Self { bytes: b }` would leave a second, unwiped copy on the stack.
-        // It also lets Drop clean up the error path.
+        // Built first and filled in place: a local array moved in afterwards
+        // would leave a second, unwiped copy on the stack.
         let mut seed = Self {
             bytes: [0u8; SEED_SIZE],
         };
@@ -171,7 +169,7 @@ impl Seed {
 
         // SAFETY: `dir` is NUL-terminated by CString and outlives the call. It
         // and seed.bytes are distinct allocations, satisfying the C contract's
-        // \separated precondition, which the FFI cannot check.
+        // \separated precondition.
         let r = unsafe {
             normfs_seed_load(
                 dir.as_ptr(),
@@ -201,8 +199,7 @@ impl Seed {
     }
 
     pub fn exists<P: AsRef<Path>>(data_dir: P) -> bool {
-        // A path the C layer cannot be handed has no seed at it, which is how
-        // Path::exists treats its own errors too.
+        // Errors swallowed, as Path::exists swallows its own.
         let Ok(dir) = c_dir(data_dir.as_ref()) else {
             return false;
         };
@@ -243,7 +240,6 @@ mod tests {
         let seed1 = Seed::generate().unwrap();
         let seed2 = Seed::generate().unwrap();
 
-        // Seeds should be different (astronomically unlikely to be same)
         assert_ne!(seed1.as_bytes(), seed2.as_bytes());
     }
 
@@ -260,10 +256,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let seed = Seed::open(temp_dir.path()).unwrap();
 
-        // Seed file should exist
         assert!(Seed::exists(temp_dir.path()));
 
-        // Should be able to read the seed back
         let mut read_bytes = [0u8; SEED_SIZE];
         let seed_path = temp_dir.path().join(SEED_FILE_NAME);
         let mut file = fs::File::open(&seed_path).unwrap();
@@ -276,11 +270,9 @@ mod tests {
     fn test_open_loads_existing_seed() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        // Create first seed
         let seed1 = Seed::open(temp_dir.path()).unwrap();
         let bytes1 = *seed1.as_bytes();
 
-        // Open again should load the same seed
         let seed2 = Seed::open(temp_dir.path()).unwrap();
         let bytes2 = *seed2.as_bytes();
 
@@ -299,7 +291,6 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mode = metadata.permissions().mode();
 
-        // Check that only owner has read/write permissions (0600)
         assert_eq!(mode & 0o777, 0o600);
     }
 
@@ -321,9 +312,8 @@ mod tests {
 
         Seed::generate().unwrap().save(temp_dir.path()).unwrap();
 
-        // The second writer must lose, because data on disk is already
-        // encrypted under the first seed. Seed::open relies on this surfacing
-        // as AlreadyExists, which is what the errno round trip preserves.
+        // Seed::open relies on this surfacing as AlreadyExists, which is what
+        // the errno round trip preserves.
         let err = Seed::generate()
             .unwrap()
             .save(temp_dir.path())
@@ -339,9 +329,9 @@ mod tests {
     fn test_load_missing_reports_not_found() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        // Matched rather than unwrapped: Seed has no Debug impl, since
-        // deriving one would put the root secret in any log line that
-        // formatted it, so expect_err is unavailable here.
+        // Matched rather than unwrapped: Seed has no Debug impl -- deriving one
+        // would put the root secret in any log line that formatted it -- so
+        // expect_err is unavailable here.
         match Seed::load(temp_dir.path()) {
             Err(SeedError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
             Err(other) => panic!("expected an Io error, got {:?}", other),
@@ -358,8 +348,7 @@ mod tests {
 
         // SAFETY: ManuallyDrop keeps the storage alive across the drop, and
         // [u8; SEED_SIZE] has no drop glue and no invalid bit patterns, so
-        // reading it back is well defined. After an ordinary drop it would not
-        // be.
+        // reading it back is well defined.
         unsafe {
             ManuallyDrop::drop(&mut seed);
             assert_eq!(

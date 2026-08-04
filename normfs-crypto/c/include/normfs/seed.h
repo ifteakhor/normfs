@@ -49,8 +49,7 @@ struct normfs_seed_result {
  * a way to pass a shorter buffer.
  */
 
-/* Exported rather than static so test_seed.c can pin the literal file name:
- * the contract fixes its length, not its bytes. */
+/* Exported rather than static so test_seed.c can pin the literal file name. */
 int normfs_seed_path(const char *data_dir, size_t data_dir_len,
     char *out, size_t out_len, size_t *used);
 

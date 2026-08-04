@@ -73,9 +73,8 @@ int normfs_seed_sys_create_excl(const char *path, size_t path_len,
 int normfs_seed_sys_open_read(const char *path, size_t path_len, int *os_error);
 
 /*
- * `-1 <= \result <= (long)len` is the load bearing clause of this header: a
- * read never reports more bytes than the buffer it was given holds. It is what
- * makes the caller's loop variant decrease and what proves the loop cannot
+ * `-1 <= \result <= (long)len` is the load bearing clause of this header: it is
+ * what makes the caller's loop variant decrease and what proves the loop cannot
  * write past buf[len - 1].
  */
 /*@ requires len <= NORMFS_SEED_SYS_IO_MAX;
@@ -89,8 +88,8 @@ int normfs_seed_sys_open_read(const char *path, size_t path_len, int *os_error);
 */
 long normfs_seed_sys_read(int fd, uint8_t *buf, size_t len, int *os_error);
 
-/* Same bound. `len > 0 ==> \result != 0` keeps the caller's loop from spinning
- * on a write that reports no progress; the body turns that into a failure. */
+/* `len > 0 ==> \result != 0` keeps the caller's loop from spinning on a write
+ * that reports no progress; the body turns that into a failure. */
 /*@ requires len <= NORMFS_SEED_SYS_IO_MAX;
     requires len == 0 || \valid_read(buf + (0 .. len - 1));
     requires \valid(os_error);
@@ -131,7 +130,6 @@ int normfs_seed_sys_exists(const char *path, size_t path_len);
 /*
  * What is assumed here is not the postcondition but the reason the function
  * exists: that the compiler did not elide stores into an object about to die.
- * test_zero_wipes checks it, on whichever fallback this platform compiled.
  */
 /*@ requires len == 0 || \valid(buf + (0 .. len - 1));
     assigns buf[0 .. len - 1];

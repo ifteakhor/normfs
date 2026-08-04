@@ -13,15 +13,11 @@ typedef char normfs_seed_file_name_len_check[
     (sizeof(normfs_seed_file_name) == NORMFS_SEED_FILE_NAME_LEN + 1) ? 1 : -1];
 
 /*@ axiomatic NormfsSeedPath {
-      // A directory ending in '/' contributes no separator, so "/" joins to
-      // "/.crypto_seed" rather than "//.crypto_seed", whose leading "//" POSIX
-      // leaves implementation defined. An empty one contributes none either, so
-      // the join stays relative, matching Rust's Path::new("").join(). Total by
-      // construction: the dir_len <= 0 arm keeps dir[dir_len - 1] out of reach.
+      // No separator after a trailing '/': a leading "//" is implementation
+      // defined in POSIX.
       logic integer normfs_seed_sep{L}(char *dir, integer dir_len) =
         dir_len <= 0 ? 0 : (dir[dir_len - 1] == '/' ? 0 : 1);
 
-      // Length of the join, excluding the NUL.
       logic integer normfs_seed_path_len{L}(char *dir, integer dir_len) =
         dir_len + normfs_seed_sep(dir, dir_len) + NORMFS_SEED_FILE_NAME_LEN;
     }
@@ -75,9 +71,8 @@ normfs_seed_path(const char *data_dir, size_t data_dir_len, char *out,
 
 	sep = (data_dir_len > 0u && data_dir[data_dir_len - 1u] != '/') ? 1u : 0u;
 
-	/* Subtractions rather than one addition: data_dir_len is whatever the
-	 * FFI passed, and data_dir_len + sep + 13 is the one place that could
-	 * wrap size_t. */
+	/* Subtractions rather than one addition: data_dir_len + sep + 13 is the
+	 * one place that could wrap size_t. */
 	if (out_len <= data_dir_len)
 		return NORMFS_SEED_ERR_PATH_TOO_LONG;
 	if (out_len - data_dir_len <= sep)
@@ -127,12 +122,6 @@ normfs_seed_zero(uint8_t *seed, size_t seed_len)
 	normfs_seed_sys_zero(seed, seed_len);
 }
 
-/*
- * A single read(2) may return fewer bytes than asked for without being at end
- * of file, so the loop is not optional; EOF before len bytes is a seed file
- * that is not a seed. The variant rests entirely on normfs_seed_sys_read's
- * bound on its result.
- */
 /*@ requires 0 < len <= NORMFS_SEED_SYS_IO_MAX;
     requires \valid(seed + (0 .. len - 1));
     requires \valid(os_error);
@@ -196,9 +185,9 @@ normfs_seed_write_all(int fd, const uint8_t *seed, size_t len, int *os_error)
 }
 
 /*
- * Wiping first is what makes "nothing partial reaches the caller" fall out of
- * the early returns rather than needing a wipe on each. getentropy leaves its
- * buffer unspecified on failure, so that path wipes again.
+ * Wiping first makes "nothing partial reaches the caller" fall out of the early
+ * returns. getentropy leaves its buffer unspecified on failure, so that path
+ * wipes again.
  */
 /*@ requires \valid(seed + (0 .. NORMFS_SEED_SIZE - 1));
     assigns seed[0 .. NORMFS_SEED_SIZE - 1];
@@ -207,8 +196,6 @@ normfs_seed_write_all(int fd, const uint8_t *seed, size_t len, int *os_error)
             \result.status == NORMFS_SEED_ERR_OS_RNG;
     ensures \result.status == NORMFS_SEED_ERR_INVALID_ARG <==>
               seed_len != NORMFS_SEED_SIZE;
-    // Completeness: a correctly sized buffer leaves only the two outcomes the
-    // entropy source can decide.
     ensures seed_len == NORMFS_SEED_SIZE ==>
               (\result.status == NORMFS_SEED_OK ||
                \result.status == NORMFS_SEED_ERR_OS_RNG);
@@ -236,7 +223,6 @@ normfs_seed_generate(uint8_t *seed, size_t seed_len)
 	}
 
 	if (normfs_seed_sys_entropy(seed, (size_t)NORMFS_SEED_SIZE, &e) != 0) {
-		/* Unspecified contents on failure. */
 		normfs_seed_zero(seed, (size_t)NORMFS_SEED_SIZE);
 		r.os_error = e;
 		r.status = NORMFS_SEED_ERR_OS_RNG;
@@ -264,8 +250,6 @@ normfs_seed_generate(uint8_t *seed, size_t seed_len)
               (seed_len == NORMFS_SEED_SIZE &&
                NORMFS_SEED_PATH_MAX <
                  normfs_seed_path_len(data_dir, data_dir_len) + 1);
-    // Completeness: once the arguments are well formed and the path fits, the
-    // only outcomes left are the three the filesystem can decide.
     ensures (seed_len == NORMFS_SEED_SIZE &&
              NORMFS_SEED_PATH_MAX >=
                normfs_seed_path_len(data_dir, data_dir_len) + 1) ==>
@@ -274,8 +258,6 @@ normfs_seed_generate(uint8_t *seed, size_t seed_len)
                \result.status == NORMFS_SEED_ERR_IO);
     ensures \result.status == NORMFS_SEED_OK ==> \result.os_error == 0;
     ensures \result.status == NORMFS_SEED_ERR_IO ==> \result.os_error > 0;
-    // A half filled root secret that looks whole is the failure mode worth
-    // ruling out here.
     ensures \result.status != NORMFS_SEED_OK ==>
               \forall integer k; 0 <= k < NORMFS_SEED_SIZE ==> seed[k] == 0;
 */
@@ -338,9 +320,6 @@ normfs_seed_load(const char *data_dir, size_t data_dir_len, uint8_t *seed,
  * O_CREAT|O_EXCL rather than a temp file and rename: a rename would clobber a
  * concurrent winner's seed, and every byte already written under it would
  * become undecryptable. First writer wins, everyone else gets EEXIST.
- *
- * `assigns \nothing` is a claim about memory only. WP's model has no notion of
- * a file, which is why every syscall here is an assumed shim.
  */
 /*@ requires \valid_read(data_dir + (0 .. data_dir_len));
     requires data_dir[data_dir_len] == 0;
