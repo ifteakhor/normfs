@@ -5,6 +5,7 @@ Cargo.lock
 uintn-rs/c/build/
 normfs-wal/c/build/
 normfs-store/c/build/
+normfs-crypto/c/build/
 
 # macOS
 .DS_Store
