@@ -391,3 +391,47 @@ async fn a_sealed_append_waits_and_still_lands_on_a_fresh_page() {
         assert_eq!(ring.page_len(active), 1, "and the only one on it so far");
     });
 }
+
+/// A writer never emits records that were in the pool before it started.
+///
+/// A queue upgraded from readonly to write keeps its `MemQueue`, and with it a
+/// pool that may already hold records -- cached by reads, or left by the
+/// previous writer. Those have no entry in the new file and no index to be
+/// placed at, and V1's positional ids turn an unaccounted record into every
+/// later entry reading back under the wrong id.
+#[tokio::test]
+async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
+    let pool = pool();
+    fill(&pool);
+    assert!(
+        !pool.take_pending().is_empty() || pool.next_entry_id() > 0,
+        "the pool should be holding records before the writer arms"
+    );
+
+    // Put a fresh run in that a previous writer had not taken.
+    pool.mark_durable(pool.next_entry_id());
+    assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
+    assert!(
+        !pool.take_pending().is_empty(),
+        "that run is pending a write"
+    );
+    assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
+
+    // A writer starts now. Whatever is already there is not its to write.
+    pool.arm_file_fill(1 << 20, 16);
+    assert!(
+        pool.take_pending().is_empty(),
+        "a newly armed writer must not adopt records it has no header entry for"
+    );
+
+    // What it is told about afterwards still reaches the file.
+    let id = pool.next_entry_id();
+    pool.charge(record_charge());
+    pool.append_at(id, &RECORD).await.unwrap();
+    let pending = pool.take_pending();
+    assert_eq!(
+        pending.iter().map(|(w, _)| w.last_entry_id).max(),
+        Some(id),
+        "records enqueued after arming are written normally"
+    );
+}

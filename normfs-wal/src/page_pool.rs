@@ -264,6 +264,24 @@ impl PagePool {
             has_written: false,
             epoch: 0,
         });
+
+        // A fresh writer has drawn no boundaries and inherits no seal.
+        inner.boundaries.clear();
+        inner.seal_pending = false;
+
+        // Whatever the pages already hold is not this writer's to write. A
+        // queue upgraded from readonly to write keeps its `MemQueue`, and so
+        // its pool: those records were cached by reads, or written by the
+        // previous writer, and either way this one has no entry for them in
+        // its file and no index to place them at. Writing them would append
+        // records the header does not account for, which V1's positional ids
+        // turn into every later entry reading back under the wrong one.
+        //
+        // So the cursor starts at what is there: this writer emits only the
+        // records it is told about.
+        for k in 0..inner.ring.page_count() {
+            inner.written[k] = inner.ring.page_bytes(k).len();
+        }
     }
 
     /// Charges `entry_len` encoded bytes to the open file, and says whether the
