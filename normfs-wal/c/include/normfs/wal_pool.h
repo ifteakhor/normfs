@@ -102,8 +102,15 @@ struct normfs_wal_pool_take_result {
                         arena + (0 .. page_count * page_size - 1));
     requires \separated(owner + (0 .. page_count - 1),
                         arena + (0 .. page_count * page_size - 1));
+    // The caller marks the pages free, as it already initialises each page
+    // descriptor. C initialising what the caller can is what forces this
+    // function to write two disjoint regions and then re-establish a
+    // quantified property across both -- for no benefit, since Rust allocates
+    // the owner array and can fill it as it allocates.
+    requires \forall integer k; 0 <= k < page_count ==>
+               owner[k] == NORMFS_WAL_POOL_FREE;
     assigns pool->pages, pool->arena, pool->owner, pool->page_count,
-            pool->page_size, owner[0 .. page_count - 1];
+            pool->page_size;
     ensures normfs_wal_pool_wf(pool);
     ensures \forall integer k; 0 <= k < page_count ==>
               pool->owner[k] == NORMFS_WAL_POOL_FREE;

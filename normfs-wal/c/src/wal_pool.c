@@ -4,23 +4,6 @@ void
 normfs_wal_pool_init(struct normfs_wal_pool *pool, struct normfs_wal_page *pages,
     uint8_t *arena, uint64_t *owner, size_t page_count, size_t page_size)
 {
-	size_t k;
-
-	/* The owner array first, then the struct. The loop writes only owner[],
-	 * which the precondition separates from the pages, the arena and the
-	 * pool itself -- so doing it before the struct is filled in keeps the
-	 * two mutations from having to be reasoned about together, and leaves
-	 * the field writes adjacent to the postcondition that reads them. */
-	/*@ loop invariant 0 <= k <= page_count;
-	    loop invariant \forall integer i; 0 <= i < k ==>
-	                     owner[i] == NORMFS_WAL_POOL_FREE;
-	    loop assigns k, owner[0 .. page_count - 1];
-	    loop variant page_count - k;
-	*/
-	for (k = 0u; k < page_count; k++) {
-		owner[k] = NORMFS_WAL_POOL_FREE;
-	}
-
 	pool->pages = pages;
 	pool->arena = arena;
 	pool->owner = owner;
