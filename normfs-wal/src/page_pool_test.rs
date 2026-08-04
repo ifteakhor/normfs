@@ -474,3 +474,81 @@ async fn every_record_being_oversized_does_not_stall_the_queue() {
         .await
         .expect("stepping over oversized records must not wait for a page");
 }
+
+// ---------------------------------------------------------------------------
+// Streaming reads borrow from pages.
+//
+// `pin_range` hands out payloads that point into the pages the records were
+// written into, rather than copies of them. What makes that sound is the pin:
+// `normfs_wal_ring_rotate_to` requires `normfs_wal_page_is_reusable`, whose
+// first conjunct is `pin_count == 0`, so a page a reader holds cannot be reset
+// under it. These tests are that conjunct doing its job.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_pinned_page_is_not_reused_while_a_reader_holds_it() {
+    let pool = pool();
+    let n = fill(&pool);
+    assert!(n >= 2);
+
+    // Borrow entry 0 and report everything durable. Durability alone would
+    // make every page reclaimable -- the pin is the only thing holding this
+    // one, which is exactly what is being tested.
+    let held = pool.pin_range(0, 0);
+    assert_eq!(held.len(), 1, "entry 0 should be held in memory");
+    let borrowed = held[0].1.clone();
+    assert_eq!(&borrowed[..], &RECORD[..], "the payload reads back");
+    pool.mark_durable(n);
+
+    // The page holding entry 0 must not be handed out for reuse.
+    let pinned_page = pool
+        .with_ring(|ring| (0..ring.page_count()).find(|&k| ring.page_pin_count(k) > 0))
+        .expect("a page should be pinned");
+
+    for _ in 0..(2 * PAGE_COUNT + 2) {
+        let _ = pool.try_append(&RECORD);
+        let still_there = pool.with_ring(|ring| ring.page_first_entry_id(pinned_page));
+        assert_eq!(
+            still_there,
+            Some(0),
+            "a page a reader is holding was recycled under it"
+        );
+    }
+
+    // The bytes the reader is looking at are unchanged.
+    assert_eq!(&borrowed[..], &RECORD[..]);
+
+    // Dropping the last reader releases it.
+    drop(held);
+    drop(borrowed);
+    assert_eq!(
+        pool.with_ring(|ring| ring.page_pin_count(pinned_page)),
+        0,
+        "dropping the payload must release the pin"
+    );
+    assert!(
+        matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)),
+        "and the page becomes reusable again"
+    );
+}
+
+#[tokio::test]
+async fn every_pin_is_released_even_when_payloads_are_dropped_unread() {
+    let pool = pool();
+    fill(&pool);
+
+    // A stream that starts and is abandoned: the payloads go out of scope
+    // without ever being looked at, and the pins must go with them.
+    for _ in 0..5 {
+        let batch = pool.pin_range(0, u64::MAX);
+        assert!(!batch.is_empty());
+        drop(batch);
+    }
+
+    let pinned: u32 = pool.with_ring(|ring| {
+        (0..ring.page_count())
+            .map(|k| ring.page_pin_count(k))
+            .sum()
+    });
+    assert_eq!(pinned, 0, "a dropped payload leaks a pin, and a leaked pin holds the page for good");
+}
