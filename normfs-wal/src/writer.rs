@@ -16,8 +16,8 @@ use tokio::sync::{mpsc, oneshot};
 use uintn::UintN;
 
 enum WriteRequest {
-    Enqueue(UintN, Bytes),
-    EnqueueBatch(Vec<(UintN, Bytes)>),
+    Enqueue(UintN, Bytes, bool),
+    EnqueueBatch(Vec<(UintN, Bytes, bool)>),
     Close(oneshot::Sender<()>),
 }
 
@@ -72,6 +72,12 @@ impl WalWriter {
         let queue_fs_path = queue.to_wal_dir(root);
         tokio::fs::create_dir_all(&queue_fs_path).await?;
 
+        // From here a file writer is draining these pages, so an appender may
+        // wait for one to be freed: a flush will end the wait.
+        if let Some(p) = pool.as_ref() {
+            p.set_drainer();
+        }
+
         let file_writer = new_file_writer(
             &queue_fs_path,
             file_id,
@@ -106,8 +112,8 @@ impl WalWriter {
 
             while let Some(req) = rx.recv().await {
                 match req {
-                    WriteRequest::Enqueue(entry_id, data) => {
-                        if let Err(e) = state.write(entry_id, data).await {
+                    WriteRequest::Enqueue(entry_id, data, in_pool) => {
+                        if let Err(e) = state.write(entry_id, data, in_pool).await {
                             log::error!(
                                 "WAL writer: error writing entry for queue '{}': {}",
                                 state.queue_id,
@@ -148,15 +154,15 @@ impl WalWriter {
         Ok(Self { write_chan: tx })
     }
 
-    pub fn enqueue(&self, entry_id: UintN, data: Bytes) -> Result<(), WalError> {
+    pub fn enqueue(&self, entry_id: UintN, data: Bytes, in_pool: bool) -> Result<(), WalError> {
         log::trace!("WAL writer: enqueuing entry {} for write", entry_id);
 
         self.write_chan
-            .send(WriteRequest::Enqueue(entry_id, data))
+            .send(WriteRequest::Enqueue(entry_id, data, in_pool))
             .map_err(|_| WalError::SendError)
     }
 
-    pub fn enqueue_batch(&self, entries: Vec<(UintN, Bytes)>) -> Result<(), WalError> {
+    pub fn enqueue_batch(&self, entries: Vec<(UintN, Bytes, bool)>) -> Result<(), WalError> {
         log::trace!(
             "WAL writer: enqueuing batch of {} entries for write",
             entries.len()
@@ -177,7 +183,7 @@ impl WalWriter {
 }
 
 impl WriterState {
-    async fn write(&mut self, entry_id: UintN, data: Bytes) -> Result<(), WalError> {
+    async fn write(&mut self, entry_id: UintN, data: Bytes, in_pool: bool) -> Result<(), WalError> {
         log::debug!(
             "WAL writer: writing entry {} to queue '{}', data size: {} bytes",
             entry_id,
@@ -192,7 +198,7 @@ impl WriterState {
                 entry_id,
                 self.queue_id
             );
-            vec![(entry_id.clone(), data)]
+            vec![(entry_id.clone(), data, in_pool)]
         } else {
             // buffer and get ready entries
             log::debug!(
@@ -200,7 +206,7 @@ impl WriterState {
                 entry_id,
                 self.queue_id
             );
-            self.buffer.wait_for_order((entry_id.clone(), data))
+            self.buffer.wait_for_order((entry_id.clone(), data, in_pool))
         };
 
         if entries.is_empty() {
@@ -211,7 +217,7 @@ impl WriterState {
             return Ok(());
         }
 
-        for (entry_id, data) in entries {
+        for (entry_id, data, in_pool) in entries {
             // Rotation is decided on the encoded length, not the record length:
             // the varint prefix and CRC also have to fit. A record wider than a
             // u32 has no frame at all, so it is an error rather than a rotation.
@@ -265,7 +271,12 @@ impl WriterState {
             }
 
             self.file_writer
-                .write(self.queue_id.clone(), entry_id.clone(), entry_buf)
+                .write_maybe_pooled(
+                    self.queue_id.clone(),
+                    entry_id.clone(),
+                    entry_buf,
+                    in_pool,
+                )
                 .await;
 
             // Update last written entry ID
@@ -282,15 +293,15 @@ impl WriterState {
         Ok(())
     }
 
-    async fn write_batch(&mut self, entries: Vec<(UintN, Bytes)>) -> Result<(), WalError> {
+    async fn write_batch(&mut self, entries: Vec<(UintN, Bytes, bool)>) -> Result<(), WalError> {
         log::debug!(
             "WAL writer: writing batch of {} entries to queue '{}'",
             entries.len(),
             self.queue_id
         );
 
-        for (entry_id, data) in entries {
-            self.write(entry_id, data).await?;
+        for (entry_id, data, in_pool) in entries {
+            self.write(entry_id, data, in_pool).await?;
         }
 
         log::debug!(

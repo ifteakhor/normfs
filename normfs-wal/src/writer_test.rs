@@ -124,8 +124,8 @@ async fn test_enqueue_batch_and_read() {
         .unwrap();
 
     let entries = vec![
-        (UintN::from(0u64), Bytes::from("hello")),
-        (UintN::from(1u64), Bytes::from("world")),
+        (UintN::from(0u64), Bytes::from("hello"), false),
+        (UintN::from(1u64), Bytes::from("world"), false),
     ];
     store.enqueue_batch(&queue_id, entries).unwrap();
 

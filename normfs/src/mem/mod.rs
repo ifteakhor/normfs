@@ -795,6 +795,7 @@ impl MemStore {
 
     /// The queue's page pool, so the WAL writer can put those same pages on
     /// disk instead of copying their contents into a buffer of its own.
+    #[allow(dead_code)] // used once the pool becomes the writer's source
     pub fn pool(&self, queue: &QueueId) -> Option<Arc<PagePool>> {
         let queues = self.queues.read().unwrap();
         let q = queues.get(queue)?;

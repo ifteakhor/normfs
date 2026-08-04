@@ -392,6 +392,21 @@ impl WalStore {
     }
 
     pub fn enqueue(&self, queue: &QueueId, entry_id: UintN, data: Bytes) -> Result<(), WalError> {
+        self.enqueue_pooled(queue, entry_id, data, false)
+    }
+
+    /// `in_pool` says the record is already in a page of this queue's pool, so
+    /// its bytes reach the file from there and must not be buffered again.
+    ///
+    /// `enqueue` keeps its three-argument shape so `wal_sweep` still builds
+    /// against released revisions of this crate.
+    pub fn enqueue_pooled(
+        &self,
+        queue: &QueueId,
+        entry_id: UintN,
+        data: Bytes,
+        in_pool: bool,
+    ) -> Result<(), WalError> {
         log::trace!(
             "WalStore: enqueuing entry {} for queue '{}', data size: {} bytes",
             entry_id,
@@ -403,7 +418,7 @@ impl WalStore {
         match writers.get(queue) {
             Some(writer) => {
                 let entry_id_clone = entry_id.clone();
-                writer.enqueue(entry_id, data)?;
+                writer.enqueue(entry_id, data, in_pool)?;
                 log::trace!(
                     "WalStore: entry {} enqueued for queue '{}'",
                     entry_id_clone,
@@ -421,7 +436,7 @@ impl WalStore {
     pub fn enqueue_batch(
         &self,
         queue: &QueueId,
-        entries: Vec<(UintN, Bytes)>,
+        entries: Vec<(UintN, Bytes, bool)>,
     ) -> Result<(), WalError> {
         log::trace!(
             "WalStore: enqueuing batch of {} entries for queue '{}'",
