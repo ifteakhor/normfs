@@ -1,9 +1,18 @@
 //! Safe wrapper over the verified C V1 WAL paged memory store.
 //!
-//! Rust owns the memory: one byte buffer per page plus the page-descriptor
-//! array. The C layer (proven with Frama-C WP) does the appends, offset table,
-//! rotation choice and cursor arithmetic; this module sequences them and hands
-//! back safe slices.
+//! Rust owns the memory: one arena of `page_count * page_size` bytes plus the
+//! page-descriptor array. The C layer (proven with Frama-C WP) does the
+//! appends, offset table, rotation choice and cursor arithmetic; this module
+//! sequences them and hands back safe slices.
+//!
+//! Page `k` is the slice of the arena at `k * page_size`. That is not an
+//! implementation detail — it is what the C side's separation argument rests
+//! on. With one buffer per page, "no two pages overlap" is an axiom the caller
+//! supplies and every mutation has to carry across itself, as a quantifier over
+//! every *pair* of pages; the automatic provers do not transport it. As slices
+//! of one allocation it is arithmetic on one valid block instead, so the
+//! separation clause becomes three flat statements about base pointers that no
+//! mutation assigns, and it survives by frame.
 
 use std::os::raw::c_int;
 
@@ -23,6 +32,7 @@ struct CWalPage {
 #[repr(C)]
 struct CWalRing {
     pages: *mut CWalPage,
+    arena: *mut u8,
     page_count: usize,
     page_size: usize,
     active: usize,
@@ -77,6 +87,7 @@ unsafe extern "C" {
     fn normfs_wal_ring_init(
         ring: *mut CWalRing,
         pages: *mut CWalPage,
+        arena: *mut u8,
         page_count: usize,
         page_size: usize,
         first_entry_id: u64,
@@ -106,11 +117,12 @@ pub enum AppendOutcome {
 
 /// A ring of WAL pages holding V1 entries in memory.
 ///
-/// The buffers and the descriptor array are heap-allocated `Vec`s, so the raw
+/// The arena and the descriptor array are heap-allocated `Vec`s, so the raw
 /// pointers the C ring holds stay valid even if the `WalRing` value is moved;
 /// they are never reallocated after construction.
 pub struct WalRing {
-    buffers: Vec<Vec<u8>>,
+    /// `page_count * page_size` bytes. Page `k` is `[k * page_size ..]`.
+    arena: Vec<u8>,
     pages: Vec<CWalPage>,
     ring: Box<CWalRing>,
     page_size: usize,
@@ -124,14 +136,18 @@ impl WalRing {
         assert!(page_count >= 1, "ring needs at least one page");
         assert!(page_size >= 9, "page must hold the smallest entry plus its offset");
 
-        let mut buffers: Vec<Vec<u8>> = (0..page_count).map(|_| vec![0u8; page_size]).collect();
+        // One allocation, never reallocated. Page k starts at k * page_size,
+        // which is what makes the pages provably disjoint without a pairwise
+        // separation axiom.
+        let mut arena: Vec<u8> = vec![0u8; page_count * page_size];
+        let base = arena.as_mut_ptr();
         let mut pages: Vec<CWalPage> = Vec::with_capacity(page_count);
-        for (k, buffer) in buffers.iter_mut().enumerate() {
+        for k in 0..page_count {
             let mut page: CWalPage = unsafe { std::mem::zeroed() };
             unsafe {
                 normfs_wal_page_init(
                     &mut page,
-                    buffer.as_mut_ptr(),
+                    base.add(k * page_size),
                     page_size,
                     k as u64,
                     first_entry_id,
@@ -145,6 +161,7 @@ impl WalRing {
             normfs_wal_ring_init(
                 ring.as_mut(),
                 pages.as_mut_ptr(),
+                base,
                 page_count,
                 page_size,
                 first_entry_id,
@@ -152,7 +169,7 @@ impl WalRing {
         }
 
         WalRing {
-            buffers,
+            arena,
             pages,
             ring,
             page_size,
@@ -271,15 +288,23 @@ impl WalRing {
     pub fn reinit(&mut self, first_entry_id: u64) {
         let page_size = self.page_size;
         let n = self.pages.len();
+        let base = self.arena.as_mut_ptr();
         for k in 0..n {
-            let buf = self.buffers[k].as_mut_ptr();
             unsafe {
+                let buf = base.add(k * page_size);
                 normfs_wal_page_init(&mut self.pages[k], buf, page_size, k as u64, first_entry_id);
             }
         }
         let pages_ptr = self.pages.as_mut_ptr();
         unsafe {
-            normfs_wal_ring_init(self.ring.as_mut(), pages_ptr, n, page_size, first_entry_id);
+            normfs_wal_ring_init(
+                self.ring.as_mut(),
+                pages_ptr,
+                base,
+                n,
+                page_size,
+                first_entry_id,
+            );
         }
     }
 
@@ -335,7 +360,7 @@ impl WalRing {
     fn record_at(&self, page_index: usize, index: u32) -> Option<&[u8]> {
         let page = &self.pages[page_index] as *const CWalPage as *mut CWalPage;
         let offset = unsafe { normfs_wal_page_offset(page, index) as usize };
-        let buffer = &self.buffers[page_index];
+        let buffer = self.page_slice(page_index);
         let framed = &buffer[offset..];
         let decoded = unsafe { normfs_wal_entry_v1_decode(framed.as_ptr(), framed.len()) };
         if decoded.status != ENTRY_OK {
@@ -418,7 +443,13 @@ impl WalRing {
     /// Handing this out is what lets the writer put a page on disk without
     /// copying it into a buffer of its own.
     pub fn page_bytes(&self, page_index: usize) -> &[u8] {
-        &self.buffers[page_index][..self.pages[page_index].used_bytes]
+        &self.page_slice(page_index)[..self.pages[page_index].used_bytes]
+    }
+
+    /// Page `page_index`'s whole slice of the arena.
+    fn page_slice(&self, page_index: usize) -> &[u8] {
+        let from = page_index * self.page_size;
+        &self.arena[from..from + self.page_size]
     }
 
     /// Entries held by page `page_index`.

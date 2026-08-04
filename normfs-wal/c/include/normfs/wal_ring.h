@@ -34,6 +34,7 @@ enum normfs_wal_ring_status {
 
 struct normfs_wal_ring {
 	struct normfs_wal_page *pages;
+	uint8_t *arena;
 	size_t page_count;
 	size_t page_size;
 	size_t active;
@@ -76,24 +77,35 @@ struct normfs_wal_ring_seek_result {
         r->pages[r->active].first_entry_id + (integer)r->pages[r->active].count
           == r->next_entry_id;
 
-      // Descriptors, the ring, and each page buffer are pairwise disjoint, so a
-      // write to one page's buffer leaves every other page untouched.
+      // The pages are slices of one allocation, in index order.
+      //
+      // This is what makes the pages provably disjoint. Stated the other way --
+      // one buffer per page, and a quantifier asserting that no two of them
+      // overlap -- disjointness is an axiom the caller supplies, and every
+      // function that writes anything has to carry it across itself. That is a
+      // \forall over *pairs* of pages, and the automatic provers do not
+      // transport it: it is the one goal rotate_to could not discharge. As
+      // slices of a single block it is arithmetic instead, and it is derived
+      // where it is needed rather than assumed everywhere.
+      predicate normfs_wal_ring_layout{L}(struct normfs_wal_ring *r) =
+        \valid(r->arena + (0 .. r->page_count * r->page_size - 1)) &&
+        (\forall integer k; 0 <= k < r->page_count ==>
+           r->pages[k].buf == r->arena + k * r->page_size);
+
+      // The ring, the descriptor array and the arena are three disjoint
+      // regions. No quantifier: every term is a base pointer or a scalar, and
+      // no function assigns any of them, so this survives a mutation by frame.
       predicate normfs_wal_ring_sep{L}(struct normfs_wal_ring *r) =
         \separated(r, r->pages + (0 .. r->page_count - 1)) &&
-        (\forall integer k; 0 <= k < r->page_count ==>
-           \separated(&r->pages[k], r->pages[k].buf + (0 .. r->page_size - 1)) &&
-           \separated(r, r->pages[k].buf + (0 .. r->page_size - 1)) &&
-           \separated(r->pages + (0 .. r->page_count - 1),
-                      r->pages[k].buf + (0 .. r->page_size - 1))) &&
-        (\forall integer j, k; 0 <= j < r->page_count && 0 <= k < r->page_count &&
-           j != k ==>
-           \separated(r->pages[j].buf + (0 .. r->page_size - 1),
-                      r->pages[k].buf + (0 .. r->page_size - 1)));
+        \separated(r, r->arena + (0 .. r->page_count * r->page_size - 1)) &&
+        \separated(r->pages + (0 .. r->page_count - 1),
+                   r->arena + (0 .. r->page_count * r->page_size - 1));
 
       predicate normfs_wal_ring_wf{L}(struct normfs_wal_ring *r) =
         \valid(r) &&
         \valid(r->pages + (0 .. r->page_count - 1)) &&
         normfs_wal_ring_scalar_wf(r) &&
+        normfs_wal_ring_layout(r) &&
         normfs_wal_ring_sep(r) &&
         normfs_wal_ring_pages_wf(r);
     }
@@ -155,24 +167,25 @@ struct normfs_wal_ring_seek_result {
                normfs_wal_page_wf(&pages[k]) && pages[k].cap == page_size &&
                pages[k].count == 0;
     requires pages[0].first_entry_id == first_entry_id;
-    requires \separated(ring, pages + (0 .. page_count - 1));
+    // The caller lays the pages out over one allocation. What used to be a
+    // quantifier over every pair of page buffers is now this one equation.
+    requires page_count * page_size <= 0xFFFFFFFFFFFFFFFF;
+    requires \valid(arena + (0 .. page_count * page_size - 1));
     requires \forall integer k; 0 <= k < page_count ==>
-               \separated(&pages[k], pages[k].buf + (0 .. page_size - 1)) &&
-               \separated(ring, pages[k].buf + (0 .. page_size - 1)) &&
-               \separated(pages + (0 .. page_count - 1),
-                          pages[k].buf + (0 .. page_size - 1));
-    requires \forall integer j, k; 0 <= j < page_count && 0 <= k < page_count &&
-               j != k ==>
-               \separated(pages[j].buf + (0 .. page_size - 1),
-                          pages[k].buf + (0 .. page_size - 1));
-    assigns ring->pages, ring->page_count, ring->page_size, ring->active,
-            ring->next_entry_id, ring->next_page_id, ring->min_essential_id;
+               pages[k].buf == arena + k * page_size;
+    requires \separated(ring, pages + (0 .. page_count - 1));
+    requires \separated(ring, arena + (0 .. page_count * page_size - 1));
+    requires \separated(pages + (0 .. page_count - 1),
+                        arena + (0 .. page_count * page_size - 1));
+    assigns ring->pages, ring->arena, ring->page_count, ring->page_size,
+            ring->active, ring->next_entry_id, ring->next_page_id,
+            ring->min_essential_id;
     ensures normfs_wal_ring_wf(ring);
     ensures ring->active == 0 && ring->next_entry_id == first_entry_id;
 */
 void normfs_wal_ring_init(struct normfs_wal_ring *ring,
-    struct normfs_wal_page *pages, size_t page_count, size_t page_size,
-    uint64_t first_entry_id);
+    struct normfs_wal_page *pages, uint8_t *arena, size_t page_count,
+    size_t page_size, uint64_t first_entry_id);
 
 /* This contract is the intended specification, but try_append (like
  * rotate_to) is verified by the WalRing Rust tests rather than WP:
@@ -221,8 +234,20 @@ normfs_wal_ring_try_append(struct normfs_wal_ring *ring, const uint8_t *record,
 struct normfs_wal_ring_reusable_result
 normfs_wal_ring_find_reusable(struct normfs_wal_ring *ring);
 
-/* Like try_append, rotate_to is behavior-tested rather than WP-verified (see
- * the note on try_append); its callee page_reset is fully proven. */
+/* rotate_to is not WP-verified, but not for the reason try_append is not, and
+ * it is much closer than that note suggests. Scheduled on its own it reaches
+ * 29 of 30 goals with smoke 3/3, including every clause below: the frame is
+ * fine, because its only callee page_reset assigns five scalar fields and no
+ * buffer bytes at all, so no page's offset table is in its footprint. The
+ * three asserts in the body are what let WP split ring_wf's quantifier over
+ * pages into the reset page and the rest.
+ *
+ * The one goal left open is normfs_wal_ring_sep: transporting the *pairwise*
+ * buffer separation -- the quadratic \forall j,k -- across the call defeats
+ * the automatic provers, even though every term in it is provably unchanged
+ * (see the buffers_unmoved assert). That is what has to be closed before this
+ * can join the -wp-fct list in CMakeLists.txt, and until it is, this contract
+ * is a specification rather than a verdict. */
 /*@ requires normfs_wal_ring_wf(ring);
     requires index < ring->page_count;
     // The durability theorem, at its one point of use: this is the only place
@@ -237,7 +262,15 @@ normfs_wal_ring_find_reusable(struct normfs_wal_ring *ring);
             ring->pages[index].page_id,
             ring->pages[index].first_entry_id,
             ring->pages[index].last_entry_id;
-    ensures normfs_wal_ring_wf(ring);
+    // normfs_wal_ring_wf, spelled out one conjunct at a time. The conjunction
+    // is what callers consume, but as a single clause an unproved goal says
+    // only "well-formedness was not re-established" -- naming the parts costs
+    // nothing and says which part.
+    ensures \valid(ring);
+    ensures \valid(ring->pages + (0 .. ring->page_count - 1));
+    ensures normfs_wal_ring_scalar_wf(ring);
+    ensures normfs_wal_ring_sep(ring);
+    ensures normfs_wal_ring_pages_wf(ring);
     ensures ring->active == index && ring->pages[index].count == 0;
     ensures ring->pages[index].first_entry_id == \old(ring->next_entry_id);
     ensures ring->next_entry_id == \old(ring->next_entry_id);
