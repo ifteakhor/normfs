@@ -392,7 +392,7 @@ impl MemQueue {
             let mut current_id = start_id.clone();
             let mut results = Vec::new();
 
-            for (id_u64, data) in ring.collect_range(id_to_u64(&start_id), id_to_u64(&end_id)) {
+            for (id_u64, data) in ring.pin_range(id_to_u64(&start_id), id_to_u64(&end_id)) {
                 let id = UintN::from(id_u64);
                 if id > end_id {
                     break;
@@ -406,7 +406,7 @@ impl MemQueue {
                 }
 
                 if current_id == id {
-                    results.push((id.clone(), Bytes::from(data)));
+                    results.push((id.clone(), data));
                     current_id = current_id.step_by(step);
                 }
             }
@@ -498,7 +498,7 @@ impl MemQueue {
             let mut entries = Vec::new();
             let mut count = 0u64;
 
-            for (id_u64, data) in ring.collect_range(id_to_u64(&start_id), last) {
+            for (id_u64, data) in ring.pin_range(id_to_u64(&start_id), last) {
                 if limit > 0 && count >= limit {
                     break;
                 }
@@ -507,7 +507,7 @@ impl MemQueue {
                     current_id = current_id.step_by(step);
                 }
                 if current_id == id {
-                    entries.push((id.clone(), Bytes::from(data)));
+                    entries.push((id.clone(), data));
                     current_id = current_id.step_by(step);
                     count += 1;
                 }
@@ -566,13 +566,13 @@ impl MemQueue {
                     let last = inner.last_id.as_ref().map(id_to_u64).unwrap_or(u64::MAX);
                     let mut current_id = start_id.clone();
                     let mut entries = Vec::new();
-                    for (id_u64, data) in ring.collect_range(id_to_u64(&start_id), last) {
+                    for (id_u64, data) in ring.pin_range(id_to_u64(&start_id), last) {
                         let id = UintN::from(id_u64);
                         while current_id < id {
                             current_id = current_id.step_by(step);
                         }
                         if current_id == id {
-                            entries.push((id.clone(), Bytes::from(data)));
+                            entries.push((id.clone(), data));
                             current_id = current_id.step_by(step);
                         }
                     }
@@ -740,13 +740,13 @@ impl MemQueue {
             let mut current_id = start_id.clone();
             let mut entries = Vec::new();
 
-            for (id_u64, data) in ring.collect_range(id_to_u64(&start_id), last) {
+            for (id_u64, data) in ring.pin_range(id_to_u64(&start_id), last) {
                 let id = UintN::from(id_u64);
                 while current_id < id {
                     current_id = current_id.step_by(step);
                 }
                 if current_id == id {
-                    entries.push((id.clone(), Bytes::from(data)));
+                    entries.push((id.clone(), data));
                     current_id = current_id.step_by(step);
                 }
             }

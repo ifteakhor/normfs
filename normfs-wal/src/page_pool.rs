@@ -34,12 +34,70 @@
 //! responsible for never advancing the watermark on anything less than a
 //! completed sync.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::sync::Notify;
 
 use crate::wal_ring_v1::{AppendOutcome, WalRing};
+
+/// Keeps a page alive for as long as a reader is looking at bytes on it.
+///
+/// The payload handed out by [`PagePool::pin_range`] is not a copy — it points
+/// into the page the record was written into, which is the same memory the WAL
+/// file writer takes its bytes from. Nothing else keeps that memory still, so
+/// this does: the guard holds a pin for its lifetime and drops it afterwards,
+/// including when the read fails or the stream is dropped part-way.
+///
+/// ## Why the borrow is sound
+///
+/// A page is reused in exactly one place, `normfs_wal_ring_rotate_to`, and its
+/// contract requires `normfs_wal_page_is_reusable`, whose first conjunct is
+/// `pin_count == 0`. So a pinned page cannot be reset, and the bytes below
+/// `used_bytes` cannot change: appends only ever move that cursor forward, into
+/// space this slice does not cover. The page buffers are `Vec<u8>`s allocated
+/// once when the ring is built and never reallocated, and the `Arc` keeps the
+/// pool — and with it the buffers — alive for at least as long as the guard.
+///
+/// That is what the pin conjunct was always for. Until now nothing pinned
+/// anything, so it read as a precaution against a caller that did not exist;
+/// with reads borrowing from pages it carries its intended meaning.
+pub struct PageGuard {
+    pool: Arc<PagePool>,
+    page_index: usize,
+    ptr: *const u8,
+    len: usize,
+}
+
+// The pointer refers to a page buffer owned by the pool, which this guard holds
+// an `Arc` to and a pin on, so it stays valid and unwritten for the guard's
+// lifetime. Nothing here is mutated, so sharing across threads is safe.
+unsafe impl Send for PageGuard {}
+unsafe impl Sync for PageGuard {}
+
+impl AsRef<[u8]> for PageGuard {
+    fn as_ref(&self) -> &[u8] {
+        // SAFETY: as argued on the type -- the pin holds the page against
+        // reuse, and the buffer outlives this guard.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for PageGuard {
+    fn drop(&mut self) {
+        self.pool.unpin_page(self.page_index);
+    }
+}
+
+impl std::fmt::Debug for PageGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageGuard")
+            .field("page_index", &self.page_index)
+            .field("len", &self.len)
+            .finish()
+    }
+}
 
 /// How long a task may wait for a page before the pool starts reporting who is
 /// holding things up. Waiting itself is not an error — a full pool means the
@@ -646,6 +704,75 @@ impl PagePool {
     /// Every held record with id in `[start, end]`, in id order.
     pub fn collect_range(&self, start: u64, end: u64) -> Vec<(u64, Vec<u8>)> {
         self.inner.lock().unwrap().ring.collect_range(start, end)
+    }
+
+    /// Every held record with id in `[start, end]`, in id order, **borrowed
+    /// from the pages rather than copied out of them**.
+    ///
+    /// Each payload is a [`Bytes`] over the page the record was written into,
+    /// and holds a pin on that page until it is dropped. See [`PageGuard`] for
+    /// why that is sound.
+    pub fn pin_range(self: &Arc<Self>, start: u64, end: u64) -> Vec<(u64, Bytes)> {
+        let mut found: Vec<(u64, usize, *const u8, usize)> = Vec::new();
+        {
+            let inner = self.inner.lock().unwrap();
+            for k in 0..inner.ring.page_count() {
+                let n = inner.ring.page_len(k);
+                let Some(first) = inner.ring.page_first_entry_id(k) else {
+                    continue;
+                };
+                // Cheap page-level skip on the id span before touching entries.
+                let last = first + u64::from(n) - 1;
+                if last < start || first > end {
+                    continue;
+                }
+                for i in 0..n {
+                    let id = first + u64::from(i);
+                    if id < start || id > end {
+                        continue;
+                    }
+                    if let Some(rec) = inner.ring.record(k, i) {
+                        found.push((id, k, rec.as_ptr(), rec.len()));
+                    }
+                }
+            }
+            // One pin per payload handed out, so each guard's drop balances
+            // exactly one of them.
+            let mut inner = inner;
+            for &(_, k, _, _) in &found {
+                inner.ring.pin(k);
+            }
+        }
+        // The lock is released before any guard exists. A `PageGuard` unpins on
+        // drop, which takes this same lock, so one dropped while it were held
+        // would deadlock against itself.
+
+        let mut out: Vec<(u64, Bytes)> = found
+            .into_iter()
+            .map(|(id, page_index, ptr, len)| {
+                let guard = PageGuard {
+                    pool: Arc::clone(self),
+                    page_index,
+                    ptr,
+                    len,
+                };
+                (id, Bytes::from_owner(guard))
+            })
+            .collect();
+        out.sort_by_key(|(id, _)| *id);
+        out
+    }
+
+    /// Releases one pin taken by [`PagePool::pin_range`]. Called from
+    /// [`PageGuard::drop`], and from nowhere else: an unbalanced unpin wraps
+    /// the count and pins the page for good.
+    fn unpin_page(&self, page_index: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.ring.unpin(page_index);
+        drop(inner);
+        // A page whose last reader has gone may now be reclaimable, and an
+        // appender may be waiting for exactly that.
+        self.space.notify_waiters();
     }
 
     /// Restarts the pool empty, numbering from `first_entry_id`.
