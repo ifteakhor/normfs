@@ -89,20 +89,19 @@ if(FRAMAC)
     # the offset table -- a nested-quantifier frame the automatic provers do
     # not discharge.
     #
-    # rotate_to is excluded for a different and much narrower reason, and this
-    # list is where it will stop being excluded. It assigns no buffer bytes at
-    # all, so every page's offset table is outside its frame; scheduled on its
-    # own it reaches 29 of 30 goals with smoke 3/3. The one left open is
-    # normfs_wal_ring_sep -- transporting the quadratic pairwise buffer
-    # separation across the call -- not anything about page_wf. See the note on
-    # the contract in wal_ring.h.
+    # try_append stays covered by the WalRing Rust tests; its callee
+    # page_append is proven.
     #
-    # Both are covered by the WalRing Rust tests meanwhile; the read and setup
-    # primitives are proven here.
+    # rotate_to is verified. It is the one place a page's contents are
+    # discarded, so the durability theorem is its precondition -- and an
+    # unscheduled function generates no obligation anywhere, which is why
+    # having it here is the difference between that theorem being a
+    # specification and being a verdict.
     set(NORMFS_WAL_RING_WP_FCTS
         normfs_wal_ring_init
         normfs_wal_ring_set_essential
         normfs_wal_ring_find_reusable
+        normfs_wal_ring_rotate_to
         normfs_wal_ring_seek)
 
     # An empty fcts list drops -wp-fct entirely: WP then also schedules global
