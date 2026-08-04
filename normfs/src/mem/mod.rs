@@ -13,8 +13,68 @@ use uintn::UintN;
 const MEM_PAGE_SIZE: usize = 256 * 1024;
 const MEM_MAX_PAGES: usize = 64;
 
-fn ring_page_count(max_memory_usage: usize) -> usize {
-    (max_memory_usage / MEM_PAGE_SIZE).clamp(1, MEM_MAX_PAGES)
+/// The fewest pages a queue can work with: one to append into, and one the
+/// file writer is draining. With a single page an appender waits for its own
+/// page to reach disk before it can continue, which serialises the queue
+/// against the disk rather than merely bounding it.
+const MEM_MIN_PAGES_PER_QUEUE: usize = 2;
+
+/// The process-wide page budget.
+///
+/// `max_memory_usage` is a total, and this is what makes it one. It used to be
+/// divided by the queue count at the moment each queue was created and never
+/// revisited -- `max_memory_usage / queues.len().max(1)`, read *before* the
+/// insert -- so the first queue kept the whole budget for ever and every queue
+/// that arrived later added its own allocation on top. The total was not
+/// bounded by the setting at all: it overshot by roughly the number of queues.
+///
+/// Pages now come out of one pot, so the sum cannot exceed the budget however
+/// many queues appear.
+///
+/// What this does not do is move pages between queues once handed out. A
+/// queue's allotment is fixed when it starts, so a busy queue cannot borrow
+/// from an idle one. That needs the ring to hold pool slots rather than its
+/// own arena; until then the split is a guess made without knowing how many
+/// queues will arrive, which is why it is deliberately conservative.
+struct PageBudget {
+    total_pages: usize,
+    handed_out: usize,
+}
+
+impl PageBudget {
+    fn new(max_memory_usage: usize) -> Self {
+        PageBudget {
+            total_pages: (max_memory_usage / MEM_PAGE_SIZE).max(MEM_MIN_PAGES_PER_QUEUE),
+            handed_out: 0,
+        }
+    }
+
+    /// Pages for a queue starting now.
+    ///
+    /// The floor is honoured even when the pot is empty. A queue below it
+    /// cannot drain, and refusing to start the queue would turn a memory
+    /// setting into an availability limit; overshooting by a floor's worth is
+    /// the lesser fault, and it says so in the log.
+    fn take_for_queue(&mut self) -> usize {
+        let remaining = self.total_pages.saturating_sub(self.handed_out);
+        // A quarter of the pot per queue, so the first few get a useful
+        // allowance and later ones still find something left. Any fixed
+        // fraction is a guess without knowing the queue count up front --
+        // moving pages on demand is what removes the need to guess.
+        let share = (self.total_pages / 4).clamp(MEM_MIN_PAGES_PER_QUEUE, MEM_MAX_PAGES);
+        let granted = share.min(remaining).max(MEM_MIN_PAGES_PER_QUEUE);
+        if granted > remaining {
+            log::warn!(
+                target: "normfs-mem",
+                "page budget exhausted: granting a new queue its floor of {} pages ({} KiB) \
+                 beyond the configured total, because a queue below the floor cannot drain",
+                granted,
+                granted * MEM_PAGE_SIZE / 1024,
+            );
+        }
+        self.handed_out += granted;
+        granted
+    }
 }
 
 // Entry ids are sequential counters that fit u64 for any real queue.
@@ -45,7 +105,9 @@ impl MemReadResult {
 
 pub struct MemStore {
     queues: RwLock<HashMap<QueueId, Arc<MemQueue>>>,
-    max_memory_usage: usize,
+    /// One pot of pages for every queue, so `max_memory_usage` is a total
+    /// rather than a per-queue allowance that each new queue re-derives.
+    budget: Mutex<PageBudget>,
 }
 
 struct Inner {
@@ -60,7 +122,8 @@ struct Inner {
 
 struct MemQueue {
     inner: RwLock<Inner>,
-    max_memory_usage: usize,
+    /// This queue's allotment from the process-wide budget, in pages.
+    pages: usize,
     /// Held across an append so the pool sees ids in order.
     append_gate: tokio::sync::Mutex<()>,
     subscribers: Mutex<HashMap<usize, SubscriberCallback>>,
@@ -68,12 +131,14 @@ struct MemQueue {
 }
 
 impl MemQueue {
-    pub fn new(last_id: Option<UintN>, max_memory_usage: usize) -> Self {
+    /// `pages` is this queue's allotment from the process-wide budget, not a
+    /// byte figure it re-derives for itself.
+    pub fn new(last_id: Option<UintN>, pages: usize) -> Self {
         // Allocated here, once, so the pool's footprint is fixed for the life
         // of the queue and the WAL writer can be handed the same one.
         let first_entry_id = last_id.as_ref().map_or(0, |id| id_to_u64(id).wrapping_add(1));
         let pool = Arc::new(PagePool::new(
-            ring_page_count(max_memory_usage),
+            pages.clamp(MEM_MIN_PAGES_PER_QUEUE, MEM_MAX_PAGES),
             MEM_PAGE_SIZE,
             first_entry_id,
         ));
@@ -83,7 +148,7 @@ impl MemQueue {
                 last_id,
                 last_acked_id: None,
             }),
-            max_memory_usage,
+            pages,
             append_gate: tokio::sync::Mutex::new(()),
             subscribers: Mutex::new(HashMap::new()),
             next_subscriber_id: Mutex::new(0),
@@ -101,14 +166,10 @@ impl MemQueue {
     // on the async path (`PagePool::append`), which is what `NormFS::enqueue`
     // will use; this synchronous one cannot block a runtime thread.
     fn cache_append(&self, inner: &mut Inner, id_u64: u64, data: &[u8]) {
-        let max_memory = self.max_memory_usage;
-        let pool = inner.pool.get_or_insert_with(|| {
-            Arc::new(PagePool::new(
-                ring_page_count(max_memory),
-                MEM_PAGE_SIZE,
-                id_u64,
-            ))
-        });
+        let pages = self.pages;
+        let pool = inner
+            .pool
+            .get_or_insert_with(|| Arc::new(PagePool::new(pages, MEM_PAGE_SIZE, id_u64)));
 
         // Once a file writer is draining this pool, whatever is in a page is
         // going to be written to the file from that page. A caller on this path
@@ -858,7 +919,7 @@ impl MemStore {
     pub fn new(max_memory_usage: usize) -> Self {
         MemStore {
             queues: RwLock::new(HashMap::new()),
-            max_memory_usage,
+            budget: Mutex::new(PageBudget::new(max_memory_usage)),
         }
     }
 
@@ -874,10 +935,14 @@ impl MemStore {
     pub fn start_queue(&self, queue: &QueueId, last_id: Option<UintN>) {
         let mut queues = self.queues.write().unwrap();
         if !queues.contains_key(queue) {
-            let queue_max_memory = self.max_memory_usage / queues.len().max(1);
-            log::debug!(target: "normfs-mem", "Starting queue '{}' with last_id: {:?}, max memory: {} bytes",
-                queue, last_id, queue_max_memory);
-            let new_queue = Arc::new(MemQueue::new(last_id, queue_max_memory));
+            // Pages come out of the one budget, so the total is bounded by the
+            // setting however many queues start. It used to be the setting
+            // divided by the queue count at this moment, which bounded nothing.
+            let pages = self.budget.lock().unwrap().take_for_queue();
+            log::debug!(target: "normfs-mem",
+                "Starting queue '{}' with last_id: {:?}, {} pages ({} KiB) from the shared budget",
+                queue, last_id, pages, pages * MEM_PAGE_SIZE / 1024);
+            let new_queue = Arc::new(MemQueue::new(last_id, pages));
             queues.insert(queue.clone(), new_queue);
         }
     }
