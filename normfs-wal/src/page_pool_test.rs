@@ -52,7 +52,7 @@ async fn append_waits_for_a_page_and_resumes_when_one_is_durable() {
 
     let waiter = {
         let pool = Arc::clone(&pool);
-        tokio::spawn(async move { pool.append(&RECORD).await })
+        tokio::spawn(async move { pool.append_at(n, &RECORD).await })
     };
 
     // Give the task real time on the runtime, then observe that it has not
@@ -66,12 +66,16 @@ async fn append_waits_for_a_page_and_resumes_when_one_is_durable() {
     // Reporting the first page durable frees it.
     pool.mark_durable(n);
 
-    let id = tokio::time::timeout(Duration::from_secs(5), waiter)
+    tokio::time::timeout(Duration::from_secs(5), waiter)
         .await
-        .expect("append should resume once a page is reclaimable")
+        .expect("append_at should resume once a page is reclaimable")
         .expect("task panicked")
-        .expect("append should succeed");
-    assert_eq!(id, n, "the waiting record keeps the next id in sequence");
+        .expect("append_at should succeed");
+    assert_eq!(
+        pool.next_entry_id(),
+        n + 1,
+        "the waiting record keeps the next id in sequence"
+    );
 }
 
 #[tokio::test]
@@ -106,9 +110,12 @@ async fn a_record_larger_than_a_page_fails_instead_of_waiting() {
     let pool = pool();
     let huge = vec![0u8; PAGE_SIZE * 2];
     // No amount of waiting would ever make room, so this must not block.
-    let outcome = tokio::time::timeout(Duration::from_secs(2), pool.append(&huge))
-        .await
-        .expect("TooLarge must not wait");
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        pool.append_at(pool.next_entry_id(), &huge),
+    )
+    .await
+    .expect("TooLarge must not wait");
     assert_eq!(outcome, Err(PoolError::TooLarge));
 }
 
@@ -128,7 +135,16 @@ async fn pending_yields_each_byte_once_and_in_id_order() {
         );
     }
 
-    // Taken once: a second call has nothing to give, so the writer cannot
+    // Not written yet, so it must come back: an untried write must not lose
+    // the run.
+    assert_eq!(pool.take_pending(), first, "an uncommitted run must stay pending");
+
+    // The writer commits each run once it is actually on disk.
+    for (w, _) in &first {
+        pool.commit_written(w.page_index, w.to);
+    }
+
+    // Committed once: a second call has nothing to give, so the writer cannot
     // append the same bytes to the file twice.
     assert!(pool.take_pending().is_empty());
 

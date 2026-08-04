@@ -96,6 +96,17 @@ pub struct PagePool {
     space: Notify,
 }
 
+/// Appends into the ring, resetting the write cursor on rotation into a page.
+fn append_locked(inner: &mut Inner, record: &[u8]) -> AppendOutcome {
+    let before = inner.ring.active_page();
+    let outcome = inner.ring.append(record);
+    let after = inner.ring.active_page();
+    if after != before {
+        inner.written[after] = 0;
+    }
+    outcome
+}
+
 impl PagePool {
     /// Allocates `page_count` pages of `page_size` bytes. This is the only
     /// allocation the pool ever performs.
@@ -126,15 +137,7 @@ impl PagePool {
     /// reader or still holds records that are not on disk.
     pub fn try_append(&self, record: &[u8]) -> AppendOutcome {
         let mut inner = self.inner.lock().unwrap();
-        let before = inner.ring.active_page();
-        let outcome = inner.ring.append(record);
-        // Rotating into a page means its previous contents are gone, and with
-        // them the writer's cursor: the run to write now starts at zero.
-        let after = inner.ring.active_page();
-        if after != before {
-            inner.written[after] = 0;
-        }
-        outcome
+        append_locked(&mut inner, record)
     }
 
     /// Appends the record that must land on `expected_id`, waiting until a
@@ -153,12 +156,7 @@ impl PagePool {
                     inner.ring.reinit(expected_id);
                     inner.written.iter_mut().for_each(|w| *w = 0);
                 }
-                let before = inner.ring.active_page();
-                let outcome = inner.ring.append(record);
-                let after = inner.ring.active_page();
-                if after != before {
-                    inner.written[after] = 0;
-                }
+                let outcome = append_locked(&mut inner, record);
                 match outcome {
                     AppendOutcome::Cached(_) => {
                         if waited {
@@ -204,37 +202,6 @@ impl PagePool {
         }
     }
 
-    /// Appends, waiting until a page can be reclaimed.
-    ///
-    /// Returns only once the record is in a page and has an id. It does not
-    /// wait for that page to reach disk — [`PagePool::mark_durable`] is what
-    /// reports that, later.
-    pub async fn append(&self, record: &[u8]) -> Result<u64, PoolError> {
-        let mut waited = false;
-        loop {
-            // Registered before the attempt: a `mark_durable` landing between
-            // the attempt and the await must not be missed, or the waiter
-            // sleeps until the next one and a quiet queue stalls forever.
-            let woken = self.space.notified();
-
-            match self.try_append(record) {
-                AppendOutcome::Cached(id) => {
-                    if waited {
-                        log::debug!(target: "normfs-wal", "page pool: resumed, entry {id} placed");
-                    }
-                    return Ok(id);
-                }
-                AppendOutcome::TooLarge => return Err(PoolError::TooLarge),
-                AppendOutcome::Full => {}
-            }
-
-            waited = true;
-            if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {
-                self.warn_stalled();
-            }
-        }
-    }
-
     /// Reports which page is holding the pool up, so an indefinite wait can be
     /// diagnosed instead of guessed at.
     fn warn_stalled(&self) {
@@ -273,8 +240,11 @@ impl PagePool {
     /// The bytes are copied out under the lock rather than borrowed: the writer
     /// awaits I/O, and holding the pool locked across that would block every
     /// appender for the duration of a disk write.
+    ///
+    /// Doesn't mark runs as taken — call [`PagePool::commit_written`] once a
+    /// run is actually on disk, or an uncommitted run just comes back here.
     pub fn take_pending(&self) -> Vec<(PendingWrite, Vec<u8>)> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
         let count = inner.ring.page_count();
         let mut out: Vec<(PendingWrite, Vec<u8>)> = Vec::new();
 
@@ -297,11 +267,19 @@ impl PagePool {
                 },
                 bytes,
             ));
-            inner.written[k] = used;
         }
 
         out.sort_by_key(|(w, _)| w.last_entry_id);
         out
+    }
+
+    /// Marks a run from [`PagePool::take_pending`] as written. Only moves the
+    /// cursor forward.
+    pub fn commit_written(&self, page_index: usize, up_to: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        if up_to > inner.written[page_index] {
+            inner.written[page_index] = up_to;
+        }
     }
 
     /// Records that every entry below `first_non_durable_id` is on disk, and
@@ -330,11 +308,6 @@ impl PagePool {
     /// Everything below this id is on disk.
     pub fn durable_before(&self) -> u64 {
         self.inner.lock().unwrap().ring.min_essential_id()
-    }
-
-    /// Runs `f` against the ring under the pool lock, for reads.
-    pub fn with_ring<T>(&self, f: impl FnOnce(&WalRing) -> T) -> T {
-        f(&self.inner.lock().unwrap().ring)
     }
 
     /// Whether the pool holds no records.
