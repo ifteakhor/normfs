@@ -431,16 +431,27 @@ impl PagePool {
     /// Steps the id sequence over a record the pool could not hold, without
     /// losing anything it is still holding.
     ///
-    /// Re-seeding drops whatever the pages contain, so it waits until the
-    /// writer has reported everything durable first. A record too large for a
-    /// page is rare, and paying a drain for it is the price of never dropping
-    /// one that was already accepted.
+    /// Re-seeding drops whatever the pages contain, so it waits until there is
+    /// nothing left to drop. A record too large for a page is rare, and paying
+    /// a drain for it is the price of never losing one that was accepted.
+    ///
+    /// "Nothing left to drop" is two cases, and only testing the second of them
+    /// deadlocks: a pool that holds nothing has nothing to lose, and a pool
+    /// whose every record is already durable has nothing to lose either.
+    /// `reinit` resets the watermark to zero while moving `next_entry_id`
+    /// forward, so after one oversized record the durability test alone can
+    /// never become true again — and when every record is oversized, nothing
+    /// ever enters a page, so nothing can ever report one durable to make it
+    /// true. That is a hang, not a failure. A 1 MiB record against a 256 KiB
+    /// page is the ordinary way in.
     pub async fn skip_to(&self, next_id: u64) {
         loop {
             let woken = self.space.notified();
             {
                 let mut inner = self.inner.lock().unwrap();
-                if inner.ring.min_essential_id() >= inner.ring.next_entry_id() {
+                let nothing_to_lose = inner.ring.is_empty()
+                    || inner.ring.min_essential_id() >= inner.ring.next_entry_id();
+                if nothing_to_lose {
                     inner.ring.reinit(next_id);
                     inner.written.iter_mut().for_each(|w| *w = 0);
                     return;

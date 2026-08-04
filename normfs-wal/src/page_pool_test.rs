@@ -435,3 +435,42 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
         "records enqueued after arming are written normally"
     );
 }
+
+/// Stepping over a record too large for a page must not wait for a page.
+///
+/// `skip_to` waits until the pool has nothing left to lose before it re-seeds.
+/// Testing that by the durable watermark alone hangs: `reinit` resets the
+/// watermark to zero while moving `next_entry_id` forward, so after one
+/// oversized record the watermark can never catch up -- and when every record
+/// is oversized nothing ever enters a page, so nothing can ever report one
+/// durable. An empty pool has nothing to lose and must proceed at once.
+#[tokio::test]
+async fn every_record_being_oversized_does_not_stall_the_queue() {
+    let pool = Arc::new(PagePool::new(PAGE_COUNT, PAGE_SIZE, 0));
+    pool.set_drainer();
+    pool.arm_file_fill(1 << 20, 16);
+
+    let huge = vec![0u8; PAGE_SIZE * 4];
+
+    // Ten in a row, each stepped over. Nothing reports anything durable,
+    // because nothing ever reaches a page.
+    let run = async {
+        for id in 0..10u64 {
+            pool.charge(huge.len() as u64);
+            assert_eq!(
+                pool.append_at(id, &huge).await,
+                Err(PoolError::TooLarge),
+                "a record larger than a page is never cached"
+            );
+            pool.skip_to(id + 1).await;
+            assert_eq!(
+                pool.next_entry_id(),
+                id + 1,
+                "the id sequence steps over the record the pool refused"
+            );
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("stepping over oversized records must not wait for a page");
+}
