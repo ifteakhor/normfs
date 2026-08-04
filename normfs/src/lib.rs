@@ -742,11 +742,15 @@ impl NormFS {
                     header,
                     wal_settings.clone(),
                     last_entry_id.clone(),
-                    // Still None. write_maybe_pooled exists but writer.rs
-                    // does not yet carry the in-pool flag from the enqueue
-                    // path, so every record would be buffered *and* written
-                    // from its page -- duplicates in the file. Threading that
-                    // one bool through WalStore::enqueue is what remains.
+                    // Not live. The flag now reaches write_maybe_pooled, but
+                    // the pool is filled at enqueue time while rotation is
+                    // decided later, in the writer: the bytes of the record
+                    // that triggers a rotation are already in a page, so
+                    // closing the old file flushes them into it and the new
+                    // file gets them again. Rotation has to drain the pool at
+                    // the entry boundary it chose before this can be
+                    // Some(pool) -- the recovery read-back tests are what
+                    // catch it.
                     None,
                 )
                 .await?;
@@ -798,12 +802,12 @@ impl NormFS {
     /// not yet on disk. That wait is the back-pressure: the queue declines to
     /// run ahead of the disk rather than dropping what it already took.
     pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
-        let (entry_id, _cached) = self.mem.enqueue_awaiting(queue, data.clone()).await;
+        let (entry_id, cached) = self.mem.enqueue_awaiting(queue, data.clone()).await;
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
             queue, entry_id, data.len());
 
-        self.wal.enqueue(queue, entry_id.clone(), data)?;
+        self.wal.enqueue_pooled(queue, entry_id.clone(), data, cached)?;
 
         log::trace!(target: "normfs", "Entry enqueued successfully - Queue: '{}', Entry ID: {}", queue, entry_id);
 
@@ -824,10 +828,13 @@ impl NormFS {
                 queue, first_id, last_id);
         }
 
-        let wal_entries: Vec<(UintN, Bytes)> = entry_ids
+        // The batch path still uses the synchronous cache, so no record here
+        // is guaranteed to be in a page: every one is buffered, as before.
+        let wal_entries: Vec<(UintN, Bytes, bool)> = entry_ids
             .iter()
             .cloned()
             .zip(data.iter().cloned())
+            .map(|(id, d)| (id, d, false))
             .collect();
 
         self.wal.enqueue_batch(queue, wal_entries)?;
