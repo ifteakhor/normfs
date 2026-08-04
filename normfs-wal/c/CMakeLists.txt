@@ -82,10 +82,23 @@ if(FRAMAC)
         normfs_wal_page_unpin
         normfs_wal_page_reusable)
 
-    # try_append and rotate_to are excluded: re-establishing every page's
-    # page_wf after a mutation is a nested-quantifier frame over the offset
-    # tables that the automatic provers do not discharge. Both are covered by
-    # the WalRing Rust tests; the read and setup primitives are proven here.
+    # try_append is excluded: its assigns includes
+    # ring->pages[ring->active].buf[0 .. page_size - 1], so re-establishing
+    # every other page's offsets_wf needs the pairwise buffer separation, and
+    # re-establishing the active page's own needs byte-level reasoning about
+    # the offset table -- a nested-quantifier frame the automatic provers do
+    # not discharge.
+    #
+    # rotate_to is excluded for a different and much narrower reason, and this
+    # list is where it will stop being excluded. It assigns no buffer bytes at
+    # all, so every page's offset table is outside its frame; scheduled on its
+    # own it reaches 29 of 30 goals with smoke 3/3. The one left open is
+    # normfs_wal_ring_sep -- transporting the quadratic pairwise buffer
+    # separation across the call -- not anything about page_wf. See the note on
+    # the contract in wal_ring.h.
+    #
+    # Both are covered by the WalRing Rust tests meanwhile; the read and setup
+    # primitives are proven here.
     set(NORMFS_WAL_RING_WP_FCTS
         normfs_wal_ring_init
         normfs_wal_ring_set_essential

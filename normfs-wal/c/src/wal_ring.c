@@ -2,9 +2,10 @@
 
 void
 normfs_wal_ring_init(struct normfs_wal_ring *ring, struct normfs_wal_page *pages,
-    size_t page_count, size_t page_size, uint64_t first_entry_id)
+    uint8_t *arena, size_t page_count, size_t page_size, uint64_t first_entry_id)
 {
 	ring->pages = pages;
+	ring->arena = arena;
 	ring->page_count = page_count;
 	ring->page_size = page_size;
 	ring->active = 0u;
@@ -84,6 +85,37 @@ normfs_wal_ring_rotate_to(struct normfs_wal_ring *ring, size_t index)
 	    ring->next_entry_id);
 	ring->next_page_id = ring->next_page_id + 1u;
 	ring->active = index;
+
+	/* Frame hints, at the end so they stand immediately before the
+	 * postcondition that consumes them.
+	 *
+	 * page_reset assigns five scalar fields of one page and no buffer bytes
+	 * at all, so every other page is untouched and every page's buffer --
+	 * where the offset table lives -- is untouched. Both facts follow from
+	 * the assigns clause, but re-establishing ring_wf needs the \forall over
+	 * pages split into the reset page and the rest, and WP does not split it
+	 * on its own. Naming the two cases is what lets it. */
+	/*@ assert reset_page_wf: normfs_wal_page_wf(&ring->pages[index]); */
+	/*@ assert buffers_unmoved:
+	      \forall integer k; 0 <= k < ring->page_count ==>
+	        ring->pages[k].buf == \at(ring->pages[k].buf, Pre) &&
+	        ring->pages[k].cap == \at(ring->pages[k].cap, Pre); */
+	/*@ assert pages_wf_holds: normfs_wal_ring_pages_wf(ring); */
+
+	/* Separation is a statement about addresses, and rotation moves none:
+	 * pages, page_count and page_size are not assigned, and buffers_unmoved
+	 * above carries every page's buf across. Stated one conjunct at a time
+	 * because the last is quadratic and does not survive being asked for all
+	 * at once. */
+	/*@ assert sep_ring_pages:
+	      \separated(ring, ring->pages + (0 .. ring->page_count - 1)); */
+	/*@ assert sep_page_buf:
+	      \forall integer k; 0 <= k < ring->page_count ==>
+	        \separated(&ring->pages[k],
+	                   ring->pages[k].buf + (0 .. ring->page_size - 1)) &&
+	        \separated(ring, ring->pages[k].buf + (0 .. ring->page_size - 1)) &&
+	        \separated(ring->pages + (0 .. ring->page_count - 1),
+	                   ring->pages[k].buf + (0 .. ring->page_size - 1)); */
 }
 
 struct normfs_wal_ring_seek_result
