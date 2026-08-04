@@ -7,9 +7,9 @@
 #include "normfs/wal_page.h"
 
 /*
- * A ring of WAL pages. Rust allocates one byte buffer per page, initialises
- * each page descriptor (normfs_wal_page_init) on its own buffer, and hands the
- * array to normfs_wal_ring_init; C never allocates.
+ * A ring of WAL pages. Rust allocates one arena of page_count * page_size
+ * bytes, initialises each page descriptor (normfs_wal_page_init) over its own
+ * slice of it, and hands both to normfs_wal_ring_init; C never allocates.
  *
  * The ring exposes primitives that each touch a single page, so their frames
  * stay precise; Rust sequences them:
@@ -22,8 +22,8 @@
  *       r = try_append(record)     // an empty page always has room
  *
  * Entry ids run sequentially across pages; the id of the next entry is
- * next_entry_id. Distinct pages own disjoint buffers, so each page keeps its
- * own page_wf independently.
+ * next_entry_id. Page k is the arena slice at k * page_size, so distinct pages
+ * are disjoint by arithmetic and each keeps its own page_wf independently.
  */
 
 enum normfs_wal_ring_status {
@@ -234,20 +234,19 @@ normfs_wal_ring_try_append(struct normfs_wal_ring *ring, const uint8_t *record,
 struct normfs_wal_ring_reusable_result
 normfs_wal_ring_find_reusable(struct normfs_wal_ring *ring);
 
-/* rotate_to is not WP-verified, but not for the reason try_append is not, and
- * it is much closer than that note suggests. Scheduled on its own it reaches
- * 29 of 30 goals with smoke 3/3, including every clause below: the frame is
- * fine, because its only callee page_reset assigns five scalar fields and no
- * buffer bytes at all, so no page's offset table is in its footprint. The
- * three asserts in the body are what let WP split ring_wf's quantifier over
- * pages into the reset page and the rest.
+/* This is the one place a page's contents are discarded, which makes it the
+ * one place the durability theorem is used -- see the `requires` and the
+ * page-intactness `ensures` below.
  *
- * The one goal left open is normfs_wal_ring_sep: transporting the *pairwise*
- * buffer separation -- the quadratic \forall j,k -- across the call defeats
- * the automatic provers, even though every term in it is provably unchanged
- * (see the buffers_unmoved assert). That is what has to be closed before this
- * can join the -wp-fct list in CMakeLists.txt, and until it is, this contract
- * is a specification rather than a verdict. */
+ * It is WP-verified. That took two things. Its only callee, page_reset,
+ * assigns five scalar fields and no buffer bytes at all, so no page's offset
+ * table is in its footprint and the frame is precise; the asserts in the body
+ * are what let WP split ring_wf's quantifier over pages into the reset page
+ * and the rest. And separation had to stop being quantified: while each page
+ * owned an independent buffer, re-establishing ring_sep meant transporting a
+ * \forall over every *pair* of buffers across the call, which the automatic
+ * provers would not do. Laying the pages over one arena made that arithmetic
+ * instead (see normfs_wal_ring_layout), and it was the last goal to fall. */
 /*@ requires normfs_wal_ring_wf(ring);
     requires index < ring->page_count;
     // The durability theorem, at its one point of use: this is the only place
@@ -274,6 +273,38 @@ normfs_wal_ring_find_reusable(struct normfs_wal_ring *ring);
     ensures ring->active == index && ring->pages[index].count == 0;
     ensures ring->pages[index].first_entry_id == \old(ring->next_entry_id);
     ensures ring->next_entry_id == \old(ring->next_entry_id);
+
+    // The durability theorem as an obligation rather than a decoration.
+    //
+    // A `requires` on an entry point is an assumption: WP proves the body
+    // under it and no C caller exists to discharge it, so on its own it is a
+    // comment with a syntax checker. This clause is what makes it carry
+    // weight -- it says every page that was *not* reusable before the call is
+    // byte-for-byte unchanged after it. At k != index that follows from the
+    // frame. At k == index the conclusion is false, because that page was
+    // just reset, so the only way to discharge the implication is to refute
+    // its antecedent -- which is exactly normfs_wal_ring_reuse_is_safe above.
+    //
+    // Delete that `requires` and this goal must go red. That is the check
+    // that says the theorem is doing something.
+    ensures \forall integer k; 0 <= k < ring->page_count ==>
+              ( \at(ring->pages[k].pin_count, Pre) != 0 ||
+                ( \at(ring->pages[k].count, Pre) != 0 &&
+                  \at(ring->pages[k].last_entry_id, Pre) >=
+                    \at(ring->min_essential_id, Pre) ) )
+              ==>
+              ( ring->pages[k].used_bytes ==
+                  \at(ring->pages[k].used_bytes, Pre) &&
+                ring->pages[k].count == \at(ring->pages[k].count, Pre) &&
+                ring->pages[k].first_entry_id ==
+                  \at(ring->pages[k].first_entry_id, Pre) &&
+                ring->pages[k].last_entry_id ==
+                  \at(ring->pages[k].last_entry_id, Pre) );
+
+    // Free from the frame, and states the other half: rotation never drops a
+    // reader's pin.
+    ensures \forall integer k; 0 <= k < ring->page_count ==>
+              ring->pages[k].pin_count == \at(ring->pages[k].pin_count, Pre);
 */
 void normfs_wal_ring_rotate_to(struct normfs_wal_ring *ring, size_t index);
 

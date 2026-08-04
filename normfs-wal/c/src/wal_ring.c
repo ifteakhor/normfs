@@ -102,20 +102,12 @@ normfs_wal_ring_rotate_to(struct normfs_wal_ring *ring, size_t index)
 	        ring->pages[k].cap == \at(ring->pages[k].cap, Pre); */
 	/*@ assert pages_wf_holds: normfs_wal_ring_pages_wf(ring); */
 
-	/* Separation is a statement about addresses, and rotation moves none:
-	 * pages, page_count and page_size are not assigned, and buffers_unmoved
-	 * above carries every page's buf across. Stated one conjunct at a time
-	 * because the last is quadratic and does not survive being asked for all
-	 * at once. */
-	/*@ assert sep_ring_pages:
-	      \separated(ring, ring->pages + (0 .. ring->page_count - 1)); */
-	/*@ assert sep_page_buf:
-	      \forall integer k; 0 <= k < ring->page_count ==>
-	        \separated(&ring->pages[k],
-	                   ring->pages[k].buf + (0 .. ring->page_size - 1)) &&
-	        \separated(ring, ring->pages[k].buf + (0 .. ring->page_size - 1)) &&
-	        \separated(ring->pages + (0 .. ring->page_count - 1),
-	                   ring->pages[k].buf + (0 .. ring->page_size - 1)); */
+	/* Separation needs no hint of its own now. It is three statements about
+	 * base pointers -- the ring, the descriptor array and the arena -- and
+	 * rotation assigns none of them, so it survives by frame. This is what
+	 * the arena bought: before it, sep quantified over every pair of page
+	 * buffers, and transporting that across the call was the one goal that
+	 * would not discharge. */
 }
 
 struct normfs_wal_ring_seek_result
