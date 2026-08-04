@@ -87,16 +87,36 @@ async fn flush_pool(
     let mut durable_through: Option<u64> = None;
     let mut file_guard = file.lock().await;
     for (write, bytes) in &pending {
-        if let Err(e) = file_guard.write_all(bytes).await {
+        let mut written = false;
+        for attempt in 0..MAX_RETRIES {
+            if let Err(e) = file_guard.write_all(bytes).await {
+                log::error!(
+                    target: "normfs",
+                    "Failed to write page {} to {} (attempt {}/{}): {}",
+                    write.page_index,
+                    path.display(),
+                    attempt + 1,
+                    MAX_RETRIES,
+                    e
+                );
+                if attempt < MAX_RETRIES - 1 {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                continue;
+            }
+            written = true;
+            break;
+        }
+        if !written {
             log::error!(
                 target: "normfs",
-                "Failed to write page {} to {}: {}",
+                "All attempts to write page {} to {} failed; it stays pending for the next flush",
                 write.page_index,
-                path.display(),
-                e
+                path.display()
             );
             break;
         }
+        pool.commit_written(write.page_index, write.to);
         durable_through = Some(write.last_entry_id);
     }
 
