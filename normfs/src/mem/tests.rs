@@ -552,9 +552,11 @@ async fn test_channel_closed_unsubscribes() {
 
 #[tokio::test]
 async fn test_bounded_cache_drops_old_unacked_and_falls_back() {
-    // A tiny budget gives a single 256 KiB page. Three ~100 KiB records
-    // overflow it: with the first two unacked, the third forces the cache to
-    // drop them, so it holds only the newest and older ids fall back to file.
+    // A tiny budget still gives a queue its floor -- two 256 KiB pages, one to
+    // append into and one for the writer to drain -- so the cache holds about
+    // 512 KiB. Enough ~100 KiB records to overflow that force the oldest out
+    // while nothing is acked, so the newest is held and older ids fall back to
+    // file.
     let mem = Arc::new(MemStore::new(300));
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("bounded_queue");
@@ -562,17 +564,57 @@ async fn test_bounded_cache_drops_old_unacked_and_falls_back() {
 
     let big = Bytes::from(vec![7u8; 100 * 1024]);
     let id0 = mem.enqueue(&queue, big.clone());
-    let _id1 = mem.enqueue(&queue, big.clone());
-    let id2 = mem.enqueue(&queue, big.clone());
+    let mut newest = id0.clone();
+    for _ in 0..7 {
+        newest = mem.enqueue(&queue, big.clone());
+    }
 
     // Newest id is cached and served from memory.
     let (tx, mut rx) = mpsc::channel(10);
-    let hit = mem.read_full(&queue, id2.clone(), id2.clone(), 1, &tx).await;
+    let hit = mem
+        .read_full(&queue, newest.clone(), newest.clone(), 1, &tx)
+        .await;
     assert!(hit.success, "newest entry should be served from memory");
-    assert_eq!(rx.try_recv().unwrap().id, id2);
+    assert_eq!(rx.try_recv().unwrap().id, newest);
 
     // The oldest id was evicted, so the read reports a memory miss (file fallback).
     let (tx2, _rx2) = mpsc::channel(10);
-    let miss = mem.read_full(&queue, id0.clone(), id2.clone(), 1, &tx2).await;
+    let miss = mem
+        .read_full(&queue, id0.clone(), newest.clone(), 1, &tx2)
+        .await;
     assert!(!miss.success, "evicted entry should miss memory and fall back to file");
+}
+
+#[tokio::test]
+async fn the_page_budget_is_a_total_across_queues() {
+    // The old code read `max_memory_usage / queues.len()` *before* inserting
+    // the queue, so the first queue took the whole budget and every later one
+    // allocated again on top: the setting bounded nothing, and total memory
+    // grew with the queue count. Pages now come out of one pot.
+    let budget_bytes = 64 * 256 * 1024; // 64 pages
+    let mem = Arc::new(MemStore::new(budget_bytes));
+    let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
+
+    let queues = 12usize;
+    let mut total_pages = 0usize;
+    for i in 0..queues {
+        let queue = resolver.resolve(&format!("q{i}"));
+        mem.start_queue(&queue, None);
+        total_pages += mem
+            .pool(&queue)
+            .expect("a started queue has a pool")
+            .with_ring(|ring| ring.page_count());
+    }
+
+    // Every queue keeps its floor, so many queues can still exceed the pot --
+    // but by a floor each, not by a whole budget each.
+    let floor_total = queues * 2;
+    assert!(
+        total_pages <= 64 + floor_total,
+        "{queues} queues took {total_pages} pages against a 64-page budget: not a total"
+    );
+    assert!(
+        total_pages >= floor_total,
+        "every queue must get at least its floor, got {total_pages} for {queues} queues"
+    );
 }
