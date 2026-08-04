@@ -72,6 +72,7 @@ unsafe extern "C" {
     fn normfs_wal_page_entry_id(page: *mut CWalPage, index: u32) -> u64;
     fn normfs_wal_page_pin(page: *mut CWalPage);
     fn normfs_wal_page_unpin(page: *mut CWalPage);
+    fn normfs_wal_page_reusable(page: *const CWalPage, min_essential_id: u64) -> c_int;
 
     fn normfs_wal_ring_init(
         ring: *mut CWalRing,
@@ -181,7 +182,7 @@ impl WalRing {
             Some(k) => k,
             None => return AppendOutcome::Full,
         };
-        unsafe { normfs_wal_ring_rotate_to(self.ring.as_mut(), idx) };
+        self.rotate_into(idx);
 
         let second = unsafe { normfs_wal_ring_try_append(self.ring.as_mut(), ptr, size) };
         match second.status {
@@ -189,6 +190,57 @@ impl WalRing {
             RING_TOO_LARGE => AppendOutcome::TooLarge,
             _ => AppendOutcome::Full,
         }
+    }
+
+    /// Appends onto a page that holds nothing else, rotating first rather than
+    /// trying the active page.
+    ///
+    /// This is [`WalRing::append`] with the first `try_append` skipped, and it
+    /// exists so a caller can guarantee a record starts a page: the WAL file
+    /// writer needs a page's bytes to belong to exactly one file, and the entry
+    /// that opens a new file is the one that must not share a page with the
+    /// entries that closed the previous one.
+    pub fn append_on_fresh_page(&mut self, record: &[u8]) -> AppendOutcome {
+        if record.len() > u32::MAX as usize {
+            return AppendOutcome::TooLarge;
+        }
+        let idx = match self.oldest_reclaimable_page() {
+            Some(k) => k,
+            None => return AppendOutcome::Full,
+        };
+        self.rotate_into(idx);
+
+        let r = unsafe {
+            normfs_wal_ring_try_append(self.ring.as_mut(), record.as_ptr(), record.len() as u32)
+        };
+        match r.status {
+            RING_OK => AppendOutcome::Cached(r.entry_id),
+            RING_TOO_LARGE => AppendOutcome::TooLarge,
+            _ => AppendOutcome::Full,
+        }
+    }
+
+    /// Discards page `index` and makes it active.
+    ///
+    /// `normfs_wal_ring_rotate_to` requires the page to be reusable — nothing
+    /// pinning it, and nothing on it below the durable watermark. That
+    /// precondition is the durability theorem at its one point of use, and the
+    /// choice of page is made by [`WalRing::oldest_reclaimable_page`], which is
+    /// Rust and unproven. So the choice is checked here against
+    /// `normfs_wal_page_reusable`, whose contract is
+    /// `\result != 0 <==> normfs_wal_page_is_reusable(page, m)` and which is
+    /// proven — the check is the proven predicate itself, not a restatement of
+    /// it. `assigns \nothing`, so the shared page reference may be handed over
+    /// as a raw pointer.
+    fn rotate_into(&mut self, index: usize) {
+        debug_assert!(index < self.pages.len(), "rotate target out of range");
+        debug_assert!(
+            unsafe {
+                normfs_wal_page_reusable(&self.pages[index], self.ring.min_essential_id) != 0
+            },
+            "rotating into page {index}, which is pinned or holds records that are not yet durable"
+        );
+        unsafe { normfs_wal_ring_rotate_to(self.ring.as_mut(), index) };
     }
 
     /// Picks the page to rotate into: an empty page if any, otherwise the
@@ -336,6 +388,18 @@ impl WalRing {
         self.ring.next_entry_id
     }
 
+    /// The id the next rotation will stamp on the page it takes.
+    ///
+    /// `normfs_wal_ring_rotate_to` increments this on every rotation and
+    /// nothing else touches it, so a change across an append is an exact
+    /// rotation detector. Comparing the active index instead misses the case
+    /// where the ring rotates into the page that was already active — legal
+    /// when that page is empty or fully durable — which resets its bytes while
+    /// leaving a stale write cursor behind.
+    pub fn next_page_id(&self) -> u64 {
+        self.ring.next_page_id
+    }
+
     /// Number of pages in the ring.
     pub fn page_count(&self) -> usize {
         self.pages.len()
@@ -366,6 +430,12 @@ impl WalRing {
     pub fn page_last_entry_id(&self, page_index: usize) -> Option<u64> {
         let p = &self.pages[page_index];
         (p.count > 0).then_some(p.last_entry_id)
+    }
+
+    /// The first entry id on page `page_index`, or `None` if it is empty.
+    pub fn page_first_entry_id(&self, page_index: usize) -> Option<u64> {
+        let p = &self.pages[page_index];
+        (p.count > 0).then_some(p.first_entry_id)
     }
 
     /// How many readers currently hold page `page_index`.
