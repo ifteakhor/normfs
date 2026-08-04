@@ -838,8 +838,7 @@ impl NormFS {
                 queue, first_id, last_id);
         }
 
-        // The batch path still uses the synchronous cache, so no record here
-        // is guaranteed to be in a page: every one is buffered, as before.
+        // Batch never waits on the pool, unlike enqueue; everything here is buffered.
         let wal_entries: Vec<(UintN, Bytes, bool)> = entry_ids
             .iter()
             .cloned()
