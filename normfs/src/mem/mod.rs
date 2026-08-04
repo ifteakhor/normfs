@@ -10,6 +10,9 @@ use uintn::UintN;
 // Geometry of the in-memory paged store. A record larger than a page is not
 // cached and is served from file; the ring caps a queue's cache at
 // MEM_MAX_PAGES pages.
+//
+// clamp(1, ..) floors every queue at one full page, even below its fair
+// share — see the log::warn in start_queue.
 const MEM_PAGE_SIZE: usize = 256 * 1024;
 const MEM_MAX_PAGES: usize = 64;
 
@@ -17,8 +20,10 @@ fn ring_page_count(max_memory_usage: usize) -> usize {
     (max_memory_usage / MEM_PAGE_SIZE).clamp(1, MEM_MAX_PAGES)
 }
 
-// Entry ids are sequential counters that fit u64 for any real queue.
+// Entry ids are sequential counters that fit u64 for any real queue; the
+// fallback is defensive only (cache_append saturates on it, never wraps).
 fn id_to_u64(id: &UintN) -> u64 {
+    debug_assert!(id.to_u64().is_ok(), "WAL entry id {} does not fit u64", id);
     id.to_u64().unwrap_or(u64::MAX)
 }
 
@@ -99,11 +104,13 @@ impl MemQueue {
             AppendOutcome::Full => {
                 ring.reinit(id_u64);
                 if !matches!(ring.append(data), AppendOutcome::Cached(_)) {
-                    ring.reinit(id_u64.wrapping_add(1));
+                    // saturating: a wrapping add on id_to_u64's MAX fallback
+                    // would resume caching at id 0, colliding with real ids.
+                    ring.reinit(id_u64.saturating_add(1));
                 }
             }
             AppendOutcome::TooLarge => {
-                ring.reinit(id_u64.wrapping_add(1));
+                ring.reinit(id_u64.saturating_add(1));
             }
         }
     }
@@ -721,6 +728,14 @@ impl MemStore {
         let mut queues = self.queues.write().unwrap();
         if !queues.contains_key(queue) {
             let queue_max_memory = self.max_memory_usage / queues.len().max(1);
+            // Below MEM_PAGE_SIZE the queue still reserves a full page, so
+            // total memory can exceed max_memory_usage with enough queues.
+            if queue_max_memory < MEM_PAGE_SIZE {
+                log::warn!(target: "normfs-mem",
+                    "Queue '{}' fair share ({} bytes) is below the {} byte page \
+                     floor; total memory usage may exceed max_memory_usage",
+                    queue, queue_max_memory, MEM_PAGE_SIZE);
+            }
             log::debug!(target: "normfs-mem", "Starting queue '{}' with last_id: {:?}, max memory: {} bytes",
                 queue, last_id, queue_max_memory);
             let new_queue = Arc::new(MemQueue::new(last_id, queue_max_memory));
