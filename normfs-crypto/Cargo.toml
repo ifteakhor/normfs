@@ -12,7 +12,6 @@ description = "Cryptographic primitives for NormFS (AES-256-GCM encryption, Ed25
 normfs-types = { version = "0.2.0-beta.0", path = "../normfs-types" }
 uintn = { version = "0.2.0-beta.0", path = "../uintn-rs" }
 bytes = "1"
-getrandom = { version = "0.2", default-features = false, features = ["std"] }
 rand_chacha = { version = "0.3", default-features = false }
 rand_core = { version = "0.6", default-features = false }
 zeroize = { version = "1.8", default-features = false, features = ["derive"] }
@@ -20,6 +19,9 @@ hkdf = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "rand_core"] }
+
+[build-dependencies]
+cc = "1"
 
 [dev-dependencies]
 tempfile = "3"
