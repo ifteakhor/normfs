@@ -57,6 +57,13 @@ if(FRAMAC)
     # both LP64, so one model covers them. Naming it still beats the default,
     # which is not the same across Frama-C versions.
 
+    # Per-goal prover budget. The slowest goal here is rotate_to
+    # re-establishing every page's well-formedness after a rotation: tens of
+    # seconds on a fast machine, several times that on a slow one. A budget
+    # sized to the fast machine turns a hardware difference into a failed
+    # proof, so it is set for the slow one.
+    set(NORMFS_WP_TIMEOUT 900 CACHE STRING "Per-goal WP prover timeout, seconds")
+
     set(NORMFS_WAL_HEADER_WP_FCTS
         normfs_uintn_le64_read
         normfs_uintn_le64_write
@@ -125,7 +132,7 @@ if(FRAMAC)
             COMMAND ${FRAMAC}
                 -machdep gcc_x86_64
                 -wp-report-json ${CMAKE_CURRENT_BINARY_DIR}/${target}.json
-                -wp -wp-rte -wp-timeout 240
+                -wp -wp-rte -wp-timeout ${NORMFS_WP_TIMEOUT}
                 -wp-prover alt-ergo,z3
                 -wp-par ${NPROC}
                 -wp-cache none
