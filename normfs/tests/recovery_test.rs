@@ -2680,3 +2680,83 @@ async fn test_read_empty_queue_absolute() {
 
     fs.close().await.unwrap();
 }
+
+/// Records written as pages must read back in id order across file rotations.
+///
+/// This is the end-to-end form of the trap the page pool was switched off for.
+/// The pool is filled at enqueue time but a file is closed later, so unless the
+/// rotation draws its boundary before the bytes enter a page -- and unless the
+/// closing flush stops at that boundary -- the record that opens a file is
+/// written into the previous one instead. V1 stores no entry id; the reader
+/// derives it from `num_entries_before + index`, so the result is not a missing
+/// record but every later record answering to the wrong id.
+///
+/// The payload is checked per id, not just the count. A count-only assertion
+/// passes under duplication-plus-truncation, which is exactly the failure this
+/// test exists to catch.
+#[tokio::test]
+async fn pooled_rotation_reads_back_in_id_order() {
+    const COUNT: usize = 200;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+
+    let mut settings = NormFsSettings::default();
+    // Small enough that 200 records rotate many times.
+    settings.wal_settings.max_file_size = 1024;
+
+    let payload = |i: usize| Bytes::from(format!("entry-{i:04}-{}", "x".repeat(48)));
+
+    let instance_id = {
+        let fs = NormFS::new(path.clone(), settings.clone()).await.unwrap();
+        let queue_id = fs.resolve("rotating-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+
+        for i in 0..COUNT {
+            let id = fs.enqueue(&queue_id, payload(i)).await.unwrap();
+            assert_eq!(id, UintN::from(i as u64), "ids must be dense and in order");
+        }
+        let instance_id = fs.get_instance_id().to_string();
+        fs.close().await.unwrap();
+        instance_id
+    };
+
+    // More than one file, or the test proves nothing about rotation.
+    let resolver = QueueIdResolver::new(&instance_id);
+    let wal_dir = get_queue_wal_path(&path, &resolver.resolve("rotating-queue"));
+    let files = std::fs::read_dir(&wal_dir).unwrap().count();
+    assert!(
+        files > 1,
+        "expected the queue to have rotated, found {files} file(s) in {}",
+        wal_dir.display()
+    );
+
+    let fs = NormFS::new(path.clone(), settings).await.unwrap();
+    let queue_id = fs.resolve("rotating-queue");
+    fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+
+    let (tx, mut rx) = mpsc::channel(COUNT + 16);
+    fs.read(
+        &queue_id,
+        ReadPosition::Absolute(UintN::zero()),
+        COUNT as u64,
+        1,
+        tx,
+    )
+    .await
+    .unwrap();
+    let entries = drain_entries(&mut rx, COUNT).await;
+
+    assert_eq!(entries.len(), COUNT, "every record must read back");
+    for (i, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.id, UintN::from(i as u64), "id at position {i}");
+        assert_eq!(
+            entry.data,
+            payload(i),
+            "entry {i} carries the payload of a different record: the file boundary and the \
+             page boundary disagree"
+        );
+    }
+
+    fs.close().await.unwrap();
+}

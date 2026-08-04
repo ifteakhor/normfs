@@ -63,6 +63,8 @@ pub struct AckFileWriter {
 async fn flush_pool(
     path: &Path,
     file: &Arc<Mutex<File>>,
+    state: &Arc<Mutex<WriterState>>,
+    ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: &Arc<PagePool>,
     fsync: bool,
 ) {
@@ -118,6 +120,35 @@ async fn flush_pool(
     drop(file_guard);
 
     pool.mark_durable(last.saturating_add(1));
+
+    // The acks belong here too. `write_maybe_pooled` records one per entry
+    // whether or not the bytes were buffered, but only `flush_buffer` used to
+    // drain them — and it returns early on an empty buffer, which on the pooled
+    // path it always is. So without this the list grows without bound and the
+    // memory store is never told anything reached disk.
+    //
+    // Only entries this flush actually made durable, and only the last of them:
+    // the ack is a watermark, and the reader of this channel takes the highest
+    // it has seen.
+    let ack = {
+        let mut state_guard = state.lock().await;
+        let cut = state_guard
+            .acks
+            .iter()
+            .position(|(_, id)| !id.to_u64().is_ok_and(|v| v <= last))
+            .unwrap_or(state_guard.acks.len());
+        let mut done: Vec<(QueueId, UintN)> = state_guard.acks.drain(0..cut).collect();
+        done.pop()
+    };
+    if let Some(ack) = ack
+        && ack_sender.send(ack).is_err()
+    {
+        log::error!(
+            target: "normfs",
+            "Failed to report entries in {} durable: the ack channel is closed",
+            path.display(),
+        );
+    }
 }
 
 const MAX_RETRIES: u32 = 1000;
@@ -183,12 +214,7 @@ impl AckFileWriter {
         state.current_size + (size as u64) <= self.settings.max_file_size
     }
 
-    /// Records that an entry belongs to this file.
-    ///
-    /// With a pool, the bytes are already in a page and are not copied here:
-    /// this only keeps the accounting that decides when the file is full, so
-    /// rotation still happens at the same point it always did. Without one,
-    /// the entry is buffered as before.
+    /// Records that an entry belongs to this file, buffering its bytes.
     pub async fn write(&self, queue_id: QueueId, entry_id: UintN, entry: Bytes) {
         self.write_maybe_pooled(queue_id, entry_id, entry, false).await
     }
@@ -196,6 +222,13 @@ impl AckFileWriter {
     /// `in_pool` says the record is already in a page, so its bytes reach the
     /// file from there. Anything else still has to be buffered, or a record the
     /// pool refused -- one larger than a page -- would reach no file at all.
+    ///
+    /// A pooled record is not counted into `current_size` either. That counter
+    /// exists only to answer `can_add`, and `can_add` is not consulted on the
+    /// pooled path: the pool decides rotation, because it is the only side that
+    /// runs before the bytes enter a page. Keeping a second, unread counter in
+    /// step with the pool's would be a source of drift and no source of truth,
+    /// so there is exactly one fill accounting per path and they never meet.
     pub async fn write_maybe_pooled(
         &self,
         queue_id: QueueId,
@@ -207,9 +240,9 @@ impl AckFileWriter {
 
         if !(self.pooled && in_pool) {
             state.buffer.extend_from_slice(&entry);
+            state.current_size += entry.len() as u64;
         }
         state.acks.push((queue_id, entry_id));
-        state.current_size += entry.len() as u64;
 
         if state.buffer.len() >= self.settings.max_buffer_size {
             self.buffer_full_notify.notify_one();
@@ -271,7 +304,7 @@ async fn flush(
     // hold, and this order is the id order the reader depends on.
     flush_buffer(path, file, state, ack_sender, fsync).await;
     if let Some(pool) = pool {
-        flush_pool(path, file, pool, fsync).await;
+        flush_pool(path, file, state, ack_sender, pool, fsync).await;
     }
 }
 

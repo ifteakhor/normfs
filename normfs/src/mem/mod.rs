@@ -4,7 +4,7 @@ use tokio::sync::mpsc::Sender;
 
 use bytes::Bytes;
 use normfs_types::{DataSource, QueueId, ReadEntry, SubscriberCallback};
-use normfs_wal::{AppendOutcome, PagePool};
+use normfs_wal::{AppendOutcome, PagePool, Placement, RotateHint};
 use uintn::UintN;
 
 // Geometry of the in-memory paged store. A record larger than a page is not
@@ -110,6 +110,21 @@ impl MemQueue {
             ))
         });
 
+        // Once a file writer is draining this pool, whatever is in a page is
+        // going to be written to the file from that page. A caller on this path
+        // has no way to say so -- it returns no `Placement` -- so the writer
+        // would buffer the bytes as well and the record would reach the file
+        // twice. Declining to cache costs a memory hit; caching here would cost
+        // a duplicated record, so this is the safe direction.
+        if pool.has_drainer() {
+            log::debug!(
+                target: "normfs-mem",
+                "not caching entry {id_u64} on the synchronous path: the WAL writer is taking \
+                 its bytes from these pages, and only the awaiting path can say so"
+            );
+            return;
+        }
+
         if pool.next_entry_id() != id_u64 {
             pool.reseed(id_u64);
         }
@@ -134,9 +149,38 @@ impl MemQueue {
     /// Enqueues, waiting for a page rather than dropping the cache when the
     /// pool is full. The synchronous [`MemQueue::enqueue`] stays for callers
     /// that cannot await.
-    pub async fn enqueue_awaiting(&self, data: Bytes) -> (UintN, bool) {
+    ///
+    /// Returns the id and the [`Placement`] the WAL writer must carry out. The
+    /// rotation decision is made here, and not in the writer, because this is
+    /// the last point that runs *before* the record's bytes enter a page: by
+    /// the time the writer sees the entry, the bytes are already placed, and a
+    /// rotation decided then would flush them into the file they were meant to
+    /// come after.
+    pub async fn enqueue_awaiting(&self, data: Bytes) -> (UintN, Placement) {
+        // Held across charge, seal and append together. Two records
+        // interleaving between the charge and the seal would draw the file
+        // boundary on the wrong entry.
         let _gate = self.append_gate.lock().await;
+        self.enqueue_gated(data).await
+    }
 
+    /// Enqueues a batch, each record placed exactly as a single
+    /// [`MemQueue::enqueue_awaiting`] would place it.
+    ///
+    /// The gate is taken once for the whole batch, so the ids a batch returns
+    /// are contiguous — another enqueue cannot interleave into the middle of
+    /// one.
+    pub async fn enqueue_batch_awaiting(&self, entries: Vec<Bytes>) -> Vec<(UintN, Placement)> {
+        let _gate = self.append_gate.lock().await;
+        let mut out = Vec::with_capacity(entries.len());
+        for data in entries {
+            out.push(self.enqueue_gated(data).await);
+        }
+        out
+    }
+
+    /// The body of an enqueue, with the append gate already held.
+    async fn enqueue_gated(&self, data: Bytes) -> (UintN, Placement) {
         let (id, pool, subscribers_data) = {
             let mut inner = self.inner.write().unwrap();
             let id = inner
@@ -157,15 +201,41 @@ impl MemQueue {
         // until the writer is started with Some(pool). Until then this uses the
         // non-blocking cache behaviour, or a full pool would hang the caller
         // forever with nothing able to free it.
-        let mut cached = false;
+        let mut placement = Placement::legacy();
         if let Some(pool) = pool {
             if pool.has_drainer() {
+                // Charged on the encoded length -- the varint prefix and the
+                // CRC take file space too -- which is the same number the
+                // writer used to hand to `can_add`, so the file boundary lands
+                // where it always did.
+                let entry_len = u32::try_from(data.len())
+                    .map(|n| normfs_wal::encoded_len(n) as u64)
+                    .unwrap_or(u64::MAX);
+                let decision = pool.charge(entry_len);
+
+                if decision.rotate_before {
+                    // Rotating the file rotates the page. Without this the
+                    // record that opens the new file shares a page with the
+                    // records that closed the old one, and a flush cannot split
+                    // them -- there is no boundary inside a page to split at.
+                    pool.seal_active();
+                }
+                placement.rotate = if decision.rotate_before {
+                    RotateHint::Before
+                } else {
+                    RotateHint::None
+                };
+                placement.epoch = decision.epoch;
+
                 match pool.append_at(id_to_u64(&id), &data).await {
-                    Ok(()) => cached = true,
+                    Ok(()) => placement.in_pool = true,
                     Err(_) => {
                         // Too large for a page: step over this id without
                         // dropping what the pool holds, and let the file writer
-                        // buffer this one record the old way.
+                        // buffer this one record the old way. It was charged
+                        // before it was refused, so it can still be the record
+                        // that triggers a rotation -- the one path where
+                        // something that never enters a page still seals one.
                         pool.skip_to(id_to_u64(&id).wrapping_add(1)).await;
                     }
                 }
@@ -175,14 +245,13 @@ impl MemQueue {
             }
         }
 
-
         log::debug!(target: "normfs-mem", "Enqueued entry - ID: {}, Data size: {} bytes", id, data.len());
 
         if let Some(data) = subscribers_data {
             self.notify_subscribers(&[(id.clone(), data)]);
         }
 
-        (id, cached)
+        (id, placement)
     }
 
     pub fn enqueue(&self, data: Bytes) -> UintN {
@@ -795,7 +864,6 @@ impl MemStore {
 
     /// The queue's page pool, so the WAL writer can put those same pages on
     /// disk instead of copying their contents into a buffer of its own.
-    #[allow(dead_code)] // used once the pool becomes the writer's source
     pub fn pool(&self, queue: &QueueId) -> Option<Arc<PagePool>> {
         let queues = self.queues.read().unwrap();
         let q = queues.get(queue)?;
@@ -814,14 +882,14 @@ impl MemStore {
         }
     }
 
-    pub async fn enqueue_awaiting(&self, queue: &QueueId, data: Bytes) -> (UintN, bool) {
+    pub async fn enqueue_awaiting(&self, queue: &QueueId, data: Bytes) -> (UintN, Placement) {
         let mem_queue = {
             let queues = self.queues.read().unwrap();
             queues.get(queue).cloned()
         };
         match mem_queue {
             Some(q) => q.enqueue_awaiting(data).await,
-            None => (self.enqueue(queue, data), false),
+            None => (self.enqueue(queue, data), Placement::legacy()),
         }
     }
 
@@ -842,6 +910,25 @@ impl MemStore {
                 queue, ids.len(), first, last);
         }
         ids
+    }
+
+    pub async fn enqueue_batch_awaiting(
+        &self,
+        queue: &QueueId,
+        entries: Vec<Bytes>,
+    ) -> Vec<(UintN, Placement)> {
+        let mem_queue = {
+            let queues = self.queues.read().unwrap();
+            queues.get(queue).cloned()
+        };
+        match mem_queue {
+            Some(q) => q.enqueue_batch_awaiting(entries).await,
+            None => self
+                .enqueue_batch(queue, entries)
+                .into_iter()
+                .map(|id| (id, Placement::legacy()))
+                .collect(),
+        }
     }
 
     pub fn get_last_id(&self, queue: &QueueId) -> Option<Option<UintN>> {

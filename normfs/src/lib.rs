@@ -752,16 +752,13 @@ impl NormFS {
                     header,
                     wal_settings.clone(),
                     last_entry_id.clone(),
-                    // Not live. The flag now reaches write_maybe_pooled, but
-                    // the pool is filled at enqueue time while rotation is
-                    // decided later, in the writer: the bytes of the record
-                    // that triggers a rotation are already in a page, so
-                    // closing the old file flushes them into it and the new
-                    // file gets them again. Rotation has to drain the pool at
-                    // the entry boundary it chose before this can be
-                    // Some(pool) -- the recovery read-back tests are what
-                    // catch it.
-                    None,
+                    // Live. The records reach the file as pages, from the same
+                    // memory they were accepted into. Rotation is decided at
+                    // enqueue time, before the bytes enter a page, and the
+                    // writer carries that decision out rather than making its
+                    // own -- which is what keeps a page's bytes belonging to
+                    // exactly one file.
+                    self.mem.pool(queue),
                 )
                 .await?;
 
@@ -812,12 +809,13 @@ impl NormFS {
     /// not yet on disk. That wait is the back-pressure: the queue declines to
     /// run ahead of the disk rather than dropping what it already took.
     pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
-        let (entry_id, cached) = self.mem.enqueue_awaiting(queue, data.clone()).await;
+        let (entry_id, placement) = self.mem.enqueue_awaiting(queue, data.clone()).await;
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
             queue, entry_id, data.len());
 
-        self.wal.enqueue_pooled(queue, entry_id.clone(), data, cached)?;
+        self.wal
+            .enqueue_pooled(queue, entry_id.clone(), data, placement)?;
 
         log::trace!(target: "normfs", "Entry enqueued successfully - Queue: '{}', Entry ID: {}", queue, entry_id);
 
@@ -831,20 +829,22 @@ impl NormFS {
 
         log::debug!(target: "normfs", "Enqueuing batch - Queue: '{}', Batch size: {} entries", queue, data.len());
 
-        let entry_ids = self.mem.enqueue_batch(queue, data.clone());
+        // Each record is placed exactly as a single enqueue would place it. It
+        // has to be: a record that reached a page but was reported as not in
+        // one would be written to the file twice — once from the writer's
+        // buffer and once from its page.
+        let placed = self.mem.enqueue_batch_awaiting(queue, data.clone()).await;
+        let entry_ids: Vec<UintN> = placed.iter().map(|(id, _)| id.clone()).collect();
 
         if let (Some(first_id), Some(last_id)) = (entry_ids.first(), entry_ids.last()) {
             log::debug!(target: "normfs", "Batch entry IDs - Queue: '{}', First ID: {}, Last ID: {}",
                 queue, first_id, last_id);
         }
 
-        // The batch path still uses the synchronous cache, so no record here
-        // is guaranteed to be in a page: every one is buffered, as before.
-        let wal_entries: Vec<(UintN, Bytes, bool)> = entry_ids
-            .iter()
-            .cloned()
+        let wal_entries: Vec<(UintN, Bytes, normfs_wal::Placement)> = placed
+            .into_iter()
             .zip(data.iter().cloned())
-            .map(|(id, d)| (id, d, false))
+            .map(|((id, placement), d)| (id, d, placement))
             .collect();
 
         self.wal.enqueue_batch(queue, wal_entries)?;

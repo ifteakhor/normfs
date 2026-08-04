@@ -2,7 +2,7 @@ use std::sync::Once;
 use std::time::Duration;
 
 use crate::{
-    WalSettings, WalStore,
+    Placement, WalSettings, WalStore,
     reader::{
         ReadRangeResult, get_wal_content, get_wal_range, read_wal_bytes_range, read_wal_file_range,
     },
@@ -124,8 +124,8 @@ async fn test_enqueue_batch_and_read() {
         .unwrap();
 
     let entries = vec![
-        (UintN::from(0u64), Bytes::from("hello"), false),
-        (UintN::from(1u64), Bytes::from("world"), false),
+        (UintN::from(0u64), Bytes::from("hello"), Placement::legacy()),
+        (UintN::from(1u64), Bytes::from("world"), Placement::legacy()),
     ];
     store.enqueue_batch(&queue_id, entries).unwrap();
 

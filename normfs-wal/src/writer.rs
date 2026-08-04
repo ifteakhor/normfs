@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use std::sync::Arc;
 
-use crate::page_pool::PagePool;
+use crate::page_pool::{PagePool, Placement, RotateHint};
 use crate::ack_file_writer::{AckFileWriter, AckFileWriterSettings};
 use crate::wal_entry_v1::{self, WalEntryV1, WalEntryV1Error};
 use crate::wal_header::WalHeader;
@@ -16,8 +16,8 @@ use tokio::sync::{mpsc, oneshot};
 use uintn::UintN;
 
 enum WriteRequest {
-    Enqueue(UintN, Bytes, bool),
-    EnqueueBatch(Vec<(UintN, Bytes, bool)>),
+    Enqueue(UintN, Bytes, Placement),
+    EnqueueBatch(Vec<(UintN, Bytes, Placement)>),
     Close(oneshot::Sender<()>),
 }
 
@@ -46,6 +46,11 @@ struct WriterState {
     // rotation, so the bytes always come from the pages the records were
     // appended into rather than from a copy.
     pool: Option<Arc<PagePool>>,
+    // Which file the writer believes it is on, counted from zero. The enqueue
+    // side counts the same thing independently; comparing them turns a silent
+    // disagreement — which writes a file whose entry ids do not line up with
+    // its header — into something greppable.
+    file_epoch: u64,
 }
 
 impl WalWriter {
@@ -73,9 +78,21 @@ impl WalWriter {
         tokio::fs::create_dir_all(&queue_fs_path).await?;
 
         // From here a file writer is draining these pages, so an appender may
-        // wait for one to be freed: a flush will end the wait.
+        // wait for one to be freed: a flush will end the wait. And from here
+        // the enqueue side owns the rotation decision, because it is the only
+        // side that runs before a record's bytes enter a page.
+        //
+        // The header charge is the widest a V1 header can be, not this one's
+        // encoded length: `WalHeader::resize` can widen the id and data size
+        // fields on rotation, and the enqueue side cannot predict the next
+        // header without duplicating that. Over-charging rotates a few bytes
+        // early, which is the safe direction against a cap.
         if let Some(p) = pool.as_ref() {
             p.set_drainer();
+            p.arm_file_fill(
+                settings.max_file_size as u64,
+                crate::wal_header_v1::WAL_HEADER_V1_MAX_SIZE as u64,
+            );
         }
 
         let file_writer = new_file_writer(
@@ -101,6 +118,7 @@ impl WalWriter {
             entry_index: 0,
             buffer: OrderedBuffer::new(last_entry_id, queue.clone()),
             pool,
+            file_epoch: 0,
         };
 
         let queue_log_str = queue.to_string();
@@ -112,8 +130,8 @@ impl WalWriter {
 
             while let Some(req) = rx.recv().await {
                 match req {
-                    WriteRequest::Enqueue(entry_id, data, in_pool) => {
-                        if let Err(e) = state.write(entry_id, data, in_pool).await {
+                    WriteRequest::Enqueue(entry_id, data, placement) => {
+                        if let Err(e) = state.write(entry_id, data, placement).await {
                             log::error!(
                                 "WAL writer: error writing entry for queue '{}': {}",
                                 state.queue_id,
@@ -154,15 +172,15 @@ impl WalWriter {
         Ok(Self { write_chan: tx })
     }
 
-    pub fn enqueue(&self, entry_id: UintN, data: Bytes, in_pool: bool) -> Result<(), WalError> {
+    pub fn enqueue(&self, entry_id: UintN, data: Bytes, placement: Placement) -> Result<(), WalError> {
         log::trace!("WAL writer: enqueuing entry {} for write", entry_id);
 
         self.write_chan
-            .send(WriteRequest::Enqueue(entry_id, data, in_pool))
+            .send(WriteRequest::Enqueue(entry_id, data, placement))
             .map_err(|_| WalError::SendError)
     }
 
-    pub fn enqueue_batch(&self, entries: Vec<(UintN, Bytes, bool)>) -> Result<(), WalError> {
+    pub fn enqueue_batch(&self, entries: Vec<(UintN, Bytes, Placement)>) -> Result<(), WalError> {
         log::trace!(
             "WAL writer: enqueuing batch of {} entries for write",
             entries.len()
@@ -183,7 +201,12 @@ impl WalWriter {
 }
 
 impl WriterState {
-    async fn write(&mut self, entry_id: UintN, data: Bytes, in_pool: bool) -> Result<(), WalError> {
+    async fn write(
+        &mut self,
+        entry_id: UintN,
+        data: Bytes,
+        placement: Placement,
+    ) -> Result<(), WalError> {
         log::debug!(
             "WAL writer: writing entry {} to queue '{}', data size: {} bytes",
             entry_id,
@@ -198,7 +221,7 @@ impl WriterState {
                 entry_id,
                 self.queue_id
             );
-            vec![(entry_id.clone(), data, in_pool)]
+            vec![(entry_id.clone(), data, placement)]
         } else {
             // buffer and get ready entries
             log::debug!(
@@ -206,7 +229,8 @@ impl WriterState {
                 entry_id,
                 self.queue_id
             );
-            self.buffer.wait_for_order((entry_id.clone(), data, in_pool))
+            self.buffer
+                .wait_for_order((entry_id.clone(), data, placement))
         };
 
         if entries.is_empty() {
@@ -217,7 +241,7 @@ impl WriterState {
             return Ok(());
         }
 
-        for (entry_id, data, in_pool) in entries {
+        for (entry_id, data, placement) in entries {
             // Rotation is decided on the encoded length, not the record length:
             // the varint prefix and CRC also have to fit. A record wider than a
             // u32 has no frame at all, so it is an error rather than a rotation.
@@ -226,7 +250,22 @@ impl WriterState {
             })?;
             let entry_len = wal_entry_v1::encoded_len(record_size);
 
-            if self.has_written && !self.file_writer.can_add(entry_len).await {
+            // With a pool the decision was already taken, at enqueue time and
+            // before these bytes entered a page — so the writer carries it out
+            // rather than making it again. Re-deciding here from `can_add`
+            // would decide on accounting the pooled path does not maintain,
+            // and, worse, decide it after the record was already placed.
+            let must_rotate = match placement.rotate {
+                RotateHint::WriterDecides => {
+                    self.has_written && !self.file_writer.can_add(entry_len).await
+                }
+                RotateHint::Before => true,
+                RotateHint::None => false,
+            };
+
+            self.check_epoch(&placement, &entry_id);
+
+            if must_rotate {
                 log::debug!(
                     "WAL writer: need to rotate file for queue '{}', entry {}, data size: {}",
                     self.queue_id,
@@ -275,7 +314,7 @@ impl WriterState {
                     self.queue_id.clone(),
                     entry_id.clone(),
                     entry_buf,
-                    in_pool,
+                    placement.in_pool,
                 )
                 .await;
 
@@ -293,15 +332,51 @@ impl WriterState {
         Ok(())
     }
 
-    async fn write_batch(&mut self, entries: Vec<(UintN, Bytes, bool)>) -> Result<(), WalError> {
+    /// Checks the writer's idea of which file it is on against the enqueue
+    /// side's.
+    ///
+    /// Purely a tripwire: the two sides count files independently, and if they
+    /// ever disagree the writer produces a file whose entry ids do not line up
+    /// with its `num_entries_before` — which the reader turns into silently
+    /// wrong data rather than an error. Cheap to check, so check it.
+    fn check_epoch(&self, placement: &Placement, entry_id: &UintN) {
+        let expected = match placement.rotate {
+            RotateHint::WriterDecides => return,
+            RotateHint::Before => self.file_epoch + 1,
+            RotateHint::None => self.file_epoch,
+        };
+        if placement.epoch != expected {
+            // The hint is still obeyed. Falling back to `can_add` would be
+            // worse, not better: on the pooled path `current_size` is not
+            // maintained, so it would answer "yes, there is room" forever and
+            // every later boundary would be wrong too, rather than just this
+            // one.
+            log::error!(
+                "WAL writer: queue '{}' entry {}: the enqueue side charged this record to file \
+                 {} but the writer is on file {} (expected {}). The two sides have diverged, so \
+                 this file's entry ids may not line up with its header.",
+                self.queue_id,
+                entry_id,
+                placement.epoch,
+                self.file_epoch,
+                expected,
+            );
+            debug_assert_eq!(
+                placement.epoch, expected,
+                "enqueue-side and writer-side file counters diverged"
+            );
+        }
+    }
+
+    async fn write_batch(&mut self, entries: Vec<(UintN, Bytes, Placement)>) -> Result<(), WalError> {
         log::debug!(
             "WAL writer: writing batch of {} entries to queue '{}'",
             entries.len(),
             self.queue_id
         );
 
-        for (entry_id, data, in_pool) in entries {
-            self.write(entry_id, data, in_pool).await?;
+        for (entry_id, data, placement) in entries {
+            self.write(entry_id, data, placement).await?;
         }
 
         log::debug!(
@@ -357,6 +432,17 @@ impl WriterState {
         .await?;
         self.has_written = false;
         self.entry_index = 0;
+        self.file_epoch += 1;
+
+        // Only now. `close()` above ran the old file's final flush, and that
+        // flush had to stay bounded or it would have drained this file's
+        // records into the previous one — which is the whole of trap 3. Lifting
+        // the bound before the new writer exists reintroduces it. `close()`
+        // joins the old writer task, so no flush of the old file can still be
+        // in flight here.
+        if let Some(pool) = self.pool.as_ref() {
+            pool.advance_file();
+        }
 
         log::info!(
             "WAL writer: successfully rotated from file {} to {} for queue '{}'",

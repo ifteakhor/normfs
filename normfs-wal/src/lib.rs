@@ -27,7 +27,7 @@ pub use wal_entry_v1::{
     WalEntryV1Error, crc32c, derive_entry_id, encoded_len,
 };
 pub use wal_header::{WalHeader, WalHeaderError};
-pub use page_pool::{PagePool, PendingWrite, PoolError};
+pub use page_pool::{PagePool, PendingWrite, Placement, PoolError, RotateDecision, RotateHint};
 pub use wal_ring_v1::{AppendOutcome, WalRing};
 pub use wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_MAX_SIZE,
@@ -392,11 +392,14 @@ impl WalStore {
     }
 
     pub fn enqueue(&self, queue: &QueueId, entry_id: UintN, data: Bytes) -> Result<(), WalError> {
-        self.enqueue_pooled(queue, entry_id, data, false)
+        self.enqueue_pooled(queue, entry_id, data, Placement::legacy())
     }
 
-    /// `in_pool` says the record is already in a page of this queue's pool, so
-    /// its bytes reach the file from there and must not be buffered again.
+    /// `placement` says whether the record is already in a page of this queue's
+    /// pool — so its bytes reach the file from there and must not be buffered
+    /// again — and what the enqueue side decided about rotation.
+    /// [`Placement::legacy`] leaves both to the writer, which is what `enqueue`
+    /// passes and what the unpooled path has always done.
     ///
     /// `enqueue` keeps its three-argument shape so `wal_sweep` still builds
     /// against released revisions of this crate.
@@ -405,7 +408,7 @@ impl WalStore {
         queue: &QueueId,
         entry_id: UintN,
         data: Bytes,
-        in_pool: bool,
+        placement: Placement,
     ) -> Result<(), WalError> {
         log::trace!(
             "WalStore: enqueuing entry {} for queue '{}', data size: {} bytes",
@@ -418,7 +421,7 @@ impl WalStore {
         match writers.get(queue) {
             Some(writer) => {
                 let entry_id_clone = entry_id.clone();
-                writer.enqueue(entry_id, data, in_pool)?;
+                writer.enqueue(entry_id, data, placement)?;
                 log::trace!(
                     "WalStore: entry {} enqueued for queue '{}'",
                     entry_id_clone,
@@ -436,7 +439,7 @@ impl WalStore {
     pub fn enqueue_batch(
         &self,
         queue: &QueueId,
-        entries: Vec<(UintN, Bytes, bool)>,
+        entries: Vec<(UintN, Bytes, Placement)>,
     ) -> Result<(), WalError> {
         log::trace!(
             "WalStore: enqueuing batch of {} entries for queue '{}'",
