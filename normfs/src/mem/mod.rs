@@ -346,6 +346,7 @@ impl MemQueue {
         id
     }
 
+    // Doesn't take append_gate, so this can race enqueue_awaiting's pool reinit. Known gap.
     pub fn enqueue_batch(&self, entries: Vec<Bytes>) -> Vec<UintN> {
         if entries.is_empty() {
             return Vec::new();
