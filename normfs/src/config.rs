@@ -13,7 +13,7 @@ impl Default for QueueConfig {
         Self {
             compression_type: CompressionType::Zstd,
             enable_fsync: true,
-            encryption_type: EncryptionType::Aes,
+            encryption_type: EncryptionType::AesV2,
         }
     }
 }

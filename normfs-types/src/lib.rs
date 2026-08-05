@@ -162,6 +162,7 @@ impl From<CompressionType> for u64 {
 pub enum EncryptionType {
     None = 0,
     Aes = 1,
+    AesV2 = 2,
 }
 
 impl TryFrom<u64> for EncryptionType {
@@ -171,6 +172,7 @@ impl TryFrom<u64> for EncryptionType {
         match value {
             0 => Ok(EncryptionType::None),
             1 => Ok(EncryptionType::Aes),
+            2 => Ok(EncryptionType::AesV2),
             _ => Err(format!("Unsupported encryption type: {}", value)),
         }
     }
