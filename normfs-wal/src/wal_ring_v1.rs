@@ -15,22 +15,30 @@
 //! mutation assigns, and it survives by frame.
 
 use std::os::raw::c_int;
+use std::sync::Arc;
+
+use crate::wal_arena::{CWalPool, POOL_FREE, WalArena};
 
 #[repr(C)]
-struct CWalPage {
-    buf: *mut u8,
-    cap: usize,
-    used_bytes: usize,
-    count: u32,
-    page_id: u64,
-    first_entry_id: u64,
-    last_entry_id: u64,
-    pin_count: u32,
-    published: c_int,
+pub(crate) struct CWalPage {
+    pub(crate) buf: *mut u8,
+    pub(crate) cap: usize,
+    pub(crate) used_bytes: usize,
+    pub(crate) count: u32,
+    pub(crate) page_id: u64,
+    pub(crate) first_entry_id: u64,
+    pub(crate) last_entry_id: u64,
+    pub(crate) pin_count: u32,
+    pub(crate) published: c_int,
 }
 
 #[repr(C)]
 struct CWalRing {
+    // Mirrors `struct normfs_wal_ring` field for field, in order. Nothing
+    // checks that across the FFI boundary, so a field added on one side and
+    // not the other silently misreads every field after it.
+    pool: *mut CWalPool,
+    first_slot: usize,
     pages: *mut CWalPage,
     arena: *mut u8,
     page_count: usize,
@@ -71,7 +79,7 @@ const RING_TOO_LARGE: c_int = 2;
 const ENTRY_OK: c_int = 0;
 
 unsafe extern "C" {
-    fn normfs_wal_page_init(
+    pub(crate) fn normfs_wal_page_init(
         page: *mut CWalPage,
         buf: *mut u8,
         cap: usize,
@@ -100,6 +108,8 @@ unsafe extern "C" {
     fn normfs_wal_ring_rotate_to(ring: *mut CWalRing, index: usize);
     fn normfs_wal_ring_seek(ring: *mut CWalRing, entry_id: u64) -> CRingSeekResult;
     fn normfs_wal_ring_set_essential(ring: *mut CWalRing, min_essential_id: u64);
+    fn normfs_wal_ring_grow(ring: *mut CWalRing, ring_id: u64);
+    fn normfs_wal_ring_shrink(ring: *mut CWalRing, ring_id: u64);
 
     fn normfs_wal_entry_v1_decode(buf: *const u8, len: usize) -> CEntryDecodeResult;
 }
@@ -115,23 +125,47 @@ pub enum AppendOutcome {
     Full,
 }
 
+/// Where a ring's pages come from.
+///
+/// `Owned` is the standalone shape: the ring allocates its own arena and holds
+/// every page in it for life. `Shared` borrows a contiguous slot range from a
+/// process-wide [`WalArena`], which is what lets a busy queue grow into memory
+/// an idle one has released.
+///
+/// Nothing below this enum cares which it is. The C ring caches `pages` and
+/// `arena` *based at its own first slot*, so page `k` is at the same offset
+/// from those bases either way — which is the whole reason migration did not
+/// have to disturb any already-proven function.
+enum Backing {
+    Owned {
+        _arena: Vec<u8>,
+        _pages: Vec<CWalPage>,
+    },
+    Shared(Arc<WalArena>),
+}
+
 /// A ring of WAL pages holding V1 entries in memory.
 ///
-/// The arena and the descriptor array are heap-allocated `Vec`s, so the raw
-/// pointers the C ring holds stay valid even if the `WalRing` value is moved;
-/// they are never reallocated after construction.
+/// The raw pointers the C ring holds stay valid even if the `WalRing` value is
+/// moved: they point either into this value's own heap allocations, which are
+/// never reallocated after construction, or into a shared arena that outlives
+/// the ring by way of the `Arc`.
 pub struct WalRing {
-    /// `page_count * page_size` bytes. Page `k` is `[k * page_size ..]`.
-    arena: Vec<u8>,
-    pages: Vec<CWalPage>,
+    backing: Backing,
     ring: Box<CWalRing>,
     page_size: usize,
+    /// This ring's id in the shared arena's owner array. Meaningless — and
+    /// never used — when the ring owns its pages.
+    ring_id: u64,
 }
 
 impl WalRing {
     /// Creates a ring of `page_count` pages of `page_size` bytes each, whose
     /// first entry id is `first_entry_id`. `page_count` must be at least 1 and
     /// `page_size` must exceed the minimum entry framing.
+    ///
+    /// The ring owns its pages outright; it cannot grow or shrink. See
+    /// [`WalRing::in_arena`] for a ring that borrows from the shared arena.
     pub fn new(page_count: usize, page_size: usize, first_entry_id: u64) -> Self {
         assert!(page_count >= 1, "ring needs at least one page");
         assert!(page_size >= 9, "page must hold the smallest entry plus its offset");
@@ -177,11 +211,173 @@ impl WalRing {
         }
 
         WalRing {
-            arena,
-            pages,
+            backing: Backing::Owned {
+                _arena: arena,
+                _pages: pages,
+            },
             ring,
             page_size,
+            ring_id: POOL_FREE,
         }
+    }
+
+    /// Creates a ring over the slot range `arena` has already reserved for
+    /// `ring_id`.
+    ///
+    /// The caller reserves the range with [`WalArena::reserve`], which is what
+    /// initialises each page descriptor and marks the slots owned. This only
+    /// points a `CWalRing` at them.
+    ///
+    /// ## Why the pool is bound from Rust rather than by a C entry point
+    ///
+    /// `normfs_wal_ring_init` sets `pool = NULL` — a ring that owns its pages
+    /// needs no pool, and that is the shape the standalone tests build. Binding
+    /// is then two plain field writes on a `#[repr(C)]` mirror. Adding a
+    /// `ring_bind` to C would mean another contract and another proof for an
+    /// assignment WP would have nothing to say about, and the trust boundary is
+    /// unchanged either way: Rust establishes the preconditions, C proves the
+    /// bodies that consume them.
+    pub fn in_arena(
+        arena: &Arc<WalArena>,
+        range: crate::wal_arena::SlotRange,
+        ring_id: u64,
+        first_entry_id: u64,
+    ) -> Self {
+        assert!(range.page_count >= 1, "ring needs at least one page");
+        assert!(
+            range.first_slot + range.page_count <= arena.page_count(),
+            "slot range runs past the end of the arena"
+        );
+        assert!(ring_id != POOL_FREE, "a ring cannot be called FREE");
+
+        let page_size = arena.page_size();
+        let mut ring: Box<CWalRing> = Box::new(unsafe { std::mem::zeroed() });
+        unsafe {
+            normfs_wal_ring_init(
+                ring.as_mut(),
+                arena.page_ptr(range.first_slot),
+                arena.slot_base(range.first_slot),
+                range.page_count,
+                page_size,
+                first_entry_id,
+            );
+        }
+        ring.pool = arena.pool_ptr();
+        ring.first_slot = range.first_slot;
+
+        WalRing {
+            backing: Backing::Shared(Arc::clone(arena)),
+            ring,
+            page_size,
+            ring_id,
+        }
+    }
+
+    /// The shared arena behind this ring, if it has one.
+    fn arena(&self) -> Option<&Arc<WalArena>> {
+        match &self.backing {
+            Backing::Owned { .. } => None,
+            Backing::Shared(arena) => Some(arena),
+        }
+    }
+
+    /// Takes the free arena slot directly above this ring's range.
+    ///
+    /// Returns whether it grew. `false` means the ring owns its pages, the
+    /// range already ends at the arena, or the slot above belongs to another
+    /// queue — which contiguity makes a real limit, not a transient one: a ring
+    /// grows into the slot above it and nowhere else.
+    ///
+    /// Everything `normfs_wal_ring_grow` requires is established here: the slot
+    /// is checked free under the arena's slot lock, and the page descriptor is
+    /// re-initialised so it is well-formed, empty and based at the right arena
+    /// offset. Emptiness is not bookkeeping — [`WalRing::seek`] scans every page
+    /// in range, so a slot still holding the previous holder's records would
+    /// answer this ring's seeks with a foreign payload under a colliding id.
+    pub fn grow(&mut self) -> bool {
+        let Some(arena) = self.arena().map(Arc::clone) else {
+            return false;
+        };
+        let _slots = arena.lock_slots();
+
+        let slot = self.ring.first_slot + self.ring.page_count;
+        if slot >= arena.page_count() || arena.owner_of(slot) != POOL_FREE {
+            return false;
+        }
+
+        unsafe {
+            normfs_wal_page_init(
+                arena.page_ptr(slot),
+                arena.slot_base(slot),
+                self.page_size,
+                slot as u64,
+                self.ring.next_entry_id,
+            );
+            normfs_wal_ring_grow(self.ring.as_mut(), self.ring_id);
+        }
+        true
+    }
+
+    /// Gives the top page of this ring's range back to the arena.
+    ///
+    /// Returns whether it shrank. The top page must not be the one being
+    /// appended to, the ring never drops below `floor` pages, and — the
+    /// durability half — the page must be reusable: nothing pinning it, and
+    /// nothing on it below the durable watermark.
+    ///
+    /// That last check calls `normfs_wal_page_reusable`, whose contract is
+    /// `\result != 0 <==> normfs_wal_page_is_reusable(page, m)` and which is
+    /// proven, so the guard *is* the predicate `normfs_wal_ring_shrink`
+    /// requires rather than a Rust restatement of it that could drift.
+    pub fn shrink(&mut self, floor: usize) -> bool {
+        let Some(arena) = self.arena().map(Arc::clone) else {
+            return false;
+        };
+        let _slots = arena.lock_slots();
+
+        let count = self.ring.page_count;
+        if count <= floor.max(1) || count <= 1 {
+            return false;
+        }
+        let top = count - 1;
+        if self.ring.active >= top {
+            return false;
+        }
+        if unsafe { normfs_wal_page_reusable(self.page(top), self.ring.min_essential_id) } == 0 {
+            return false;
+        }
+
+        unsafe { normfs_wal_ring_shrink(self.ring.as_mut(), self.ring_id) };
+        true
+    }
+
+    /// This ring's slot range in the shared arena, if it has one.
+    pub fn slot_range(&self) -> Option<crate::wal_arena::SlotRange> {
+        self.arena().map(|_| crate::wal_arena::SlotRange {
+            first_slot: self.ring.first_slot,
+            page_count: self.ring.page_count,
+        })
+    }
+
+    /// This ring's id in the arena's owner array.
+    pub fn ring_id(&self) -> u64 {
+        self.ring_id
+    }
+
+    /// Page `k` of this ring's range. The C ring's `pages` base is already at
+    /// `first_slot`, so `k` is a ring-relative index for both backings.
+    fn page(&self, k: usize) -> *mut CWalPage {
+        debug_assert!(k < self.ring.page_count, "page {k} is outside this ring");
+        unsafe { self.ring.pages.add(k) }
+    }
+
+    /// Page `k`'s descriptor, for reads.
+    ///
+    /// Sound for `&self`: the descriptor is only written by this ring, under
+    /// whatever lock its owner holds, and the arena's owner array is what says
+    /// no other ring may touch it.
+    fn page_ref(&self, k: usize) -> &CWalPage {
+        unsafe { &*self.page(k) }
     }
 
     /// Appends a record, rotating into a reusable page if the active one is
@@ -230,11 +426,9 @@ impl WalRing {
     /// it. `assigns \nothing`, so the shared page reference may be handed over
     /// as a raw pointer.
     fn rotate_into(&mut self, index: usize) {
-        debug_assert!(index < self.pages.len(), "rotate target out of range");
+        debug_assert!(index < self.ring.page_count, "rotate target out of range");
         debug_assert!(
-            unsafe {
-                normfs_wal_page_reusable(&self.pages[index], self.ring.min_essential_id) != 0
-            },
+            unsafe { normfs_wal_page_reusable(self.page(index), self.ring.min_essential_id) != 0 },
             "rotating into page {index}, which is pinned or holds records that are not yet durable"
         );
         unsafe { normfs_wal_ring_rotate_to(self.ring.as_mut(), index) };
@@ -246,7 +440,8 @@ impl WalRing {
         let min_essential = self.ring.min_essential_id;
         let mut empty: Option<usize> = None;
         let mut oldest: Option<(usize, u64)> = None;
-        for (k, p) in self.pages.iter().enumerate() {
+        for k in 0..self.ring.page_count {
+            let p = self.page_ref(k);
             if p.pin_count != 0 {
                 continue;
             }
@@ -271,24 +466,39 @@ impl WalRing {
     /// false for a page a reader is still borrowing bytes from, and moving the
     /// active page off a pinned one keeps appends off those bytes.
     ///
+    /// The range keeps its size and its place: this discards contents, not
+    /// slots. `normfs_wal_ring_init` unbinds the pool — a ring it builds owns
+    /// its pages — so a shared ring is re-bound afterwards, or the next
+    /// `grow`/`shrink` would dereference a null pool.
+    ///
     /// False when every page is pinned, changing nothing.
     pub fn reinit(&mut self, first_entry_id: u64) -> bool {
-        let pins: Vec<u32> = self.pages.iter().map(|p| p.pin_count).collect();
+        let pins: Vec<u32> = (0..self.ring.page_count)
+            .map(|k| self.page_ref(k).pin_count)
+            .collect();
         let Some(free) = pins.iter().position(|&c| c == 0) else {
             return false;
         };
 
         let page_size = self.page_size;
-        let n = self.pages.len();
-        let base = self.arena.as_mut_ptr();
+        let n = self.ring.page_count;
+        let first_slot = self.ring.first_slot;
+        let pages_ptr = self.ring.pages;
+        let base = self.ring.arena;
+        let pool = self.ring.pool;
+
         for k in 0..n {
             unsafe {
-                let buf = base.add(k * page_size);
-                normfs_wal_page_init(&mut self.pages[k], buf, page_size, k as u64, first_entry_id);
+                normfs_wal_page_init(
+                    pages_ptr.add(k),
+                    base.add(k * page_size),
+                    page_size,
+                    (first_slot + k) as u64,
+                    first_entry_id,
+                );
             }
-            self.pages[k].pin_count = pins[k];
+            unsafe { (*self.page(k)).pin_count = pins[k] };
         }
-        let pages_ptr = self.pages.as_mut_ptr();
         unsafe {
             normfs_wal_ring_init(
                 self.ring.as_mut(),
@@ -299,7 +509,9 @@ impl WalRing {
                 first_entry_id,
             );
         }
-        if self.pages[self.ring.active].pin_count != 0 {
+        self.ring.pool = pool;
+        self.ring.first_slot = first_slot;
+        if self.page_ref(self.ring.active).pin_count != 0 {
             self.rotate_into(free);
         }
         true
@@ -307,8 +519,8 @@ impl WalRing {
 
     /// The lowest entry id currently cached, or `None` if the ring is empty.
     pub fn min_cached_id(&self) -> Option<u64> {
-        self.pages
-            .iter()
+        (0..self.ring.page_count)
+            .map(|k| self.page_ref(k))
             .filter(|p| p.count > 0)
             .map(|p| p.first_entry_id)
             .min()
@@ -316,13 +528,14 @@ impl WalRing {
 
     /// Whether the ring holds no cached entries.
     pub fn is_empty(&self) -> bool {
-        self.pages.iter().all(|p| p.count == 0)
+        (0..self.ring.page_count).all(|k| self.page_ref(k).count == 0)
     }
 
     /// All cached records with id in `[start, end]`, in id order.
     pub fn collect_range(&self, start: u64, end: u64) -> Vec<(u64, Vec<u8>)> {
         let mut out: Vec<(u64, Vec<u8>)> = Vec::new();
-        for (k, p) in self.pages.iter().enumerate() {
+        for k in 0..self.ring.page_count {
+            let p = self.page_ref(k);
             if p.count == 0 {
                 continue;
             }
@@ -333,7 +546,7 @@ impl WalRing {
             if plast < start || pfirst > end {
                 continue;
             }
-            let page = &self.pages[k] as *const CWalPage as *mut CWalPage;
+            let page = self.page(k);
             for index in 0..p.count {
                 // id = first_entry_id + index, from the Frama-C-proven
                 // normfs_wal_page_entry_id (assigns \nothing, so the shared
@@ -355,7 +568,7 @@ impl WalRing {
     // proven `assigns \nothing`, so casting the shared page reference to a
     // mutable pointer for FFI is sound.
     fn record_at(&self, page_index: usize, index: u32) -> Option<&[u8]> {
-        let page = &self.pages[page_index] as *const CWalPage as *mut CWalPage;
+        let page = self.page(page_index);
         let offset = unsafe { normfs_wal_page_offset(page, index) as usize };
         let buffer = self.page_slice(page_index);
         let framed = &buffer[offset..];
@@ -397,12 +610,12 @@ impl WalRing {
 
     /// Pins page `page_index` so it cannot be reclaimed until unpinned.
     pub fn pin(&mut self, page_index: usize) {
-        unsafe { normfs_wal_page_pin(&mut self.pages[page_index]) };
+        unsafe { normfs_wal_page_pin(self.page(page_index)) };
     }
 
     /// Releases a pin taken with [`WalRing::pin`].
     pub fn unpin(&mut self, page_index: usize) {
-        unsafe { normfs_wal_page_unpin(&mut self.pages[page_index]) };
+        unsafe { normfs_wal_page_unpin(self.page(page_index)) };
     }
 
     /// The id that the next appended entry will receive.
@@ -423,8 +636,12 @@ impl WalRing {
     }
 
     /// Number of pages in the ring.
+    ///
+    /// Read from the C ring rather than from a `Vec` length: growing and
+    /// shrinking move this, and the descriptor array it indexes into belongs to
+    /// the whole arena rather than to this ring.
     pub fn page_count(&self) -> usize {
-        self.pages.len()
+        self.ring.page_count
     }
 
     /// The index of the page currently being appended to.
@@ -440,35 +657,61 @@ impl WalRing {
     /// Handing this out is what lets the writer put a page on disk without
     /// copying it into a buffer of its own.
     pub fn page_bytes(&self, page_index: usize) -> &[u8] {
-        &self.page_slice(page_index)[..self.pages[page_index].used_bytes]
+        &self.page_slice(page_index)[..self.page_ref(page_index).used_bytes]
     }
 
     /// Page `page_index`'s whole slice of the arena.
+    ///
+    /// Taken from the C ring's arena base, which is already at this ring's
+    /// first slot, so `page_index` is ring-relative for a shared ring exactly
+    /// as it is for one that owns its pages.
     fn page_slice(&self, page_index: usize) -> &[u8] {
-        let from = page_index * self.page_size;
-        &self.arena[from..from + self.page_size]
+        debug_assert!(
+            page_index < self.ring.page_count,
+            "page {page_index} is outside this ring"
+        );
+        // SAFETY: the arena covers page_count * page_size bytes from this base
+        // — for a shared ring that is `normfs_wal_ring_layout`, which grow
+        // re-establishes — and the backing outlives `self`.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.ring.arena.add(page_index * self.page_size),
+                self.page_size,
+            )
+        }
     }
 
     /// Entries held by page `page_index`.
     pub fn page_len(&self, page_index: usize) -> u32 {
-        self.pages[page_index].count
+        self.page_ref(page_index).count
     }
 
     /// The last entry id on page `page_index`, or `None` if it is empty.
     pub fn page_last_entry_id(&self, page_index: usize) -> Option<u64> {
-        let p = &self.pages[page_index];
+        let p = self.page_ref(page_index);
         (p.count > 0).then_some(p.last_entry_id)
     }
 
     /// The first entry id on page `page_index`, or `None` if it is empty.
     pub fn page_first_entry_id(&self, page_index: usize) -> Option<u64> {
-        let p = &self.pages[page_index];
+        let p = self.page_ref(page_index);
         (p.count > 0).then_some(p.first_entry_id)
     }
 
     /// How many readers currently hold page `page_index`.
     pub fn page_pin_count(&self, page_index: usize) -> u32 {
-        self.pages[page_index].pin_count
+        self.page_ref(page_index).pin_count
+    }
+
+    /// Whether page `page_index` may be written over: nothing pinning it, and
+    /// nothing on it below `min_essential_id`.
+    ///
+    /// This calls the proven `normfs_wal_page_reusable`, whose contract is
+    /// `\result != 0 <==> normfs_wal_page_is_reusable(page, m)`, so callers get
+    /// the predicate the C contracts require rather than a Rust restatement of
+    /// it that could drift from it. `assigns \nothing`.
+    pub fn page_is_reusable(&self, page_index: usize, min_essential_id: u64) -> bool {
+        unsafe { normfs_wal_page_reusable(self.page(page_index), min_essential_id) != 0 }
     }
 
     /// The reclaim boundary the ring is currently holding to.
@@ -482,9 +725,15 @@ impl WalRing {
     }
 }
 
-// The raw pointers the C ring holds refer only to this value's own heap
-// allocations, which are never shared, so the ring may cross threads under an
-// external lock. Shared (`&self`) access only calls C functions proven to
-// write nothing, so concurrent reads are safe.
+// The ring may cross threads under an external lock, and shared (`&self`)
+// access only calls C functions proven to write nothing, so concurrent reads
+// are safe.
+//
+// A ring that owns its pages points only at its own heap allocations, which
+// nothing else can reach. A shared one points into an arena other rings also
+// point into — but only ever at the slots the arena's owner array says are
+// this ring's, and the C pool proves that ownership is exclusive: there is one
+// owner slot per page, so two rings holding one page is not a representable
+// state. The `Arc` keeps the arena alive for at least as long as the ring.
 unsafe impl Send for WalRing {}
 unsafe impl Sync for WalRing {}
