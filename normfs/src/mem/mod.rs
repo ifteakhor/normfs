@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc::Sender;
 
 use bytes::Bytes;
 use normfs_types::{DataSource, QueueId, ReadEntry, SubscriberCallback};
-use normfs_wal::{AppendOutcome, PagePool, Placement};
+use normfs_wal::{AppendOutcome, PagePool, Placement, WalArena};
 use uintn::UintN;
 
 // Geometry of the in-memory paged store. A record larger than a page is not
@@ -19,62 +20,33 @@ const MEM_MAX_PAGES: usize = 64;
 /// against the disk rather than merely bounding it.
 const MEM_MIN_PAGES_PER_QUEUE: usize = 2;
 
-/// The process-wide page budget.
+/// How many pages a queue starting now should ask the arena for.
 ///
-/// `max_memory_usage` is a total, and this is what makes it one. It used to be
-/// divided by the queue count at the moment each queue was created and never
-/// revisited -- `max_memory_usage / queues.len().max(1)`, read *before* the
-/// insert -- so the first queue kept the whole budget for ever and every queue
-/// that arrived later added its own allocation on top. The total was not
-/// bounded by the setting at all: it overshot by roughly the number of queues.
+/// `max_memory_usage` is a total, and the arena is what makes it one: every
+/// queue's pages are slots in one allocation, so the sum cannot exceed the
+/// setting however many queues appear. It used to be divided by the queue count
+/// at the moment each queue was created and never revisited --
+/// `max_memory_usage / queues.len().max(1)`, read *before* the insert -- so the
+/// first queue kept the whole budget for ever and every queue that arrived
+/// later added its own allocation on top. The total was not bounded by the
+/// setting at all: it overshot by roughly the number of queues.
 ///
-/// Pages now come out of one pot, so the sum cannot exceed the budget however
-/// many queues appear.
+/// Nothing counts what has been handed out. The arena's owner array already
+/// knows, one slot per page, and it stays right as pages move; a counter beside
+/// it would be a second registry that only drifts -- the old one never
+/// decremented, so a queue giving pages back was invisible to it.
 ///
-/// What this does not do is move pages between queues once handed out. A
-/// queue's allotment is fixed when it starts, so a busy queue cannot borrow
-/// from an idle one. That needs the ring to hold pool slots rather than its
-/// own arena; until then the split is a guess made without knowing how many
-/// queues will arrive, which is why it is deliberately conservative.
-struct PageBudget {
-    total_pages: usize,
-    handed_out: usize,
-}
-
-impl PageBudget {
-    fn new(max_memory_usage: usize) -> Self {
-        PageBudget {
-            total_pages: (max_memory_usage / MEM_PAGE_SIZE).max(MEM_MIN_PAGES_PER_QUEUE),
-            handed_out: 0,
-        }
-    }
-
-    /// Pages for a queue starting now.
-    ///
-    /// The floor is honoured even when the pot is empty. A queue below it
-    /// cannot drain, and refusing to start the queue would turn a memory
-    /// setting into an availability limit; overshooting by a floor's worth is
-    /// the lesser fault, and it says so in the log.
-    fn take_for_queue(&mut self) -> usize {
-        let remaining = self.total_pages.saturating_sub(self.handed_out);
-        // A quarter of the pot per queue, so the first few get a useful
-        // allowance and later ones still find something left. Any fixed
-        // fraction is a guess without knowing the queue count up front --
-        // moving pages on demand is what removes the need to guess.
-        let share = (self.total_pages / 4).clamp(MEM_MIN_PAGES_PER_QUEUE, MEM_MAX_PAGES);
-        let granted = share.min(remaining).max(MEM_MIN_PAGES_PER_QUEUE);
-        if granted > remaining {
-            log::warn!(
-                target: "normfs-mem",
-                "page budget exhausted: granting a new queue its floor of {} pages ({} KiB) \
-                 beyond the configured total, because a queue below the floor cannot drain",
-                granted,
-                granted * MEM_PAGE_SIZE / 1024,
-            );
-        }
-        self.handed_out += granted;
-        granted
-    }
+/// This number is a starting point rather than a verdict. A queue that runs out
+/// grows into a free slot above its range instead of waiting for the disk, and
+/// gives pages back once its records are durable, so a busy queue can borrow
+/// from an idle one without the process-wide total moving.
+fn pages_for_new_queue(free: usize, total: usize) -> usize {
+    // A quarter of the arena per queue, so the first few get a useful allowance
+    // and later ones still find something left. Any fixed fraction is a guess
+    // without knowing the queue count up front; migration is what makes the
+    // guess survivable.
+    let share = (total / 4).clamp(MEM_MIN_PAGES_PER_QUEUE, MEM_MAX_PAGES);
+    share.min(free).max(MEM_MIN_PAGES_PER_QUEUE)
 }
 
 // Entry ids are sequential counters that fit u64 for any real queue; the
@@ -107,9 +79,14 @@ impl MemReadResult {
 
 pub struct MemStore {
     queues: RwLock<HashMap<QueueId, Arc<MemQueue>>>,
-    /// One pot of pages for every queue, so `max_memory_usage` is a total
-    /// rather than a per-queue allowance that each new queue re-derives.
-    budget: Mutex<PageBudget>,
+    /// One arena of pages for every queue, so `max_memory_usage` is a total
+    /// rather than a per-queue allowance that each new queue re-derives -- and
+    /// so a busy queue can take a page an idle one has released.
+    arena: Arc<WalArena>,
+    page_size: usize,
+    /// Ring ids, which is what the arena's owner array records. Distinct per
+    /// queue and never reused while a queue is alive.
+    next_ring_id: AtomicU64,
 }
 
 struct Inner {
@@ -124,8 +101,10 @@ struct Inner {
 
 struct MemQueue {
     inner: RwLock<Inner>,
-    /// This queue's allotment from the process-wide budget, in pages.
+    /// The pages this queue started with. It can hold more or fewer now --
+    /// the pool's own `page_count` is the live figure.
     pages: usize,
+    page_size: usize,
     /// Held across an append so the pool sees ids in order.
     append_gate: tokio::sync::Mutex<()>,
     subscribers: Mutex<HashMap<usize, SubscriberCallback>>,
@@ -133,24 +112,68 @@ struct MemQueue {
 }
 
 impl MemQueue {
-    /// `pages` is this queue's allotment from the process-wide budget, not a
-    /// byte figure it re-derives for itself.
-    pub fn new(last_id: Option<UintN>, pages: usize) -> Self {
-        // Allocated here, once, so the pool's footprint is fixed for the life
-        // of the queue and the WAL writer can be handed the same one.
+    /// Takes `pages` slots from the shared arena, or the floor if that is all
+    /// there is room for.
+    ///
+    /// A queue below the floor cannot drain -- an appender would wait for its
+    /// own page to reach disk, serialising the queue against the disk rather
+    /// than merely bounding it -- and refusing to start the queue would turn a
+    /// memory setting into an availability limit. So when the arena has no room
+    /// at all, the queue gets a private allocation of its floor and says so:
+    /// overshooting by a floor's worth is the lesser fault. Those pages cannot
+    /// migrate, which is the other half of the cost.
+    fn new(
+        last_id: Option<UintN>,
+        arena: &Arc<WalArena>,
+        ring_id: u64,
+        pages: usize,
+        label: &QueueId,
+    ) -> Self {
+        let page_size = arena.page_size();
         let first_entry_id = last_id.as_ref().map_or(0, |id| id_to_u64(id).wrapping_add(1));
-        let pool = Arc::new(PagePool::new(
-            pages.clamp(MEM_MIN_PAGES_PER_QUEUE, MEM_MAX_PAGES),
-            MEM_PAGE_SIZE,
-            first_entry_id,
-        ));
+        let want = pages.clamp(MEM_MIN_PAGES_PER_QUEUE, MEM_MAX_PAGES);
+
+        let reserved = arena
+            .reserve(want, ring_id, first_entry_id)
+            .or_else(|| arena.reserve(MEM_MIN_PAGES_PER_QUEUE, ring_id, first_entry_id));
+
+        let pool = match reserved {
+            Some(range) => {
+                arena.set_label(ring_id, label.to_string());
+                Arc::new(PagePool::new_in(
+                    arena,
+                    range,
+                    ring_id,
+                    first_entry_id,
+                    MEM_MIN_PAGES_PER_QUEUE,
+                ))
+            }
+            None => {
+                log::warn!(
+                    target: "normfs-mem",
+                    "arena exhausted: giving queue '{}' a private floor of {} pages ({} KiB) \
+                     beyond the configured total, because a queue below the floor cannot drain. \
+                     These pages cannot be traded with other queues.",
+                    label,
+                    MEM_MIN_PAGES_PER_QUEUE,
+                    MEM_MIN_PAGES_PER_QUEUE * page_size / 1024,
+                );
+                Arc::new(PagePool::new(
+                    MEM_MIN_PAGES_PER_QUEUE,
+                    page_size,
+                    first_entry_id,
+                ))
+            }
+        };
+
         MemQueue {
+            pages: pool.page_count(),
             inner: RwLock::new(Inner {
                 pool: Some(pool),
                 last_id,
                 last_acked_id: None,
             }),
-            pages,
+            page_size,
             append_gate: tokio::sync::Mutex::new(()),
             subscribers: Mutex::new(HashMap::new()),
             next_subscriber_id: Mutex::new(0),
@@ -169,9 +192,10 @@ impl MemQueue {
     // will use; this synchronous one cannot block a runtime thread.
     fn cache_append(&self, inner: &mut Inner, id_u64: u64, data: &[u8]) {
         let pages = self.pages;
+        let page_size = self.page_size;
         let pool = inner
             .pool
-            .get_or_insert_with(|| Arc::new(PagePool::new(pages, MEM_PAGE_SIZE, id_u64)));
+            .get_or_insert_with(|| Arc::new(PagePool::new(pages, page_size, id_u64)));
 
         // Once a file writer is draining this pool, whatever is in a page is
         // going to be written to the file from that page. A caller on this path
@@ -898,10 +922,30 @@ impl MemQueue {
 
 impl MemStore {
     pub fn new(max_memory_usage: usize) -> Self {
+        Self::with_page_size(max_memory_usage, MEM_PAGE_SIZE)
+    }
+
+    /// As [`MemStore::new`], with the memory page size chosen rather than
+    /// fixed.
+    ///
+    /// A WAL file ends on a page boundary, so this is also the granularity at
+    /// which a file tracks `max_file_size`: crossing the threshold seals the
+    /// active page, and the tail of that page goes unused. A test that wants
+    /// many small files wants a small page here.
+    pub fn with_page_size(max_memory_usage: usize, page_size: usize) -> Self {
+        let pages = (max_memory_usage / page_size).max(MEM_MIN_PAGES_PER_QUEUE);
         MemStore {
             queues: RwLock::new(HashMap::new()),
-            budget: Mutex::new(PageBudget::new(max_memory_usage)),
+            arena: Arc::new(WalArena::new(pages, page_size)),
+            page_size,
+            next_ring_id: AtomicU64::new(0),
         }
+    }
+
+    /// The shared page arena, for tests that assert on who holds what.
+    #[cfg(test)]
+    pub fn arena(&self) -> &Arc<WalArena> {
+        &self.arena
     }
 
     /// The queue's page pool, so the WAL writer can put those same pages on
@@ -916,14 +960,17 @@ impl MemStore {
     pub fn start_queue(&self, queue: &QueueId, last_id: Option<UintN>) {
         let mut queues = self.queues.write().unwrap();
         if !queues.contains_key(queue) {
-            // Pages come out of the one budget, so the total is bounded by the
+            // Pages come out of the one arena, so the total is bounded by the
             // setting however many queues start. It used to be the setting
             // divided by the queue count at this moment, which bounded nothing.
-            let pages = self.budget.lock().unwrap().take_for_queue();
+            let want = pages_for_new_queue(self.arena.free_pages(), self.arena.page_count());
+            let ring_id = self.next_ring_id.fetch_add(1, Ordering::Relaxed);
+            let new_queue = Arc::new(MemQueue::new(last_id.clone(), &self.arena, ring_id, want, queue));
             log::debug!(target: "normfs-mem",
-                "Starting queue '{}' with last_id: {:?}, {} pages ({} KiB) from the shared budget",
-                queue, last_id, pages, pages * MEM_PAGE_SIZE / 1024);
-            let new_queue = Arc::new(MemQueue::new(last_id, pages));
+                "Starting queue '{}' with last_id: {:?}, {} pages ({} KiB) from the shared arena \
+                 ({} of {} still free)",
+                queue, last_id, new_queue.pages, new_queue.pages * self.page_size / 1024,
+                self.arena.free_pages(), self.arena.page_count());
             queues.insert(queue.clone(), new_queue);
         }
     }

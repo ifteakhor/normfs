@@ -586,6 +586,87 @@ async fn test_bounded_cache_drops_old_unacked_and_falls_back() {
 }
 
 #[tokio::test]
+async fn every_queue_holds_a_disjoint_range_of_the_one_arena() {
+    // 16 pages of 1 KiB. Every queue's pages are slots in this one allocation,
+    // which is what makes `max_memory_usage` a total rather than a per-queue
+    // allowance.
+    let mem = Arc::new(MemStore::with_page_size(16 * 1024, 1024));
+    let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
+    let arena = mem.arena().clone();
+    assert_eq!(arena.page_count(), 16);
+
+    let a = resolver.resolve("qa");
+    let b = resolver.resolve("qb");
+    mem.start_queue(&a, None);
+    mem.start_queue(&b, None);
+
+    let ra = mem.pool(&a).unwrap().slot_range().expect("a pooled queue");
+    let rb = mem.pool(&b).unwrap().slot_range().expect("a pooled queue");
+
+    // Disjoint by construction: the arena has one owner slot per page, so two
+    // queues holding the same page is not a state it can represent. Checking it
+    // anyway is what catches the ranges themselves being wrong.
+    let overlaps = ra.first_slot < rb.first_slot + rb.page_count
+        && rb.first_slot < ra.first_slot + ra.page_count;
+    assert!(!overlaps, "ranges {ra:?} and {rb:?} overlap");
+
+    assert_eq!(
+        arena.free_pages(),
+        16 - ra.page_count - rb.page_count,
+        "every page is either free or owned by exactly one queue"
+    );
+
+    // A stalled queue can say who is holding the memory, not just that it is
+    // held.
+    let holders = arena.holders();
+    assert_eq!(holders.len(), 2);
+    assert!(
+        holders.iter().any(|(name, _)| name == &a.to_string()),
+        "the arena should know queue '{a}' by name, got {holders:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_busy_queue_takes_a_page_rather_than_waiting_for_the_disk() {
+    // The gap this closes. Before pages could move, a queue that ran out
+    // waited for its own records to reach disk however much of the arena was
+    // sitting idle next to it.
+    let mem = Arc::new(MemStore::with_page_size(16 * 1024, 1024));
+    let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
+    let queue = resolver.resolve("busy");
+    mem.start_queue(&queue, None);
+
+    let pool = mem.pool(&queue).unwrap();
+    let started_with = pool.page_count();
+    assert!(
+        mem.arena().free_pages() > 0,
+        "this test needs spare pages in the arena"
+    );
+
+    // Waiting is only allowed once a writer is draining, and this test never
+    // starts one: if the pool ever chose to wait instead of growing, it would
+    // hang here rather than fail.
+    pool.set_drainer();
+
+    let record = Bytes::from(vec![7u8; 400]);
+    for id in 0..(started_with as u64 + 8) {
+        pool.place(id, &record).await.expect("fits a page");
+    }
+
+    assert!(
+        pool.page_count() > started_with,
+        "the queue should have grown into the arena rather than waited: still {started_with} pages"
+    );
+    let range = pool.slot_range().unwrap();
+    assert_eq!(range.page_count, pool.page_count());
+    assert_eq!(
+        mem.arena().free_pages(),
+        16 - range.page_count,
+        "the pages came out of the arena, so the process-wide total did not move"
+    );
+}
+
+#[tokio::test]
 async fn the_page_budget_is_a_total_across_queues() {
     // The old code read `max_memory_usage / queues.len()` *before* inserting
     // the queue, so the first queue took the whole budget and every later one
