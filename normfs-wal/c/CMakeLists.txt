@@ -98,12 +98,6 @@ if(FRAMAC)
         normfs_wal_page_unpin
         normfs_wal_page_reusable)
 
-    set(NORMFS_WAL_POOL_WP_FCTS
-        normfs_wal_pool_init
-        normfs_wal_pool_find_free
-        normfs_wal_pool_take
-        normfs_wal_pool_give_back)
-
     # try_append is excluded: its assigns includes
     # ring->pages[ring->active].buf[0 .. page_size - 1], so re-establishing
     # every other page's offsets_wf needs the pairwise buffer separation, and
@@ -119,12 +113,29 @@ if(FRAMAC)
     # unscheduled function generates no obligation anywhere, which is why
     # having it here is the difference between that theorem being a
     # specification and being a verdict.
+    #
+    # grow and shrink are here for the same reason. A page moving between
+    # queues is the other way a record can leave the queue that accepted it,
+    # and shrink is where the durability theorem stands at that boundary, so
+    # leaving either unscheduled would make that clause a comment.
     set(NORMFS_WAL_RING_WP_FCTS
         normfs_wal_ring_init
         normfs_wal_ring_set_essential
         normfs_wal_ring_find_reusable
         normfs_wal_ring_rotate_to
+        normfs_wal_ring_grow
+        normfs_wal_ring_shrink
         normfs_wal_ring_seek)
+
+    # The pool proves against its own contracts, in its own target.
+    # verify-wal-ring does not compile this unit: the ring's calls are checked
+    # against wal_pool.h's contracts, which is what WP would use even with the
+    # body present, so adding it there only makes that target slower.
+    set(NORMFS_WAL_POOL_WP_FCTS
+        normfs_wal_pool_init
+        normfs_wal_pool_find_free
+        normfs_wal_pool_take
+        normfs_wal_pool_give_back)
 
     # An empty fcts list drops -wp-fct entirely: WP then also schedules global
     # lemma goals, which a function list silently excludes.
