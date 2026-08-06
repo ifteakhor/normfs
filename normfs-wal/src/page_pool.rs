@@ -40,6 +40,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use crate::wal_arena::{SlotRange, WalArena};
 use crate::wal_ring_v1::{AppendOutcome, WalRing};
 
 /// Keeps a page alive for as long as a reader is looking at bytes on it.
@@ -319,12 +320,27 @@ pub struct PagePool {
     /// Poked at `flush_watermark` unwritten bytes. Otherwise the writer's
     /// interval tick is the only thing on this path that can start a flush.
     flush: Mutex<Option<Arc<Notify>>>,
+    /// Fixed at construction, from the range the queue started with. A pool
+    /// that has grown flushes a little earlier than half full, which is the
+    /// harmless direction for a hint.
     flush_watermark: usize,
+    /// The shared arena this pool's pages come from, if any. A pool built by
+    /// [`PagePool::new`] owns its pages and can neither grow nor shrink.
+    arena: Option<Arc<WalArena>>,
+    /// The fewest pages this pool will shrink to. One to append into and one
+    /// the writer is draining; below that an appender waits for its own page to
+    /// reach disk, which serialises the queue against the disk rather than
+    /// merely bounding it.
+    floor: usize,
 }
 
 impl PagePool {
     /// Allocates `page_count` pages of `page_size` bytes. This is the only
     /// allocation the pool ever performs.
+    ///
+    /// The pages are this pool's for life. See [`PagePool::new_in`] for a pool
+    /// that borrows a slot range from the process-wide arena and can trade
+    /// pages with other queues.
     pub fn new(page_count: usize, page_size: usize, first_entry_id: u64) -> Self {
         PagePool {
             inner: Mutex::new(Inner {
@@ -338,6 +354,8 @@ impl PagePool {
             drainer: std::sync::atomic::AtomicBool::new(false),
             flush: Mutex::new(None),
             flush_watermark: (page_count * page_size / 2).max(page_size),
+            arena: None,
+            floor: page_count,
         }
     }
 
@@ -349,6 +367,102 @@ impl PagePool {
         if let Some(flush) = self.flush.lock().unwrap().as_ref() {
             flush.notify_one();
         }
+    }
+
+    /// Borrows the slot range `arena` has reserved for `ring_id`.
+    ///
+    /// Unlike [`PagePool::new`] this allocates nothing: the bytes already
+    /// exist, and what the pool holds is a claim on part of them. The claim can
+    /// move — see [`PagePool::append_at`], which grows into a free slot rather
+    /// than waiting for one of its own pages to reach disk, and
+    /// [`PagePool::mark_durable`], which hands the top page back once it is
+    /// safe to.
+    pub fn new_in(
+        arena: &Arc<WalArena>,
+        range: SlotRange,
+        ring_id: u64,
+        first_entry_id: u64,
+        floor: usize,
+    ) -> Self {
+        let ring = WalRing::in_arena(arena, range, ring_id, first_entry_id);
+        let page_count = ring.page_count();
+        let page_size = ring.page_size();
+        PagePool {
+            inner: Mutex::new(Inner {
+                written: vec![0; page_count],
+                page_epoch: vec![0; page_count],
+                ring,
+                fill: None,
+                unwritten: 0,
+            }),
+            space: Notify::new(),
+            drainer: std::sync::atomic::AtomicBool::new(false),
+            flush: Mutex::new(None),
+            flush_watermark: (page_count * page_size / 2).max(page_size),
+            arena: Some(Arc::clone(arena)),
+            floor: floor.max(1),
+        }
+    }
+
+    /// Takes the free arena slot above this pool's range, if there is one.
+    ///
+    /// The per-page bookkeeping grows with it. `written` starts at zero because
+    /// the page is empty, and `page_epoch` at zero because nothing has been
+    /// charged to it yet — the append that lands on it stamps it with the file
+    /// it belongs to, exactly as `charge_paged` does for every other page.
+    fn try_grow(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.ring.grow() {
+            return false;
+        }
+        let pages = inner.ring.page_count();
+        inner.written.resize(pages, 0);
+        inner.page_epoch.resize(pages, 0);
+        log::debug!(
+            target: "normfs-wal",
+            "page pool grew into arena slot {}, now {pages} pages",
+            inner.ring.slot_range().map_or(0, |r| r.first_slot + pages - 1),
+        );
+        true
+    }
+
+    /// The arena this pool's pages come from, if it shares one.
+    pub fn arena(&self) -> Option<&Arc<WalArena>> {
+        self.arena.as_ref()
+    }
+
+    /// How many pages this pool currently holds.
+    pub fn page_count(&self) -> usize {
+        self.inner.lock().unwrap().ring.page_count()
+    }
+
+    /// This pool's slot range in the shared arena, if it has one.
+    pub fn slot_range(&self) -> Option<SlotRange> {
+        self.inner.lock().unwrap().ring.slot_range()
+    }
+
+    /// Hands every page back to the arena, for a queue that is shutting down.
+    ///
+    /// Does nothing unless every page is reusable: `give_back` requires it, so
+    /// a range still holding records that are not on disk stays put.
+    pub fn release_to_arena(&self) {
+        let (Some(arena), Some(range)) = (self.arena.as_ref(), self.slot_range()) else {
+            return;
+        };
+        let inner = self.inner.lock().unwrap();
+        let essential = inner.ring.min_essential_id();
+        let all_reusable =
+            (0..inner.ring.page_count()).all(|k| inner.ring.page_is_reusable(k, essential));
+        if !all_reusable {
+            log::debug!(
+                target: "normfs-wal",
+                "not releasing {} pages to the arena: some still hold records that are not on disk",
+                range.page_count,
+            );
+            return;
+        }
+        arena.release(range, inner.ring.ring_id(), essential);
+        arena.forget_label(inner.ring.ring_id());
     }
 
     /// Whether a file writer is taking pages from this pool, and therefore
@@ -457,6 +571,21 @@ impl PagePool {
                 }
                 Ok(None) => {}
                 Err(e) => return Err(e),
+            }
+
+            // `Full` means every page this queue holds is pinned or still holds
+            // records that are not on disk. Before waiting for the disk, take
+            // the free slot above the range if there is one: growing costs
+            // nothing anybody else is using, and the process-wide total does
+            // not move -- the page came from the arena, and some other queue
+            // released it.
+            //
+            // A ring grows into the slot directly above it and nowhere else, so
+            // this fails on a fragmented arena even when free pages exist. That
+            // is the price of a contiguous range, and waiting is the correct
+            // fallback rather than an error.
+            if self.try_grow() {
+                continue;
             }
 
             if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {
@@ -607,6 +736,29 @@ impl PagePool {
                 STALL_WARN_AFTER.as_secs(),
             ),
         }
+
+        // With one arena for the whole process, "the pool is full" is only half
+        // the story: this queue could not grow because the slot above it is
+        // taken, and what a reader wants to know is by whom. Naming the holders
+        // turns a stall into something to act on rather than guess at.
+        if let Some(arena) = self.arena.as_ref() {
+            let holders = arena.holders();
+            let free = arena.free_pages();
+            log::warn!(
+                target: "normfs-wal",
+                "arena: {free} of {} pages free, held by {}",
+                arena.page_count(),
+                if holders.is_empty() {
+                    "nobody".to_string()
+                } else {
+                    holders
+                        .iter()
+                        .map(|(name, pages)| format!("{name} ({pages})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            );
+        }
     }
 
     /// Byte runs that have been appended but not yet handed to the file writer,
@@ -709,6 +861,30 @@ impl PagePool {
                 return;
             }
             inner.ring.set_essential(first_non_durable_id);
+
+            // Advancing the watermark is the only event that can make a page
+            // reusable, so it is also the only moment a queue can discover it
+            // is holding more of the arena than it needs. Give the top pages
+            // back while they are safe to give, down to the floor.
+            //
+            // `shrink` refuses the active page, refuses to go below the floor,
+            // and checks `normfs_wal_page_reusable` -- which is the predicate
+            // `normfs_wal_ring_shrink` requires, not a restatement of it. So a
+            // page carrying records that are not yet on disk, or that a reader
+            // is holding, cannot leave this queue.
+            let mut released = 0usize;
+            while inner.ring.shrink(self.floor) {
+                released += 1;
+            }
+            if released > 0 {
+                let pages = inner.ring.page_count();
+                inner.written.resize(pages, 0);
+                inner.page_epoch.resize(pages, 0);
+                log::debug!(
+                    target: "normfs-wal",
+                    "page pool returned {released} page(s) to the arena, now {pages} pages",
+                );
+            }
         }
         self.space.notify_waiters();
     }
