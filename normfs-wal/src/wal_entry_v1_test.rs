@@ -250,7 +250,9 @@ fn test_wal_entry_v1_iter_next_reports_id_overflow() {
     // The entry decodes fine, but num_entries_before + index wraps u64.
     let record = pseudo_random(8);
     let mut buffer = BytesMut::new();
-    WalEntryV1::new(&record).write_to_bytes(&mut buffer).unwrap();
+    WalEntryV1::new(&record)
+        .write_to_bytes(&mut buffer)
+        .unwrap();
 
     // Largest non-overflowing id.
     let (_, entry_id, _) = WalEntryV1::iter_next(&buffer, u64::MAX, 0).unwrap();

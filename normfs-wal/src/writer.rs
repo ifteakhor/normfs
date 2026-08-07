@@ -245,7 +245,8 @@ impl WriterState {
             // Ids are positional. Guard that the caller's id is exactly
             // num_entries_before + index — the equality the reader depends on.
             #[cfg(debug_assertions)]
-            if let (Ok(eid), Ok(base)) = (entry_id.to_u64(), self.header.num_entries_before.to_u64())
+            if let (Ok(eid), Ok(base)) =
+                (entry_id.to_u64(), self.header.num_entries_before.to_u64())
             {
                 debug_assert_eq!(
                     eid,

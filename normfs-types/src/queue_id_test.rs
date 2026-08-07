@@ -99,3 +99,38 @@ fn test_queue_id_ordering() {
 
     assert_eq!(queues, vec![queue_a, queue_b, queue_z]);
 }
+
+#[test]
+fn test_queue_id_cloud_path_without_prefix() {
+    let resolver = QueueIdResolver::new("abc123def456");
+    let queue_id = resolver.resolve("my_queue");
+
+    assert_eq!(queue_id.to_cloud_queue_path(""), "abc123def456/my_queue/");
+    assert_eq!(
+        queue_id.to_cloud_key("", &UintN::from(25u8)),
+        "abc123def456/my_queue/019.store"
+    );
+}
+
+#[test]
+fn test_queue_id_cloud_path_normalizes_prefix() {
+    let resolver = QueueIdResolver::new("abc123def456");
+    let queue_id = resolver.resolve("my_queue");
+
+    assert_eq!(
+        queue_id.to_cloud_queue_path("robot"),
+        "robot/abc123def456/my_queue/"
+    );
+    assert_eq!(
+        queue_id.to_cloud_queue_path("/robot/"),
+        "robot/abc123def456/my_queue/"
+    );
+    assert_eq!(
+        queue_id.to_cloud_key("robot", &UintN::from(25u8)),
+        "robot/abc123def456/my_queue/019.store"
+    );
+    assert_eq!(
+        queue_id.to_cloud_key("robot/", &UintN::from(25u8)),
+        "robot/abc123def456/my_queue/019.store"
+    );
+}

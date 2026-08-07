@@ -17,10 +17,10 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use common::{
-    build_file, dir_size, uncached_bytes, uncached_requested, BIG_PAYLOAD, LARGE_N, MEASUREMENT,
-    PAYLOAD, SMALL_N, WARM_UP,
+    BIG_PAYLOAD, LARGE_N, MEASUREMENT, PAYLOAD, SMALL_N, WARM_UP, build_file, dir_size,
+    uncached_bytes, uncached_requested,
 };
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use tokio::runtime::Runtime;
 use uintn::UintN;
 

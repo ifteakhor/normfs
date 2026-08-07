@@ -232,18 +232,8 @@ impl NormFS {
         // Initialize disk monitor if enabled
         let disk_monitor = if settings.max_disk_usage_per_queue.is_some() {
             log::debug!(target: "normfs", "Disk monitor enabled, creating disk monitor instance");
-            // Pass the shared S3 bucket and full prefix (with instance_id) to DiskMonitor
-            let full_cloud_prefix = if let Some(ref prefix) = cloud_prefix {
-                let instance_id = crypto_ctx.instance_id_hex();
-                Some(if prefix.is_empty() {
-                    instance_id.to_string()
-                } else {
-                    format!("{}/{}", prefix, instance_id)
-                })
-            } else {
-                None
-            };
-            match DiskMonitor::new(path.as_ref(), cloud_client.clone(), full_cloud_prefix).await {
+            match DiskMonitor::new(path.as_ref(), cloud_client.clone(), cloud_prefix.clone()).await
+            {
                 Ok(monitor) => Some(Arc::new(monitor)),
                 Err(e) => {
                     log::error!(target: "normfs", "Failed to create disk monitor: {}", e);

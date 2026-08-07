@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 #[cfg(unix)]
 fn setup_ulimits() -> Result<(), Box<dyn std::error::Error>> {
-    use libc::{getrlimit, setrlimit, rlimit, RLIMIT_NOFILE};
+    use libc::{getrlimit, rlimit, setrlimit, RLIMIT_NOFILE};
     use std::mem::MaybeUninit;
 
     unsafe {

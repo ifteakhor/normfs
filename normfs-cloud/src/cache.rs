@@ -50,7 +50,9 @@ impl RangeCache {
             key,
             HEADER_PREFIX_LEN - 1
         );
-        let header_bytes = match client.get_object_range(&key, 0, Some(HEADER_PREFIX_LEN - 1)).await
+        let header_bytes = match client
+            .get_object_range(&key, 0, Some(HEADER_PREFIX_LEN - 1))
+            .await
         {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {

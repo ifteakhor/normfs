@@ -345,8 +345,7 @@ impl WalHeaderV1 {
         let (num_entries_before, num_entries_len) = read_varint_u64(reader).await?;
 
         let header = Self::new(data_size_bytes, id_size_bytes, num_entries_before)?;
-        let fields_len =
-            WAL_HEADER_VERSION_SIZE + data_size_len + id_size_len + num_entries_len;
+        let fields_len = WAL_HEADER_VERSION_SIZE + data_size_len + id_size_len + num_entries_len;
 
         // The fields have been consumed from the stream, so re-encode them to
         // recover the exact bytes the trailer was computed over rather than

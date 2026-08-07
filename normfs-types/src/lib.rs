@@ -24,6 +24,15 @@ impl std::fmt::Display for QueueId {
 }
 
 impl QueueId {
+    fn normalize_cloud_prefix(base_prefix: &str) -> String {
+        let prefix = base_prefix.trim_matches('/');
+        if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix}/")
+        }
+    }
+
     /// Get the absolute queue path as a string slice
     pub fn as_str(&self) -> &str {
         &self.path
@@ -37,7 +46,8 @@ impl QueueId {
     /// Get the queue path for cloud storage with base prefix
     /// Example: "prefix/instance_id/queue_name/"
     pub fn to_cloud_queue_path(&self, base_prefix: &str) -> String {
-        format!("{}{}/", base_prefix, self.path.trim_start_matches('/'))
+        let prefix = Self::normalize_cloud_prefix(base_prefix);
+        format!("{}{}/", prefix, self.path.trim_start_matches('/'))
     }
 
     fn to_fs_path(&self, prefix: &std::path::Path) -> std::path::PathBuf {
@@ -75,15 +85,12 @@ impl QueueId {
     /// Example: prefix/instance_id/queue_name/abc/def/123.store
     /// Note: Only store files are stored in cloud storage, not WAL files
     pub fn to_cloud_key(&self, base_prefix: &str, file_id: &UintN) -> String {
+        let prefix = Self::normalize_cloud_prefix(base_prefix);
         let queue_path = self.path.trim_start_matches('/');
         let file_path_buf = file_id.to_file_path("", "store");
         let file_path = file_path_buf.to_str().unwrap_or("").trim_start_matches('/');
 
-        if base_prefix.is_empty() {
-            format!("{}/{}", queue_path, file_path)
-        } else {
-            format!("{}{}/{}", base_prefix, queue_path, file_path)
-        }
+        format!("{}{}/{}", prefix, queue_path, file_path)
     }
 }
 

@@ -26,10 +26,10 @@ mod common;
 use std::time::Instant;
 
 use common::{
-    build_file, file_len, uncached_bytes, uncached_requested, BIG_PAYLOAD, LARGE_N, MEASUREMENT,
-    PAYLOAD, SMALL_N, WARM_UP,
+    BIG_PAYLOAD, LARGE_N, MEASUREMENT, PAYLOAD, SMALL_N, WARM_UP, build_file, file_len,
+    uncached_bytes, uncached_requested,
 };
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use normfs_types::{DataSource, QueueId, ReadEntry};
 use normfs_wal::WalStore;
 use tokio::runtime::Runtime;

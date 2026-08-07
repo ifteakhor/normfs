@@ -248,7 +248,9 @@ async fn test_v1_enqueue_read_and_scan() {
     let records: Vec<Bytes> = vec![
         Bytes::from_static(b"alpha"),
         Bytes::from_static(b""),
-        Bytes::from_static(b"a longer gamma record crossing a two byte varint boundary .............."),
+        Bytes::from_static(
+            b"a longer gamma record crossing a two byte varint boundary ..............",
+        ),
     ];
     for (i, r) in records.iter().enumerate() {
         store
@@ -351,7 +353,11 @@ async fn test_v1_truncated_tail_is_dropped() {
         .unwrap();
     for i in 0..3u64 {
         store
-            .enqueue(&queue_id, UintN::from(i), Bytes::from(format!("record-{i}")))
+            .enqueue(
+                &queue_id,
+                UintN::from(i),
+                Bytes::from(format!("record-{i}")),
+            )
             .unwrap();
     }
     store.close().await.unwrap();
@@ -360,7 +366,9 @@ async fn test_v1_truncated_tail_is_dropped() {
     let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
     let path = file_id.to_file_path(wal_dir.to_str().unwrap(), "wal");
     let bytes = tokio::fs::read(&path).await.unwrap();
-    tokio::fs::write(&path, &bytes[..bytes.len() - 3]).await.unwrap();
+    tokio::fs::write(&path, &bytes[..bytes.len() - 3])
+        .await
+        .unwrap();
 
     // Only the first two entries survive; ids 0 and 1.
     let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
@@ -448,8 +456,7 @@ async fn test_v1_truncation_offsets_across_a_frame() {
 
     for cut in [1usize, 4, 5, 100, 203, 204, entry_len] {
         let tmp_dir = tempdir().unwrap();
-        let (wal_dir, file_id) =
-            build_v1_file(tmp_dir.path(), "v1_cut", 4, payload).await;
+        let (wal_dir, file_id) = build_v1_file(tmp_dir.path(), "v1_cut", 4, payload).await;
         let path = file_id.to_file_path(wal_dir.to_str().unwrap(), "wal");
         let bytes = tokio::fs::read(&path).await.unwrap();
         tokio::fs::write(&path, &bytes[..bytes.len() - cut])
@@ -516,14 +523,24 @@ async fn test_mixed_v0_and_v1_files_in_one_queue() {
     let file2 = UintN::from(2u64);
     let header2 = WalHeader::new(8, 4, UintN::from(2u64)).unwrap();
     store
-        .start_writer(&queue_id, &file2, header2, settings, Some(UintN::from(1u64)))
+        .start_writer(
+            &queue_id,
+            &file2,
+            header2,
+            settings,
+            Some(UintN::from(1u64)),
+        )
         .await
         .unwrap();
     store
         .enqueue(&queue_id, UintN::from(2u64), Bytes::from_static(b"v1-two"))
         .unwrap();
     store
-        .enqueue(&queue_id, UintN::from(3u64), Bytes::from_static(b"v1-three"))
+        .enqueue(
+            &queue_id,
+            UintN::from(3u64),
+            Bytes::from_static(b"v1-three"),
+        )
         .unwrap();
     store.close().await.unwrap();
 

@@ -1,5 +1,5 @@
-use crate::store_header_v1::{AnyStoreHeader, AnyStoreHeaderError};
 use crate::header::{FileAuthentication, StoreHeaderError};
+use crate::store_header_v1::{AnyStoreHeader, AnyStoreHeaderError};
 use normfs_crypto::CryptoContext;
 use normfs_types::QueueId;
 use std::collections::HashMap;

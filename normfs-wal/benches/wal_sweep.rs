@@ -310,7 +310,10 @@ async fn main() {
 
     let sizes = requested_sizes();
     if sizes.len() > 1 {
-        println!("warning: {} sizes in one process — later points inherit the writeback backlog of earlier ones. Pass one size per run for numbers to quote.\n", sizes.len());
+        println!(
+            "warning: {} sizes in one process — later points inherit the writeback backlog of earlier ones. Pass one size per run for numbers to quote.\n",
+            sizes.len()
+        );
     }
 
     for payload in sizes {

@@ -1,9 +1,8 @@
 use super::wal_header::{WalHeader, WalHeaderError};
 use super::wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_CRC_SIZE,
-    WAL_HEADER_V1_MAX_SIZE,
-    WAL_HEADER_V1_MIN_SIZE, WAL_HEADER_V1_VERSION, WAL_HEADER_VERSION_SIZE, WalHeaderV1,
-    WalHeaderV1Error, peek_version,
+    WAL_HEADER_V1_MAX_SIZE, WAL_HEADER_V1_MIN_SIZE, WAL_HEADER_V1_VERSION, WAL_HEADER_VERSION_SIZE,
+    WalHeaderV1, WalHeaderV1Error, peek_version,
 };
 use bytes::BytesMut;
 use tokio::io::BufReader;
@@ -264,7 +263,10 @@ async fn test_wal_header_v1_reader_rejects_unsupported_versions() {
 #[test]
 fn test_wal_header_v1_u64_bounds() {
     let header = WalHeaderV1::new(8, 4, u64::MAX).unwrap();
-    assert_eq!(header.size(), WAL_HEADER_V1_MAX_SIZE + WAL_HEADER_V1_CRC_SIZE);
+    assert_eq!(
+        header.size(),
+        WAL_HEADER_V1_MAX_SIZE + WAL_HEADER_V1_CRC_SIZE
+    );
 
     let mut buffer = BytesMut::new();
     let written = header.write_to_bytes(&mut buffer).unwrap();

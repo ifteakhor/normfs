@@ -146,9 +146,9 @@ fn map_field_status(
         NORMFS_STORE_HEADER_ERR_INVALID_COMPRESSION => Err(
             StoreHeaderV1Error::UnsupportedCompression(header.compression),
         ),
-        NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION => Err(
-            StoreHeaderV1Error::UnsupportedEncryption(header.encryption),
-        ),
+        NORMFS_STORE_HEADER_ERR_INVALID_ENCRYPTION => {
+            Err(StoreHeaderV1Error::UnsupportedEncryption(header.encryption))
+        }
         other => map_status(other, version),
     }
 }

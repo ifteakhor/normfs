@@ -41,7 +41,7 @@ impl DiskMonitorConfig {
 
 #[derive(Debug)]
 struct QueueMonitor {
-    queue_id: String,
+    queue_id: QueueId,
     config: DiskMonitorConfig,
     root_path: PathBuf,
     offloader: Option<QueueOffloader>,
@@ -49,7 +49,7 @@ struct QueueMonitor {
 
 impl QueueMonitor {
     async fn new(
-        queue_id: String,
+        queue_id: QueueId,
         config: DiskMonitorConfig,
         root_path: PathBuf,
         client: Option<Arc<S3Client>>,
@@ -73,13 +73,13 @@ impl QueueMonitor {
         let mut total_size = 0;
 
         // Calculate WAL folder size
-        let wal_path = self.root_path.join(&self.queue_id).join("wal");
+        let wal_path = self.queue_id.to_wal_dir(&self.root_path);
         if wal_path.exists() {
             total_size += Self::get_directory_size(&wal_path).await?;
         }
 
         // Calculate store folder size
-        let store_path = self.root_path.join(&self.queue_id).join("store");
+        let store_path = self.queue_id.to_store_dir(&self.root_path);
         if store_path.exists() {
             total_size += Self::get_directory_size(&store_path).await?;
         }
@@ -144,8 +144,8 @@ impl QueueMonitor {
             None
         };
 
-        let store_path = self.root_path.join(&self.queue_id).join("store");
-        let wal_path = self.root_path.join(&self.queue_id).join("wal");
+        let store_path = self.queue_id.to_store_dir(&self.root_path);
+        let wal_path = self.queue_id.to_wal_dir(&self.root_path);
 
         // Find initial minimum ID across both store and wal
         let store_min_id = if store_path.exists() {
@@ -176,8 +176,8 @@ impl QueueMonitor {
         };
 
         while size_to_free > 0 {
-            let store_file_path = current_id.to_file_path(store_path.to_str().unwrap(), "store");
-            let wal_file_path = current_id.to_file_path(wal_path.to_str().unwrap(), "wal");
+            let store_file_path = self.queue_id.to_store_path(&self.root_path, &current_id);
+            let wal_file_path = self.queue_id.to_wal_path(&self.root_path, &current_id);
 
             if !store_file_path.exists() && !wal_file_path.exists() {
                 log::info!(
@@ -415,7 +415,7 @@ impl DiskMonitor {
         config.validate()?;
 
         let monitor = QueueMonitor::new(
-            queue_id.to_string(),
+            queue_id.clone(),
             config,
             self.root_path.clone(),
             self.client.clone(),

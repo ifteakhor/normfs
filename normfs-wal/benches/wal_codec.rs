@@ -11,8 +11,8 @@ use std::hint::black_box;
 
 use bytes::BytesMut;
 use common::{BIG_PAYLOAD, MEASUREMENT, PAYLOAD, WARM_UP};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use normfs_wal::{crc32c, WalEntryV1};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use normfs_wal::{WalEntryV1, crc32c};
 use xxhash_rust::{xxh32, xxh64};
 
 /// Payloads spanning the varint-width boundaries, from the smallest useful
@@ -97,7 +97,9 @@ fn bench_checksum(c: &mut Criterion) {
     // Dense enough to locate the crossover rather than interpolate across it:
     // CRC32C's chunked path needs 768 bytes in one call, and xxHash is strong
     // in exactly the band below that. 768 and its neighbours are the point.
-    for &p in &[8usize, 64, PAYLOAD, 128, 256, 512, 768, 1024, 2048, 4096, 65536] {
+    for &p in &[
+        8usize, 64, PAYLOAD, 128, 256, 512, 768, 1024, 2048, 4096, 65536,
+    ] {
         let data = pseudo_random(p);
         g.throughput(Throughput::Bytes(p as u64));
 

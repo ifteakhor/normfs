@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use log::{error, info, warn};
+use normfs_types::QueueId;
 use tokio::{
     sync::{RwLock, mpsc},
     time::sleep,
@@ -47,12 +48,12 @@ pub struct QueueOffloader {
 
 impl QueueOffloader {
     pub async fn new(
-        queue_id: String,
+        queue_id: QueueId,
         root_path: PathBuf,
         client: Arc<S3Client>,
         prefix: &str,
     ) -> Self {
-        let queue_path = root_path.join(&queue_id).join("store");
+        let queue_path = queue_id.to_store_dir(&root_path);
         let (offload_sender, offload_receiver) = mpsc::channel::<UintN>(1000);
         let latest_offloaded_id = Arc::new(RwLock::new(None));
 
@@ -101,7 +102,7 @@ impl QueueOffloader {
     }
 
     async fn initialize_upload_queue_static(
-        queue_id: &str,
+        queue_id: &QueueId,
         queue_path: &PathBuf,
         offload_sender: mpsc::Sender<UintN>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -160,7 +161,7 @@ impl QueueOffloader {
     }
 
     async fn offload_worker(
-        queue_id: String,
+        queue_id: QueueId,
         queue_path: PathBuf,
         client: Arc<S3Client>,
         prefix: String,
@@ -244,7 +245,7 @@ impl QueueOffloader {
 }
 
 struct QueueOffloaderWorker {
-    queue_id: String,
+    queue_id: QueueId,
     queue_path: PathBuf,
     client: Arc<S3Client>,
     prefix: String,
@@ -252,7 +253,6 @@ struct QueueOffloaderWorker {
 
 impl QueueOffloaderWorker {
     async fn is_file_offloaded(&self, file_id: &UintN) -> Result<bool, OffloadError> {
-        let s3_path = file_id.to_file_path(&self.queue_id, "store");
         let local_path = file_id.to_file_path(&self.queue_path.to_string_lossy(), "store");
 
         if !local_path.exists() {
@@ -266,7 +266,7 @@ impl QueueOffloaderWorker {
             .map_err(OffloadError::from)?
             .len();
 
-        let s3_key = format!("{}/{}", self.prefix, s3_path.to_string_lossy());
+        let s3_key = self.queue_id.to_cloud_key(&self.prefix, file_id);
 
         match self.client.head_object(&s3_key).await {
             Ok(Some(s3_size)) => Ok(local_size == s3_size),
@@ -280,8 +280,7 @@ impl QueueOffloaderWorker {
 
     async fn upload_file(&self, file_id: &UintN) -> Result<(), OffloadError> {
         let local_path = file_id.to_file_path(&self.queue_path.to_string_lossy(), "store");
-        let s3_path = file_id.to_file_path(&self.queue_id, "store");
-        let s3_key = format!("{}/{}", self.prefix, s3_path.to_string_lossy());
+        let s3_key = self.queue_id.to_cloud_key(&self.prefix, file_id);
 
         info!("Uploading file {:?} to S3 key: {}", file_id, s3_key);
 

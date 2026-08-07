@@ -24,7 +24,7 @@ mod common;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{build_file, BIG_PAYLOAD, PAYLOAD};
+use common::{BIG_PAYLOAD, PAYLOAD, build_file};
 use tokio::runtime::Runtime;
 use uintn::UintN;
 
