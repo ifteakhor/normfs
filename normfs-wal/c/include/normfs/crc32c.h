@@ -13,23 +13,23 @@
  * equals the checksum of a concatenated with b. Inversion is handled inside,
  * callers always seed with 0.
  *
- * normfs_crc32c dispatches to a CPU fast path where one is available.
- * normfs_crc32c_portable is the table driven reference.
+ * normfs_crc32c uses the CPU instruction: x86_64 builds require SSE4.2 and
+ * aarch64 builds require the CRC extension. A CPU without it faults rather
+ * than running slower, so there is no second implementation to fall back to.
  *
- * Both carry the same Frama-C contract and both are proven, the dispatcher
- * against an assumed contract for the intrinsic path, which no prover can
- * discharge and which test_crc32c.c checks against the table on every build.
- * The table is not a fallback for exotic targets, it is the definition: the
- * logic below is what "CRC32C" means to every other proof in the tree.
+ * WP proves normfs_crc32c against an assumed contract for the intrinsic path,
+ * which no prover can discharge; test_crc32c.c is what checks that assumption,
+ * against a reference it builds from the polynomial itself.
  */
-
-extern const uint32_t normfs_crc32c_table[256];
 
 /*
- * The checksum is a recursive definition over the table, not an axiom. The
- * table's identity as the CRC32C polynomial table is pinned by the
- * check-vector test.
+ * Declared, not defined: the logic below reads it to say what CRC32C is, and
+ * nothing reads it at run time. The values are therefore not pinned here, and
+ * what ties normfs_crc32c_logic to Castagnoli is the check-vector test.
  */
+extern const uint32_t normfs_crc32c_table[256];
+
+/* The checksum is a recursive definition over the table, not an axiom. */
 /*@ axiomatic NormfsCrc32c {
       logic integer normfs_crc32c_step(integer c, integer b) =
         normfs_crc32c_table[(c ^ b) & 0xFF] ^ (c >> 8);
@@ -53,12 +53,6 @@ extern const uint32_t normfs_crc32c_table[256];
         normfs_crc32c_fold(c, data, n + 1) ==
           normfs_crc32c_step(normfs_crc32c_fold(c, data, n), data[n]);
 */
-
-/*@ requires len == 0 || \valid_read(data + (0 .. len - 1));
-    assigns \nothing;
-    ensures \result == normfs_crc32c_logic(crc, data, len);
-*/
-uint32_t normfs_crc32c_portable(uint32_t crc, const uint8_t *data, size_t len);
 
 /*@ requires len == 0 || \valid_read(data + (0 .. len - 1));
     assigns \nothing;

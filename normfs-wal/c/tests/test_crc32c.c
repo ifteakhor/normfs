@@ -92,7 +92,6 @@ test_check_vector(void)
 	const uint8_t input[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
 
 	CHECK(normfs_crc32c(0u, input, sizeof(input)) == 0xE3069283U);
-	CHECK(normfs_crc32c_portable(0u, input, sizeof(input)) == 0xE3069283U);
 	return 0;
 }
 
@@ -102,7 +101,6 @@ test_empty_input(void)
 	const uint8_t input[1] = {0};
 
 	CHECK(normfs_crc32c(0u, input, 0u) == 0u);
-	CHECK(normfs_crc32c_portable(0u, input, 0u) == 0u);
 	return 0;
 }
 
@@ -126,7 +124,7 @@ test_seed_composition(void)
 }
 
 static int
-test_matches_reference_and_dispatch(void)
+test_matches_reference(void)
 {
 	static uint8_t buf[1024 + 8];
 	size_t len;
@@ -139,7 +137,6 @@ test_matches_reference_and_dispatch(void)
 		for (align = 0u; align < 8u; align++) {
 			const uint8_t *p = buf + align;
 			uint32_t expected = reference_crc32c(0u, p, len);
-			CHECK(normfs_crc32c_portable(0u, p, len) == expected);
 			CHECK(normfs_crc32c(0u, p, len) == expected);
 		}
 	}
@@ -160,8 +157,6 @@ test_seeded_matches_reference(void)
 		for (i = 0u; i <= 256u; i++) {
 			uint32_t expected = reference_crc32c(seeds[s], buf, i);
 			CHECK(normfs_crc32c(seeds[s], buf, i) == expected);
-			CHECK(normfs_crc32c_portable(seeds[s], buf, i) ==
-			    expected);
 		}
 	}
 	return 0;
@@ -231,8 +226,6 @@ test_streamed_matches_reference(void)
 				    reference_crc32c(seeds[s], p, len);
 				CHECK(normfs_crc32c(seeds[s], p, len) ==
 				    expected);
-				CHECK(normfs_crc32c_portable(seeds[s], p, len)
-				    == expected);
 			}
 		}
 	}
@@ -272,7 +265,7 @@ main(void)
 	if (test_check_vector() != 0) return 1;
 	if (test_empty_input() != 0) return 1;
 	if (test_seed_composition() != 0) return 1;
-	if (test_matches_reference_and_dispatch() != 0) return 1;
+	if (test_matches_reference() != 0) return 1;
 	if (test_seeded_matches_reference() != 0) return 1;
 	if (test_shift_matrices() != 0) return 1;
 	if (test_streamed_matches_reference() != 0) return 1;

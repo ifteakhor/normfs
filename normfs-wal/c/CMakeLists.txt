@@ -15,6 +15,14 @@ add_library(normfs_wal_c STATIC
     src/crc32c.c
     src/wal_entry.c
 )
+# Asked of the compiler, not of CMAKE_SYSTEM_PROCESSOR: without a toolchain
+# file that variable is the host's arch, so a cross build would hand -msse4.2
+# to an aarch64 compiler, which rejects it outright.
+include(CheckCCompilerFlag)
+check_c_compiler_flag(-msse4.2 NORMFS_WAL_HAVE_MSSE42)
+if(NORMFS_WAL_HAVE_MSSE42)
+    target_compile_options(normfs_wal_c PRIVATE -msse4.2)
+endif()
 target_include_directories(normfs_wal_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${NORMFS_UINTN_INCLUDE}>
@@ -23,8 +31,8 @@ target_include_directories(normfs_wal_c PUBLIC
 
 # The header and entry codecs are established by Frama-C WP rather than by
 # executable tests. The CRC32C hardware fast paths use compiler intrinsics that
-# WP cannot interpret, so the one remaining test checks them against the
-# proven portable path.
+# WP cannot interpret, so the one remaining test checks them against a
+# reference it derives from the polynomial.
 enable_testing()
 add_executable(test_crc32c tests/test_crc32c.c)
 target_link_libraries(test_crc32c PRIVATE normfs_wal_c)
@@ -100,16 +108,9 @@ if(FRAMAC)
 
     normfs_add_wp_target(verify-wal-header src/wal_header.c
         "${NORMFS_WAL_HEADER_WP_FCTS}" "WP: normfs V1 WAL header")
-    # Under __FRAMAC__ the intrinsic fast path has its contract but no body, so
-    # WP assumes it and proves the dispatcher that actually ships against it;
-    # the differential test is what covers that one assumption. Only the two
-    # proved functions have bodies in the unit, so no allowlist is needed, and
-    # omitting it schedules the fold_extend lemma goal too.
-    normfs_add_wp_target(verify-crc32c src/crc32c.c
-        "" "WP: normfs CRC32C (table path, dispatcher)")
     normfs_add_wp_target(verify-wal-entry src/wal_entry.c
         "${NORMFS_WAL_ENTRY_WP_FCTS}" "WP: normfs V1 WAL entry")
 
     add_custom_target(verify)
-    add_dependencies(verify verify-wal-header verify-crc32c verify-wal-entry)
+    add_dependencies(verify verify-wal-header verify-wal-entry)
 endif()

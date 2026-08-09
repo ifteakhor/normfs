@@ -24,7 +24,8 @@ fn main() {
         println!("cargo:rerun-if-changed={}", source.display());
     }
 
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    build
         .files(&sources)
         .include(&include_dir)
         .include(&uintn_include_dir)
@@ -34,6 +35,11 @@ fn main() {
         .flag("-Werror")
         .flag("-pedantic")
         .opt_level(3)
-        .warnings(false)
-        .compile("normfs_wal_c");
+        .warnings(false);
+
+    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
+        build.flag("-msse4.2");
+    }
+
+    build.compile("normfs_wal_c");
 }

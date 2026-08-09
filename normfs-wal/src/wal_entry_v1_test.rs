@@ -169,6 +169,18 @@ fn test_wal_entry_v1_crc32c_check_vector() {
             crc32c(0, &data)
         );
     }
+
+    // The C fast path folds three interleaved streams and rejoins them with
+    // the shift matrices, in 3072-byte chunks and then 768-byte ones; under
+    // 768 it stays serial. 7000 bytes reaches both chunk sizes, so folding the
+    // same buffer in small chunks checks them against the serial path, which
+    // is what every test above is too short to reach.
+    let big = pseudo_random(7000);
+    let mut acc = 0u32;
+    for chunk in big.chunks(100) {
+        acc = crc32c(acc, chunk);
+    }
+    assert_eq!(acc, crc32c(0, &big));
 }
 
 #[test]

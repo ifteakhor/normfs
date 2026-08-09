@@ -59,7 +59,7 @@ build: configure
 	done
 
 # test covers the two things the proof job cannot: the CRC32C differential test
-# (hardware intrinsics against the proven portable path, which WP cannot reach)
+# (hardware intrinsics against a polynomial reference, which WP cannot reach)
 # and check-proved.sh itself, since a report it wrongly accepts looks exactly
 # like one it rightly accepts. --no-tests=ignore lets the modules that carry no
 # tests pass rather than error, keeping this discovered.
