@@ -419,6 +419,117 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     );
 }
 
+/// An unwritten page from a closed file goes to the next file, not nowhere.
+///
+/// `take_pending` filters on epoch, and filtering on exact equality loses these
+/// outright: no writer for a closed file is ever constructed again, so nothing
+/// asks for that epoch, while the ring reuses the page as soon as a later fsync
+/// moves the watermark past it. The records were acked and end up in no file.
+#[tokio::test]
+async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
+    const HEADER: u64 = 16;
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+    pool.arm_file_fill(HEADER + record_charge(), HEADER);
+
+    // File 0 takes a record and never writes it: no commit_written, standing in
+    // for a flush that failed every retry before close().
+    let id0 = pool.next_entry_id();
+    pool.place(id0, &RECORD).await.unwrap();
+    let stranded_page = pool.with_ring(|r| r.active_page());
+    assert!(
+        pool.take_pending(0)
+            .iter()
+            .any(|(w, _)| w.page_index == stranded_page),
+        "file 0 has a run pending on page {stranded_page}, and this test is about it \
+         never being written"
+    );
+
+    // Enough records to rotate, so file 0 is closed and file 1 is open.
+    pool.mark_durable(id0);
+    let mut rotated = false;
+    while !rotated {
+        let id = pool.next_entry_id();
+        rotated = pool.place(id, &RECORD).await.unwrap().rotate == RotateHint::Before;
+        pool.mark_durable(id);
+    }
+    let epoch = pool.epoch();
+    assert!(epoch > 0);
+
+    let taken = pool.take_pending(epoch);
+    let pages: Vec<usize> = taken.iter().map(|(w, _)| w.page_index).collect();
+    assert!(
+        pages.contains(&stranded_page),
+        "the open file must pick up page {stranded_page}, which the closed file left \
+         unwritten, or entry {id0} is in no file at all: took pages {pages:?}"
+    );
+}
+
+/// A record too wide for the V1 frame must not move the file on.
+///
+/// The writer rejects it before it can rotate anything, so charging it advances
+/// the pool's epoch past the writer's for good: every later page is stamped with
+/// an epoch no flush asks for, and the queue stops reaching disk entirely.
+#[tokio::test]
+async fn a_record_too_wide_to_frame_does_not_move_the_epoch() {
+    const HEADER: u64 = 16;
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+    pool.arm_file_fill(HEADER + record_charge() * 2, HEADER);
+
+    // One real record first, so has_written is set and a rotation is otherwise
+    // possible.
+    pool.charge_buffered(RECORD.len());
+    let before = (pool.epoch(), pool.fill_used());
+
+    let placement = pool.charge_buffered(u32::MAX as usize + 1);
+    assert_eq!(placement.rotate, RotateHint::WriterDecides);
+    assert_eq!(
+        (pool.epoch(), pool.fill_used()),
+        before,
+        "a record the writer will reject must leave the file accounting untouched"
+    );
+}
+
+/// A file takes at least one record, however small its maximum.
+///
+/// The paged path rotates on a page opening, and the first record of a file
+/// opens one by definition. Without the `has_written` guard a file below its own
+/// header size is closed empty, and two files then claim the same
+/// num_entries_before, which recovery uses to order them.
+#[tokio::test]
+async fn a_file_is_never_closed_before_it_takes_a_record() {
+    const HEADER: u64 = 16;
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+
+    // Fill the active page before the writer arms, so the queue's first record
+    // has to open a page. This is the readonly-to-write upgrade `arm_file_fill`
+    // is written for: the pool already holds records when the writer starts.
+    for _ in 0..2 {
+        assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
+    }
+    assert_eq!(
+        pool.with_ring(|r| r.active_page()),
+        0,
+        "two records fill page 0 and leave it active, per this module's geometry"
+    );
+    pool.mark_durable(pool.next_entry_id());
+
+    // Smaller than the header, so `used >= max` holds from the moment it arms.
+    pool.arm_file_fill(HEADER / 2, HEADER);
+
+    let id = pool.next_entry_id();
+    let first = pool.place(id, &RECORD).await.unwrap();
+    assert!(
+        pool.with_ring(|r| r.page_first_entry_id(r.active_page())) == Some(id),
+        "this test only means something if the first record opens a page"
+    );
+    assert_eq!(
+        first.rotate,
+        RotateHint::None,
+        "the first record of a file must not rotate it away before it holds anything"
+    );
+    assert_eq!(first.epoch, 0);
+}
+
 /// Stepping over a record too large for a page must not wait for a page.
 ///
 /// `skip_to` waits until the pool has nothing left to lose before it re-seeds.

@@ -243,6 +243,11 @@ async fn pages_reach_the_file_before_the_watermark_moves() {
     .await
     .unwrap();
 
+    // Standing in for WriterState, which opens this gate once the record that
+    // opened the file has been handed over. Until then a flush takes no pages,
+    // so the file's first record cannot be overtaken by the ones behind it.
+    writer.allow_pool_flush();
+
     // Nothing is durable before anything has been appended.
     assert_eq!(pool.durable_before(), 0);
 

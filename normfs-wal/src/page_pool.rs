@@ -127,9 +127,11 @@ pub struct Placement {
     /// and must not be buffered again.
     pub in_pool: bool,
     pub rotate: RotateHint,
-    /// Which file this record was charged to, counted from zero. The writer
-    /// checks it against its own count, and passes it back to the pool to ask
-    /// for its own pages.
+    /// Which file this record was charged to, counted from zero.
+    ///
+    /// A tripwire, not a control input: `check_epoch` compares it against the
+    /// writer's own count so a disagreement is greppable rather than silent.
+    /// What a flush asks the pool with is the writer's own `file_epoch`.
     pub epoch: u64,
 }
 
@@ -222,15 +224,6 @@ struct Inner {
 
 /// Appends under the pool lock, keeping the file writer's cursor honest.
 ///
-/// A rotation resets a page's bytes, and with them the cursor into that page.
-/// Rotation is detected by `next_page_id`, which `normfs_wal_ring_rotate_to`
-/// increments and nothing else touches. Comparing the active index instead
-/// misses the ring rotating into the page that was already active — legal when
-/// that page is empty or fully durable — which would leave a stale cursor and
-/// silently swallow the new page's first bytes.
-///
-/// Returns whether this append started a fresh page, which is where a file is
-/// allowed to end.
 /// What a record of this length costs the file: framing and CRC, not payload.
 fn encoded_len_of(record_len: usize) -> u64 {
     u32::try_from(record_len)
@@ -262,7 +255,11 @@ fn charge_paged(inner: &mut Inner, entry_len: u64, opened_page: bool) -> Placeme
         };
     };
 
-    let rotate = if opened_page && fill.used >= fill.max {
+    // `has_written` guards the first record of a file: it opens a page by
+    // definition, and without this a file whose max is below its own header
+    // would be closed empty, leaving two files claiming the same
+    // num_entries_before.
+    let rotate = if opened_page && fill.has_written && fill.used >= fill.max {
         fill.epoch += 1;
         fill.used = fill.header_len.saturating_add(entry_len);
         RotateHint::Before
@@ -281,6 +278,17 @@ fn charge_paged(inner: &mut Inner, entry_len: u64, opened_page: bool) -> Placeme
     }
 }
 
+/// Appends under the pool lock, keeping the file writer's cursor honest.
+///
+/// A rotation resets a page's bytes, and with them the cursor into that page.
+/// Rotation is detected by `next_page_id`, which `normfs_wal_ring_rotate_to`
+/// increments and nothing else touches. Comparing the active index instead
+/// misses the ring rotating into the page that was already active, which is
+/// legal when that page is empty or fully durable, and would leave a stale
+/// cursor that silently swallowed the new page's first bytes.
+///
+/// Returns whether this append started a fresh page, which is where a file is
+/// allowed to end.
 fn append_locked(inner: &mut Inner, record: &[u8]) -> (AppendOutcome, bool) {
     let before_page_id = inner.ring.next_page_id();
     let outcome = inner.ring.append(record);
@@ -430,7 +438,14 @@ impl PagePool {
     /// larger than a page would never rotate at all, because rotation would be
     /// waiting for a page boundary that never comes.
     pub fn charge_buffered(&self, record_len: usize) -> Placement {
-        let entry_len = encoded_len_of(record_len);
+        let Ok(record_len) = u32::try_from(record_len) else {
+            // Wider than the V1 frame, so `WriterState::write` rejects it before
+            // it can rotate anything. Charging it would move the file on for a
+            // record that never reaches one, and the pool's epoch would outrun
+            // the writer's for good.
+            return Placement::default();
+        };
+        let entry_len = crate::wal_entry_v1::encoded_len(record_len) as u64;
         let mut inner = self.inner.lock().unwrap();
         let Some(fill) = inner.fill.as_mut() else {
             return Placement::default();
@@ -542,10 +557,18 @@ impl PagePool {
     /// derives V1 ids positionally — would be skewed by exactly that many
     /// entries.
     ///
-    /// Each writer passes the file it is writing, and gets only the pages
-    /// stamped with it. No page carries two epochs, because a file only ever
-    /// ends where a page ends, so this is a filter rather than a cut: nothing
-    /// has to be split, and there is no straddling case left to detect.
+    /// Each writer passes the file it is writing, and gets the pages stamped
+    /// with it. No page carries two epochs, because a file only ever ends where
+    /// a page ends, so this is a filter rather than a cut: nothing has to be
+    /// split, and there is no straddling case left to detect.
+    ///
+    /// Older epochs are taken too, and that is deliberate. A page of an earlier
+    /// file is normally written out long before its writer closes, so it is
+    /// already past its cursor and skipped here. One arrives only when that
+    /// file's last flush failed outright, and then the choice is between this
+    /// file and no file at all: nothing else will ever ask for that epoch
+    /// again, and the ring will reuse the page as soon as a later fsync moves
+    /// the watermark past it. Handing it to the open file keeps the bytes.
     pub fn take_pending(&self, epoch: u64) -> Vec<(PendingWrite, Vec<u8>)> {
         let inner = self.inner.lock().unwrap();
         let count = inner.ring.page_count();
@@ -560,8 +583,17 @@ impl PagePool {
             let Some(last_entry_id) = inner.ring.page_last_entry_id(k) else {
                 continue;
             };
-            if inner.page_epoch[k] != epoch {
+            if inner.page_epoch[k] > epoch {
                 continue;
+            }
+            if inner.page_epoch[k] < epoch {
+                log::error!(
+                    target: "normfs-wal",
+                    "page {k} still holds unwritten entries ..={last_entry_id} for file {}, \
+                     which is already closed: its last flush did not complete, so they are \
+                     being written into file {epoch} instead of being lost",
+                    inner.page_epoch[k],
+                );
             }
             let bytes = inner.ring.page_bytes(k)[from..used].to_vec();
             out.push((

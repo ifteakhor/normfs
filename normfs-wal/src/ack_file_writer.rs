@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -46,6 +47,7 @@ pub struct AckFileWriter {
     shutdown_tx: mpsc::Sender<()>,
     buffer_full_notify: Arc<Notify>,
     pooled: bool,
+    pool_ready: Arc<AtomicBool>,
 }
 
 /// Writes out everything the pool has appended since the last flush, then
@@ -210,6 +212,12 @@ impl AckFileWriter {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let pooled = pool.is_some();
+        // Closed until the record that opens this file has been handed over.
+        // A buffered record has no page, so nothing else orders it against the
+        // pages that follow it: without this the new file's first flush can
+        // write them ahead of it, and V1's positional ids then hand every
+        // payload in the file out under the wrong id.
+        let pool_ready = Arc::new(AtomicBool::new(false));
         let writer_handle = tokio::spawn(writer_task(
             path.clone(),
             Arc::new(Mutex::new(file)),
@@ -220,6 +228,7 @@ impl AckFileWriter {
             ack_sender,
             pool,
             epoch,
+            pool_ready.clone(),
         ));
 
         Ok(Self {
@@ -229,7 +238,16 @@ impl AckFileWriter {
             shutdown_tx,
             buffer_full_notify,
             pooled,
+            pool_ready,
         })
+    }
+
+    /// Lets this file's flushes start taking pages.
+    ///
+    /// Called once the first record of the file has been handed over, so that
+    /// record cannot be overtaken by the pages behind it.
+    pub fn allow_pool_flush(&self) {
+        self.pool_ready.store(true, Ordering::Release);
     }
 
     pub async fn can_add(&self, size: usize) -> bool {
@@ -291,6 +309,7 @@ async fn writer_task(
     ack_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: Option<Arc<PagePool>>,
     epoch: u64,
+    pool_ready: Arc<AtomicBool>,
 ) {
     let mut interval = tokio::time::interval(settings.write_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
@@ -299,14 +318,14 @@ async fn writer_task(
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => {
-                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, epoch, &pool_ready, settings.fsync).await;
                 break;
             }
             _ = buffer_full_notify.notified() => {
-                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, epoch, &pool_ready, settings.fsync).await;
             }
             _ = interval.tick() => {
-                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, epoch, &pool_ready, settings.fsync).await;
             }
         }
     }
@@ -321,6 +340,7 @@ async fn flush(
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: &Option<Arc<PagePool>>,
     epoch: u64,
+    pool_ready: &AtomicBool,
     fsync: bool,
 ) {
     // Buffer first, then pages. A record only lands in the buffer when it was
@@ -328,7 +348,9 @@ async fn flush(
     // first -- so whatever is buffered is always older than whatever the pages
     // hold, and this order is the id order the reader depends on.
     flush_buffer(path, file, state, ack_sender, fsync).await;
-    if let Some(pool) = pool {
+    if let Some(pool) = pool
+        && pool_ready.load(Ordering::Acquire)
+    {
         flush_pool(path, file, state, ack_sender, pool, epoch, fsync).await;
     }
 }
