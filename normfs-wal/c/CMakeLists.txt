@@ -15,6 +15,7 @@ add_library(normfs_wal_c STATIC
     src/crc32c.c
     src/wal_entry.c
     src/wal_page.c
+    src/wal_pool.c
     src/wal_ring.c
 )
 # Asked of the compiler, not of CMAKE_SYSTEM_PROCESSOR: without a toolchain
@@ -97,6 +98,12 @@ if(FRAMAC)
         normfs_wal_page_unpin
         normfs_wal_page_reusable)
 
+    set(NORMFS_WAL_POOL_WP_FCTS
+        normfs_wal_pool_init
+        normfs_wal_pool_find_free
+        normfs_wal_pool_take
+        normfs_wal_pool_give_back)
+
     # try_append is excluded: its assigns includes
     # ring->pages[ring->active].buf[0 .. page_size - 1], so re-establishing
     # every other page's offsets_wf needs the pairwise buffer separation, and
@@ -156,10 +163,12 @@ if(FRAMAC)
         "${NORMFS_WAL_ENTRY_WP_FCTS}" "WP: normfs V1 WAL entry")
     normfs_add_wp_target(verify-wal-page "src/wal_page.c;src/wal_entry.c"
         "${NORMFS_WAL_PAGE_WP_FCTS}" "WP: normfs V1 WAL page")
+    normfs_add_wp_target(verify-wal-pool "src/wal_pool.c;src/wal_page.c;src/wal_entry.c"
+        "${NORMFS_WAL_POOL_WP_FCTS}" "WP: normfs V1 WAL page pool")
     normfs_add_wp_target(verify-wal-ring "src/wal_ring.c;src/wal_page.c;src/wal_entry.c"
         "${NORMFS_WAL_RING_WP_FCTS}" "WP: normfs V1 WAL ring")
 
     add_custom_target(verify)
     add_dependencies(verify verify-wal-header verify-wal-entry
-        verify-wal-page verify-wal-ring)
+        verify-wal-page verify-wal-pool verify-wal-ring)
 endif()
