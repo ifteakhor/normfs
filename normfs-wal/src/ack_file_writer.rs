@@ -242,13 +242,6 @@ impl AckFileWriter {
         })
     }
 
-    /// Lets this file's flushes start taking pages, for tests that drive an
-    /// `AckFileWriter` without handing it a record first. Production opens the
-    /// gate through `write_maybe_pooled`, where the record itself does it.
-    pub fn allow_pool_flush(&self) {
-        self.pool_ready.store(true, Ordering::Release);
-    }
-
     pub async fn can_add(&self, size: usize) -> bool {
         let state = self.state.lock().await;
         state.current_size + (size as u64) <= self.settings.max_file_size

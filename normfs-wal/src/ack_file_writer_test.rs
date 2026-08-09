@@ -243,11 +243,6 @@ async fn pages_reach_the_file_before_the_watermark_moves() {
     .await
     .unwrap();
 
-    // Standing in for WriterState, which opens this gate once the record that
-    // opened the file has been handed over. Until then a flush takes no pages,
-    // so the file's first record cannot be overtaken by the ones behind it.
-    writer.allow_pool_flush();
-
     // Nothing is durable before anything has been appended.
     assert_eq!(pool.durable_before(), 0);
 
@@ -259,6 +254,18 @@ async fn pages_reach_the_file_before_the_watermark_moves() {
         ));
     }
     let appended_through = pool.next_entry_id();
+
+    // A flush takes no pages until this file has been handed a record, so the
+    // record that opens a file cannot be overtaken by the pages behind it.
+    // This is that handover, and it is the same call the WAL writer makes.
+    writer
+        .write_maybe_pooled(
+            QueueIdResolver::new("test_instance").resolve("paged"),
+            UintN::from(0u64),
+            Bytes::new(),
+            true,
+        )
+        .await;
 
     // The flush is on a timer; wait for the watermark rather than for a
     // duration, so the test asserts the ordering instead of racing it.
