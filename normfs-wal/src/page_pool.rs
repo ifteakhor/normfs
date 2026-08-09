@@ -127,7 +127,9 @@ pub struct Placement {
     /// and must not be buffered again.
     pub in_pool: bool,
     pub rotate: RotateHint,
-    /// Which file this record was charged to. A tripwire, not a control input.
+    /// Which file this record was charged to, counted from zero. The writer
+    /// checks it against its own count, and passes it back to the pool to ask
+    /// for its own pages.
     pub epoch: u64,
 }
 
@@ -147,35 +149,31 @@ pub enum RotateHint {
     /// behaves exactly as it did before pages existed.
     #[default]
     WriterDecides,
-    /// Rotate, then write. The pool has already sealed the page so this record
-    /// starts a fresh one.
+    /// Rotate, then write. This record opened a page, so the file it closes
+    /// ends where that page's predecessor ended.
     Before,
     /// Do not rotate, whatever the writer's own accounting says.
     None,
 }
 
-/// What [`PagePool::charge`] decided about a record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RotateDecision {
-    pub rotate_before: bool,
-    /// The file the record was charged to, counted from zero.
-    pub epoch: u64,
-}
-
 /// How full the currently-open WAL file is.
 ///
 /// This lives here rather than in `AckFileWriter` because an `AckFileWriter` is
-/// per-file and dies on rotation, while the decision has to be made on the
-/// enqueue path, before the bytes enter a page. It is the *only* fill
-/// accounting on the pooled path: `AckFileWriter::current_size` is not
-/// maintained for pooled records, so the two can never drift.
+/// per-file and dies on rotation, while the accounting has to run on the enqueue
+/// path. It is the *only* fill accounting on the pooled path:
+/// `AckFileWriter::current_size` is not maintained for pooled records, so the
+/// two can never drift.
+///
+/// `max` is a threshold rather than a cap. A file ends at the first page to open
+/// after it is crossed, so a file overshoots by at most the tail of one page —
+/// and a `max_file_size` below the page size buys nothing.
 struct FileFill {
     used: u64,
     max: u64,
     header_len: u64,
-    /// Whether this file has been charged an entry yet. A file always takes at
-    /// least one record however large it is, or an oversized record would
-    /// rotate forever into empty files.
+    /// Whether this file has been charged an entry yet. Only the buffered path
+    /// consults it: a file takes its first record however large it is, or a
+    /// record bigger than `max` would rotate forever into empty files.
     has_written: bool,
     epoch: u64,
 }
@@ -211,54 +209,87 @@ struct Inner {
     written: Vec<usize>,
     /// Fill of the open file, once a writer has armed it.
     fill: Option<FileFill>,
-    /// Set by [`PagePool::seal_active`], cleared by the next append that lands.
-    /// It survives a wait for a page on purpose — see `append_locked`.
-    seal_pending: bool,
-    /// File boundaries drawn but not yet reached by the writer, oldest first.
-    /// Each is an exclusive id bound: entries below it belong to the file that
-    /// opened before it.
+    /// Per page: which file the bytes currently on it belong to.
     ///
-    /// A queue rather than a single value, because the enqueue side runs ahead
-    /// of the writer — the channel between them is unbounded — so several
-    /// rotations can be charged before the writer performs the first. With one
-    /// slot, the second seal would overwrite the boundary the open file still
-    /// needed, and its closing flush would pull the next file's records into
-    /// it: the very bug the bound exists to prevent, just harder to see.
-    ///
-    /// Empty means the open file runs to the end of what the pages hold.
-    boundaries: std::collections::VecDeque<u64>,
+    /// This is what keeps a flush inside its own file. The enqueue side runs
+    /// ahead of the writer over an unbounded channel, so by the time a writer
+    /// flushes, later pages may already hold records for files that are not
+    /// open yet. A writer takes only the pages stamped with its own epoch, so
+    /// several rotations can be outstanding at once and each file still gets
+    /// exactly its own records.
+    page_epoch: Vec<u64>,
 }
 
-/// Appends under the pool lock, keeping the write cursor and the seal honest.
+/// Appends under the pool lock, keeping the file writer's cursor honest.
 ///
-/// Two things have to happen around the append itself and neither is the ring's
-/// business:
+/// A rotation resets a page's bytes, and with them the cursor into that page.
+/// Rotation is detected by `next_page_id`, which `normfs_wal_ring_rotate_to`
+/// increments and nothing else touches. Comparing the active index instead
+/// misses the ring rotating into the page that was already active — legal when
+/// that page is empty or fully durable — which would leave a stale cursor and
+/// silently swallow the new page's first bytes.
 ///
-/// * A rotation resets a page's bytes, and with them the file writer's cursor
-///   into that page. Rotation is detected by `next_page_id`, which
-///   `normfs_wal_ring_rotate_to` increments and nothing else touches. Comparing
-///   the active index instead misses the ring rotating into the page that was
-///   already active — legal when that page is empty or fully durable — which
-///   would leave a stale cursor and silently swallow the new page's first bytes.
-/// * The seal clears only once a record has actually landed. If the pool is
-///   full, `append_at` waits and comes back here, and the seal must still be in
-///   force: a full pool may delay the first record of the next file, but it may
-///   never let it share a page with the last record of the previous one.
-fn append_locked(inner: &mut Inner, record: &[u8]) -> AppendOutcome {
-    let before_page_id = inner.ring.next_page_id();
-    let outcome = if inner.seal_pending {
-        inner.ring.append_on_fresh_page(record)
-    } else {
-        inner.ring.append(record)
+/// Returns whether this append started a fresh page, which is where a file is
+/// allowed to end.
+/// What a record of this length costs the file: framing and CRC, not payload.
+fn encoded_len_of(record_len: usize) -> u64 {
+    u32::try_from(record_len)
+        .map(|n| crate::wal_entry_v1::encoded_len(n) as u64)
+        .unwrap_or(u64::MAX)
+}
+
+/// Charges a record that landed on a page, and stamps that page with the file
+/// it now belongs to.
+///
+/// A file ends where a page ends. The threshold alone does not rotate: the
+/// record that crosses it stays where it is, and the file runs on to the end of
+/// the page it is on. So a page's records belong to one file by construction —
+/// which is what a flush needs, because a page's bytes go to the file whole and
+/// there is no boundary inside one to split at.
+///
+/// The cost is that `max_file_size` is a threshold rather than a cap: a file
+/// overshoots it by at most the tail of one page.
+fn charge_paged(inner: &mut Inner, entry_len: u64, opened_page: bool) -> Placement {
+    let active = inner.ring.active_page();
+    let Some(fill) = inner.fill.as_mut() else {
+        // Not armed: no writer is taking pages from this pool yet, so there is
+        // no file to fill and nothing to decide.
+        inner.page_epoch[active] = 0;
+        return Placement {
+            in_pool: true,
+            rotate: RotateHint::None,
+            epoch: 0,
+        };
     };
-    if inner.ring.next_page_id() != before_page_id {
+
+    let rotate = if opened_page && fill.used >= fill.max {
+        fill.epoch += 1;
+        fill.used = fill.header_len.saturating_add(entry_len);
+        RotateHint::Before
+    } else {
+        fill.used = fill.used.saturating_add(entry_len);
+        RotateHint::None
+    };
+    fill.has_written = true;
+    let epoch = fill.epoch;
+    inner.page_epoch[active] = epoch;
+
+    Placement {
+        in_pool: true,
+        rotate,
+        epoch,
+    }
+}
+
+fn append_locked(inner: &mut Inner, record: &[u8]) -> (AppendOutcome, bool) {
+    let before_page_id = inner.ring.next_page_id();
+    let outcome = inner.ring.append(record);
+    let rotated = inner.ring.next_page_id() != before_page_id;
+    if rotated {
         let active = inner.ring.active_page();
         inner.written[active] = 0;
     }
-    if matches!(outcome, AppendOutcome::Cached(_)) {
-        inner.seal_pending = false;
-    }
-    outcome
+    (outcome, rotated)
 }
 
 pub struct PagePool {
@@ -280,8 +311,7 @@ impl PagePool {
                 ring: WalRing::new(page_count, page_size, first_entry_id),
                 written: vec![0; page_count],
                 fill: None,
-                seal_pending: false,
-                boundaries: std::collections::VecDeque::new(),
+                page_epoch: vec![0; page_count],
             }),
             space: Notify::new(),
             drainer: std::sync::atomic::AtomicBool::new(false),
@@ -303,7 +333,7 @@ impl PagePool {
     /// Takes over the rotation decision from the writer.
     ///
     /// Called once when the WAL writer starts, beside
-    /// [`PagePool::set_drainer`]. Until it is called, [`PagePool::charge`]
+    /// [`PagePool::set_drainer`]. Until it is called, [`PagePool::place`]
     /// declines to decide and the writer keeps deciding for itself, which is
     /// what the unpooled path relies on.
     ///
@@ -323,10 +353,6 @@ impl PagePool {
             epoch: 0,
         });
 
-        // A fresh writer has drawn no boundaries and inherits no seal.
-        inner.boundaries.clear();
-        inner.seal_pending = false;
-
         // Whatever the pages already hold is not this writer's to write. A
         // queue upgraded from readonly to write keeps its `MemQueue`, and so
         // its pool: those records were cached by reads, or written by the
@@ -339,93 +365,7 @@ impl PagePool {
         // records it is told about.
         for k in 0..inner.ring.page_count() {
             inner.written[k] = inner.ring.page_bytes(k).len();
-        }
-    }
-
-    /// Charges `entry_len` encoded bytes to the open file, and says whether the
-    /// writer must rotate before this record.
-    ///
-    /// `entry_len` is the *encoded* length — `wal_entry_v1::encoded_len` — the
-    /// same number the writer used to pass to `AckFileWriter::can_add`, so the
-    /// file boundary lands where it always did.
-    ///
-    /// The caller must hold whatever serialises appends for this queue, so that
-    /// charge, seal and append are one step: two records interleaving between
-    /// the charge and the seal would put the boundary on the wrong entry.
-    pub fn charge(&self, entry_len: u64) -> RotateDecision {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(fill) = inner.fill.as_mut() else {
-            // Not armed: no writer is taking pages from this pool yet, so
-            // there is no file to fill and nothing to decide.
-            return RotateDecision {
-                rotate_before: false,
-                epoch: 0,
-            };
-        };
-
-        // `has_written` first, and it is why this is a field rather than
-        // something derived from `used`: a file takes its first record whatever
-        // its size, or a record larger than max_file_size would rotate forever
-        // into empty files. This is the same guard the writer applied.
-        if fill.has_written && fill.used.saturating_add(entry_len) > fill.max {
-            fill.epoch += 1;
-            fill.used = fill.header_len.saturating_add(entry_len);
-            fill.has_written = true;
-            RotateDecision {
-                rotate_before: true,
-                epoch: fill.epoch,
-            }
-        } else {
-            fill.used = fill.used.saturating_add(entry_len);
-            fill.has_written = true;
-            RotateDecision {
-                rotate_before: false,
-                epoch: fill.epoch,
-            }
-        }
-    }
-
-    /// Draws a file boundary here: everything appended so far belongs to the
-    /// file that is open, and the next record starts a fresh page.
-    ///
-    /// Called at enqueue time, when [`PagePool::charge`] says the record about
-    /// to be appended has to start a new file. Both halves matter and each is
-    /// useless without the other — the seal is what makes the bound in
-    /// [`PagePool::take_pending`] exact rather than approximate.
-    ///
-    /// Cannot fail and does not await. Forcing the rotation now would have to
-    /// handle "no page is reclaimable", which means either blocking here — a
-    /// second copy of the wait that `append_at` already owns — or failing and
-    /// pushing a retry loop onto the caller. Instead the next append rotates,
-    /// and if it has to wait for a page first, the seal waits with it.
-    pub fn seal_active(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        // An active page with nothing on it is already fresh; sealing it would
-        // rotate away a page for no reason.
-        let active = inner.ring.active_page();
-        if inner.ring.page_len(active) > 0 {
-            inner.seal_pending = true;
-        }
-        let boundary = inner.ring.next_entry_id();
-        inner.boundaries.push_back(boundary);
-    }
-
-    /// Reports that the writer has reached the oldest boundary and opened the
-    /// next file, so flushes may now run up to the boundary after it.
-    ///
-    /// Must be called only *after* the new file's writer exists. The old
-    /// writer's final flush runs inside `close()` and has to stay bounded, or
-    /// it drains the next file's records into the old file — which is the bug
-    /// the bound is here to prevent.
-    pub fn advance_file(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.boundaries.pop_front().is_none() {
-            log::error!(
-                target: "normfs-wal",
-                "the writer rotated with no file boundary drawn for it: the enqueue side did not \
-                 seal this rotation, so a page may hold entries for both files"
-            );
-            debug_assert!(false, "writer rotated without a boundary from the pool");
+            inner.page_epoch[k] = 0;
         }
     }
 
@@ -434,22 +374,16 @@ impl PagePool {
         self.inner.lock().unwrap().fill.as_ref().map(|f| f.used)
     }
 
-    /// The exclusive id bound a flush will stop at, if one is drawn. For tests.
-    pub fn accept_below(&self) -> Option<u64> {
-        self.inner.lock().unwrap().boundaries.front().copied()
-    }
-
-    /// How many file boundaries have been drawn but not yet reached by the
-    /// writer. For tests.
-    pub fn pending_boundaries(&self) -> usize {
-        self.inner.lock().unwrap().boundaries.len()
+    /// The file the next record will be charged to, counted from zero.
+    pub fn epoch(&self) -> u64 {
+        self.inner.lock().unwrap().fill.as_ref().map_or(0, |f| f.epoch)
     }
 
     /// Appends without waiting. `Full` means every page is either pinned by a
     /// reader or still holds records that are not on disk.
     pub fn try_append(&self, record: &[u8]) -> AppendOutcome {
         let mut inner = self.inner.lock().unwrap();
-        append_locked(&mut inner, record)
+        append_locked(&mut inner, record).0
     }
 
     /// Appends the record that must land on `expected_id`, waiting until a
@@ -458,7 +392,8 @@ impl PagePool {
     /// The caller owns the id sequence; the pool follows it. They can only
     /// disagree after a record the pool refused, and re-seeding to catch up
     /// discards pages, so callers must serialise their appends.
-    pub async fn append_at(&self, expected_id: u64, record: &[u8]) -> Result<(), PoolError> {
+    pub async fn place(&self, expected_id: u64, record: &[u8]) -> Result<Placement, PoolError> {
+        let entry_len = encoded_len_of(record.len());
         let mut waited = false;
         loop {
             let woken = self.space.notified();
@@ -468,12 +403,13 @@ impl PagePool {
                     inner.ring.reinit(expected_id);
                     inner.written.iter_mut().for_each(|w| *w = 0);
                 }
-                match append_locked(&mut inner, record) {
+                let (outcome, opened_page) = append_locked(&mut inner, record);
+                match outcome {
                     AppendOutcome::Cached(_) => {
                         if waited {
                             log::debug!(target: "normfs-wal", "page pool: resumed at entry {expected_id}");
                         }
-                        return Ok(());
+                        return Ok(charge_paged(&mut inner, entry_len, opened_page));
                     }
                     AppendOutcome::TooLarge => return Err(PoolError::TooLarge),
                     AppendOutcome::Full => {}
@@ -483,6 +419,35 @@ impl PagePool {
             if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {
                 self.warn_stalled();
             }
+        }
+    }
+
+    /// Charges a record the pool refused, which the writer will buffer instead.
+    ///
+    /// Such a record has no page, so there is no page boundary for the file to
+    /// end at and it takes the decision the writer used to take: rotate before
+    /// it when it does not fit. Without this a queue whose records are all
+    /// larger than a page would never rotate at all, because rotation would be
+    /// waiting for a page boundary that never comes.
+    pub fn charge_buffered(&self, record_len: usize) -> Placement {
+        let entry_len = encoded_len_of(record_len);
+        let mut inner = self.inner.lock().unwrap();
+        let Some(fill) = inner.fill.as_mut() else {
+            return Placement::default();
+        };
+        let rotate = if fill.has_written && fill.used.saturating_add(entry_len) > fill.max {
+            fill.epoch += 1;
+            fill.used = fill.header_len.saturating_add(entry_len);
+            RotateHint::Before
+        } else {
+            fill.used = fill.used.saturating_add(entry_len);
+            RotateHint::None
+        };
+        fill.has_written = true;
+        Placement {
+            in_pool: false,
+            rotate,
+            epoch: fill.epoch,
         }
     }
 
@@ -568,24 +533,22 @@ impl PagePool {
     /// uncommitted run just comes back here. Advancing the cursor at take time
     /// would drop the bytes of any write that then failed.
     ///
-    /// ## The bound
+    /// ## Why `epoch`
     ///
     /// A flush must not write bytes belonging to the next file into this one.
     /// That is the whole of trap 3: the pool is filled at enqueue time and the
-    /// file is closed later, so without a bound the close would drain records
-    /// that the rotation had already assigned to the next file, and the reader —
-    /// which derives V1 ids positionally — would be skewed by exactly that many
+    /// file is closed later, so an unfiltered close would drain records that the
+    /// rotation had already assigned to the next file, and the reader — which
+    /// derives V1 ids positionally — would be skewed by exactly that many
     /// entries.
     ///
-    /// The bound is applied per page, and that is *exact* rather than
-    /// conservative only because [`PagePool::seal_active`] guarantees no page
-    /// holds entries for two files. The two are one mechanism; a page skipped
-    /// for exceeding the bound while it starts below the bound means the seal
-    /// did not happen, which is why that case is loud rather than silent.
-    pub fn take_pending(&self) -> Vec<(PendingWrite, Vec<u8>)> {
+    /// Each writer passes the file it is writing, and gets only the pages
+    /// stamped with it. No page carries two epochs, because a file only ever
+    /// ends where a page ends, so this is a filter rather than a cut: nothing
+    /// has to be split, and there is no straddling case left to detect.
+    pub fn take_pending(&self, epoch: u64) -> Vec<(PendingWrite, Vec<u8>)> {
         let inner = self.inner.lock().unwrap();
         let count = inner.ring.page_count();
-        let bound = inner.boundaries.front().copied();
         let mut out: Vec<(PendingWrite, Vec<u8>)> = Vec::new();
 
         for k in 0..count {
@@ -597,22 +560,7 @@ impl PagePool {
             let Some(last_entry_id) = inner.ring.page_last_entry_id(k) else {
                 continue;
             };
-            if let Some(bound) = bound
-                && last_entry_id >= bound
-            {
-                // Belongs to the next file. Correct to skip — unless the page
-                // also starts before the boundary, in which case it holds
-                // entries for two files and the seal failed.
-                if inner.ring.page_first_entry_id(k).is_some_and(|f| f < bound) {
-                    log::error!(
-                        target: "normfs-wal",
-                        "page {k} holds entries {:?}..={last_entry_id} across the file boundary \
-                         at {bound}: the page was not sealed when the file rotated, so these \
-                         bytes cannot be split between the two files",
-                        inner.ring.page_first_entry_id(k),
-                    );
-                    debug_assert!(false, "page {k} straddles the file boundary at {bound}");
-                }
+            if inner.page_epoch[k] != epoch {
                 continue;
             }
             let bytes = inner.ring.page_bytes(k)[from..used].to_vec();

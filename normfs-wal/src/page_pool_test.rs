@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::page_pool::{PagePool, PoolError};
+use crate::page_pool::{PagePool, PoolError, RotateHint};
 use crate::wal_ring_v1::AppendOutcome;
 
 // Two small pages, so the pool fills after a handful of records. A 16 B record
@@ -52,7 +52,7 @@ async fn append_waits_for_a_page_and_resumes_when_one_is_durable() {
 
     let waiter = {
         let pool = Arc::clone(&pool);
-        tokio::spawn(async move { pool.append_at(n, &RECORD).await })
+        tokio::spawn(async move { pool.place(n, &RECORD).await })
     };
 
     // Give the task real time on the runtime, then observe that it has not
@@ -112,7 +112,7 @@ async fn a_record_larger_than_a_page_fails_instead_of_waiting() {
     // No amount of waiting would ever make room, so this must not block.
     let outcome = tokio::time::timeout(
         Duration::from_secs(2),
-        pool.append_at(pool.next_entry_id(), &huge),
+        pool.place(pool.next_entry_id(), &huge),
     )
     .await
     .expect("TooLarge must not wait");
@@ -124,7 +124,7 @@ async fn pending_yields_each_byte_once_and_in_id_order() {
     let pool = pool();
     fill(&pool);
 
-    let first = pool.take_pending();
+    let first = pool.take_pending(0);
     assert!(!first.is_empty(), "appended records should be pending a write");
     let total: usize = first.iter().map(|(_, b)| b.len()).sum();
     assert!(total > 0);
@@ -137,7 +137,7 @@ async fn pending_yields_each_byte_once_and_in_id_order() {
 
     // Not written yet, so it must come back: an untried write must not lose
     // the run.
-    assert_eq!(pool.take_pending(), first, "an uncommitted run must stay pending");
+    assert_eq!(pool.take_pending(0), first, "an uncommitted run must stay pending");
 
     // The writer commits each run once it is actually on disk.
     for (w, _) in &first {
@@ -146,12 +146,12 @@ async fn pending_yields_each_byte_once_and_in_id_order() {
 
     // Committed once: a second call has nothing to give, so the writer cannot
     // append the same bytes to the file twice.
-    assert!(pool.take_pending().is_empty());
+    assert!(pool.take_pending(0).is_empty());
 
     // A further record produces only the new bytes, not the whole page again.
     pool.mark_durable(pool.next_entry_id());
     assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
-    let second = pool.take_pending();
+    let second = pool.take_pending(0);
     let second_total: usize = second.iter().map(|(_, b)| b.len()).sum();
     assert!(
         second_total < total,
@@ -176,15 +176,17 @@ async fn durable_watermark_only_moves_forward() {
 // Rotation and the page boundary.
 //
 // A page's bytes go to the file unchanged, so a page whose records belong to
-// two different files cannot be written to either: there is no boundary inside
-// a page to split at. Two mechanisms keep that from happening, and each of the
-// tests below dies if one of them is removed:
+// two different files could be written to neither: there is no boundary inside
+// a page to split at. The file therefore ends where a page ends -- crossing
+// max_file_size arms the rotation, and the next page to open carries it out --
+// so a page belongs to one file by construction rather than by a seal.
 //
-//   seal_active()   the record that opens a file starts a fresh page
-//   accept_below    a flush stops at the end of the file that is open
+// What a flush still needs is to know which pages are its own, because the
+// enqueue side runs ahead of it. That is the epoch, stamped on a page as its
+// first record lands.
 //
 // The pool used here is armed with a small file so rotation happens after a
-// couple of records rather than 128 MiB in.
+// couple of pages rather than 128 MiB in.
 // ---------------------------------------------------------------------------
 
 /// Encoded size of `RECORD` as the pool charges it.
@@ -192,10 +194,10 @@ fn record_charge() -> u64 {
     crate::wal_entry_v1::encoded_len(RECORD.len() as u32) as u64
 }
 
-/// A pool with room for several records and a file that holds only two.
+/// A pool whose file is smaller than one page, so every page rotates it.
 fn armed_pool(header_len: u64) -> Arc<PagePool> {
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
-    pool.arm_file_fill(header_len + record_charge() * 2, header_len);
+    pool.arm_file_fill(header_len + record_charge(), header_len);
     pool
 }
 
@@ -204,28 +206,25 @@ async fn a_page_never_holds_entries_for_two_files() {
     const HEADER: u64 = 16;
     let pool = armed_pool(HEADER);
 
-    // Drive the same sequence the enqueue path drives: charge, seal if the
-    // charge says so, then append. Record which file each id was charged to.
+    // Drive what the enqueue path drives, and record which file each id landed
+    // in. Freeing as we go, so the pool never blocks on a page.
     let mut file_of: Vec<(u64, u64)> = Vec::new();
     for _ in 0..8 {
         let id = pool.next_entry_id();
-        let decision = pool.charge(record_charge());
-        if decision.rotate_before {
-            pool.seal_active();
-        }
-        pool.append_at(id, &RECORD).await.unwrap();
-        file_of.push((id, decision.epoch));
+        let placement = pool.place(id, &RECORD).await.unwrap();
+        file_of.push((id, placement.epoch));
+        pool.mark_durable(id);
     }
 
     assert!(
         file_of.iter().any(|(_, epoch)| *epoch > 0),
-        "the file should have rotated at least once with only two records per file"
+        "a file smaller than a page should rotate on every page"
     );
 
-    // No page may span two files.
     pool.with_ring(|ring| {
         for k in 0..ring.page_count() {
-            let (Some(first), Some(last)) = (ring.page_first_entry_id(k), ring.page_last_entry_id(k))
+            let (Some(first), Some(last)) =
+                (ring.page_first_entry_id(k), ring.page_last_entry_id(k))
             else {
                 continue;
             };
@@ -233,109 +232,124 @@ async fn a_page_never_holds_entries_for_two_files() {
             assert_eq!(
                 epoch_of(first),
                 epoch_of(last),
-                "page {k} holds entries {first}..={last}, which were charged to different files: \
+                "page {k} holds entries {first}..={last}, which belong to different files: \
                  its bytes belong to neither"
             );
         }
     });
 }
 
+/// A file is only ever allowed to end where a page ends.
+///
+/// Crossing `max_file_size` mid-page must not rotate: the record that crosses
+/// it stays on the page it is on, and the rotation waits for the next page. A
+/// rotation reported anywhere else means a page is about to be split.
 #[tokio::test]
-async fn a_bounded_take_stops_at_the_file_boundary() {
+async fn a_file_ends_only_where_a_page_ends() {
     const HEADER: u64 = 16;
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
-    pool.arm_file_fill(1 << 20, HEADER);
+    // One record over, so the threshold is crossed in the middle of page 0.
+    pool.arm_file_fill(HEADER + record_charge(), HEADER);
 
-    // Three records in the file that is open.
-    for id in 0..3u64 {
-        pool.charge(record_charge());
-        pool.append_at(id, &RECORD).await.unwrap();
+    let mut rotations = 0;
+    for _ in 0..8 {
+        let id = pool.next_entry_id();
+        let before = pool.with_ring(|r| r.active_page());
+        let placement = pool.place(id, &RECORD).await.unwrap();
+        let opened_page = pool.with_ring(|r| r.page_first_entry_id(r.active_page())) == Some(id);
+        if placement.rotate == RotateHint::Before {
+            rotations += 1;
+            assert!(
+                opened_page,
+                "entry {id} rotated the file without opening a page (active {before} -> {})",
+                pool.with_ring(|r| r.active_page())
+            );
+        }
+        pool.mark_durable(id);
     }
-
-    // The fourth opens a new file.
-    pool.seal_active();
-    assert_eq!(pool.accept_below(), Some(3));
-    pool.append_at(3, &RECORD).await.unwrap();
-
-    // The old file's flush must stop at entry 2.
-    let pending = pool.take_pending();
-    assert!(!pending.is_empty(), "the first three entries should be ready");
-    let highest = pending.iter().map(|(w, _)| w.last_entry_id).max().unwrap();
-    assert_eq!(
-        highest, 2,
-        "a flush of the old file must not take entry 3, which belongs to the next one"
-    );
-
-    // Standing in for the writer: the run reached disk, so its cursor moves.
-    // `take_pending` deliberately does not move it -- an uncommitted run comes
-    // back on the next take, which is what stops a failed write losing bytes.
-    for (w, _) in &pending {
-        pool.commit_written(w.page_index, w.to);
-    }
-
-    // And the watermark it can advance stops there too, so a page holding
-    // entry 3 is not handed back for reuse on the strength of the old file's
-    // fsync.
-    pool.mark_durable(highest + 1);
-    assert_eq!(pool.durable_before(), 3);
-
-    // The new file opens; now entry 3 is takeable, exactly once.
-    pool.advance_file();
-    let second = pool.take_pending();
-    let ids: Vec<u64> = second.iter().map(|(w, _)| w.last_entry_id).collect();
-    assert_eq!(ids, vec![3], "the new file gets entry 3, and only entry 3");
-    for (w, _) in &second {
-        pool.commit_written(w.page_index, w.to);
-    }
-    assert!(
-        pool.take_pending().is_empty(),
-        "nothing may be handed out twice once it is committed"
-    );
+    assert!(rotations > 0, "the file should have rotated at least once");
 }
 
+/// A flush takes the pages of its own file and no others.
 #[tokio::test]
-async fn the_first_entry_of_a_file_never_rotates() {
+async fn a_flush_takes_only_its_own_files_pages() {
     const HEADER: u64 = 16;
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+    pool.arm_file_fill(HEADER + record_charge(), HEADER);
 
-    // A file that holds exactly two records. The record that opens a file must
-    // not rotate again on the strength of the space the previous file's records
-    // took, or every file would be born empty.
+    // Fill until the file rotates, remembering what each file was given.
+    let mut of_epoch: Vec<(u64, u64)> = Vec::new();
+    while pool.epoch() < 2 {
+        let id = pool.next_entry_id();
+        let placement = pool.place(id, &RECORD).await.unwrap();
+        of_epoch.push((id, placement.epoch));
+        pool.mark_durable(id);
+    }
+
+    for epoch in 0..=pool.epoch() {
+        let taken = pool.take_pending(epoch);
+        let mut ids: Vec<u64> = taken.iter().map(|(w, _)| w.last_entry_id).collect();
+        ids.sort_unstable();
+        for id in &ids {
+            let charged = of_epoch.iter().find(|(i, _)| i == id).map(|(_, e)| *e);
+            assert_eq!(
+                charged,
+                Some(epoch),
+                "file {epoch} was handed entry {id}, which belongs to file {charged:?}"
+            );
+        }
+        // Committed once, so nothing reaches a file twice.
+        for (w, _) in &taken {
+            pool.commit_written(w.page_index, w.to);
+        }
+        assert!(
+            pool.take_pending(epoch).is_empty(),
+            "nothing may be handed out twice"
+        );
+    }
+}
+
+/// A record too large for a page keeps the old pre-record rotation.
+///
+/// It never enters a page, so there is no page boundary for its file to end at.
+/// Without this a queue whose records are all oversized would never rotate.
+#[tokio::test]
+async fn a_buffered_record_rotates_before_itself() {
+    const HEADER: u64 = 16;
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
     pool.arm_file_fill(HEADER + record_charge() * 2, HEADER);
-    let epochs: Vec<(bool, u64)> = (0..6)
+
+    let placements: Vec<(RotateHint, u64)> = (0..6)
         .map(|_| {
-            let d = pool.charge(record_charge());
-            (d.rotate_before, d.epoch)
+            let p = pool.charge_buffered(RECORD.len());
+            (p.rotate, p.epoch)
         })
         .collect();
     assert_eq!(
-        epochs,
+        placements,
         vec![
-            (false, 0), // opens file 0
-            (false, 0), // fills it
-            (true, 1),  // does not fit: opens file 1
-            (false, 1), // fills it -- the point of the test
-            (true, 2),
-            (false, 2),
+            (RotateHint::None, 0), // opens file 0
+            (RotateHint::None, 0), // fills it
+            (RotateHint::Before, 1),
+            (RotateHint::None, 1),
+            (RotateHint::Before, 2),
+            (RotateHint::None, 2),
         ],
         "each file must take two records before rotating again"
     );
 
-    // And the guard holds even when a single record is larger than the whole
-    // file: it goes into the file it finds rather than rotating into an empty
-    // one, which would rotate forever.
+    // A record larger than the whole file still opens the file it finds rather
+    // than rotating into an empty one, which would rotate forever.
     let tiny = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
     tiny.arm_file_fill(HEADER + 4, HEADER);
-    let first = tiny.charge(record_charge());
-    assert!(
-        !first.rotate_before && first.epoch == 0,
+    assert_eq!(
+        tiny.charge_buffered(RECORD.len()).rotate,
+        RotateHint::None,
         "a record larger than max_file_size still opens the first file rather than skipping it"
     );
-    // Each subsequent oversized record gets a file of its own -- one rotation
-    // each, never two for the same record.
     for expected in 1..=3u64 {
-        let d = tiny.charge(record_charge());
-        assert_eq!((d.rotate_before, d.epoch), (true, expected));
+        let p = tiny.charge_buffered(RECORD.len());
+        assert_eq!((p.rotate, p.epoch), (RotateHint::Before, expected));
     }
 }
 
@@ -350,72 +364,15 @@ async fn the_fill_counts_each_entry_exactly_once() {
     // second, redundant count there would not move any boundary and a test that
     // compared boundaries would pass with the double count still in place.
     for n in 1..=5u64 {
-        pool.charge(record_charge());
+        let id = pool.next_entry_id();
+        pool.place(id, &RECORD).await.unwrap();
+        pool.mark_durable(id);
         assert_eq!(
             pool.fill_used(),
             Some(HEADER + record_charge() * n),
             "after {n} records the file should hold its header plus {n} encoded entries"
         );
     }
-}
-
-/// A seal must outlive a wait for a page.
-///
-/// The discriminating case is an active page that *has room*. A sealed append
-/// must refuse that room and rotate — waiting if no page can be reclaimed —
-/// while an unsealed one would take it and put the new file's first record on
-/// the tail of a page belonging to the old file. If the seal were dropped when
-/// the first attempt came back `Full`, the retry would find that room and use
-/// it, so this test fails on the wait rather than on the placement.
-#[tokio::test]
-async fn a_sealed_append_waits_and_still_lands_on_a_fresh_page() {
-    // Three pages, each holding two records. Five records leave pages 0 and 1
-    // full and page 2 active with room for one more. Nothing is durable, so no
-    // page can be reclaimed.
-    let pool = Arc::new(PagePool::new(3, PAGE_SIZE, 0));
-    for _ in 0..5 {
-        assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
-    }
-    let n = pool.next_entry_id();
-    assert_eq!(n, 5);
-    pool.with_ring(|ring| {
-        assert_eq!(
-            ring.page_len(ring.active_page()),
-            1,
-            "the active page must have room left, or this proves nothing"
-        );
-    });
-
-    pool.seal_active();
-
-    let waiter = {
-        let pool = pool.clone();
-        tokio::spawn(async move { pool.append_at(n, &RECORD).await })
-    };
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert!(
-        !waiter.is_finished(),
-        "the sealed record must wait for a page of its own rather than take the room \
-         left on a page that belongs to the previous file"
-    );
-
-    // Free page 0. The record must land on it as the sole occupant.
-    pool.mark_durable(2);
-    tokio::time::timeout(Duration::from_secs(5), waiter)
-        .await
-        .expect("the append should resume once a page is free")
-        .expect("task panicked")
-        .expect("the record fits a page");
-
-    pool.with_ring(|ring| {
-        let active = ring.active_page();
-        assert_eq!(
-            ring.page_first_entry_id(active),
-            Some(n),
-            "the record that opens a file must be the first entry on its page"
-        );
-        assert_eq!(ring.page_len(active), 1, "and the only one on it so far");
-    });
 }
 
 /// A writer never emits records that were in the pool before it started.
@@ -430,7 +387,7 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     let pool = pool();
     fill(&pool);
     assert!(
-        !pool.take_pending().is_empty() || pool.next_entry_id() > 0,
+        !pool.take_pending(0).is_empty() || pool.next_entry_id() > 0,
         "the pool should be holding records before the writer arms"
     );
 
@@ -438,7 +395,7 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     pool.mark_durable(pool.next_entry_id());
     assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
     assert!(
-        !pool.take_pending().is_empty(),
+        !pool.take_pending(0).is_empty(),
         "that run is pending a write"
     );
     assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
@@ -446,15 +403,15 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     // A writer starts now. Whatever is already there is not its to write.
     pool.arm_file_fill(1 << 20, 16);
     assert!(
-        pool.take_pending().is_empty(),
+        pool.take_pending(0).is_empty(),
         "a newly armed writer must not adopt records it has no header entry for"
     );
 
     // What it is told about afterwards still reaches the file.
     let id = pool.next_entry_id();
-    pool.charge(record_charge());
-    pool.append_at(id, &RECORD).await.unwrap();
-    let pending = pool.take_pending();
+    pool.mark_durable(id);
+    pool.place(id, &RECORD).await.unwrap();
+    let pending = pool.take_pending(0);
     assert_eq!(
         pending.iter().map(|(w, _)| w.last_entry_id).max(),
         Some(id),
@@ -482,12 +439,12 @@ async fn every_record_being_oversized_does_not_stall_the_queue() {
     // because nothing ever reaches a page.
     let run = async {
         for id in 0..10u64 {
-            pool.charge(huge.len() as u64);
             assert_eq!(
-                pool.append_at(id, &huge).await,
+                pool.place(id, &huge).await,
                 Err(PoolError::TooLarge),
                 "a record larger than a page is never cached"
             );
+            pool.charge_buffered(huge.len());
             pool.skip_to(id + 1).await;
             assert_eq!(
                 pool.next_entry_id(),

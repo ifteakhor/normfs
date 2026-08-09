@@ -209,34 +209,6 @@ impl WalRing {
         }
     }
 
-    /// Appends onto a page that holds nothing else, rotating first rather than
-    /// trying the active page.
-    ///
-    /// This is [`WalRing::append`] with the first `try_append` skipped, and it
-    /// exists so a caller can guarantee a record starts a page: the WAL file
-    /// writer needs a page's bytes to belong to exactly one file, and the entry
-    /// that opens a new file is the one that must not share a page with the
-    /// entries that closed the previous one.
-    pub fn append_on_fresh_page(&mut self, record: &[u8]) -> AppendOutcome {
-        if record.len() > u32::MAX as usize {
-            return AppendOutcome::TooLarge;
-        }
-        let idx = match self.oldest_reclaimable_page() {
-            Some(k) => k,
-            None => return AppendOutcome::Full,
-        };
-        self.rotate_into(idx);
-
-        let r = unsafe {
-            normfs_wal_ring_try_append(self.ring.as_mut(), record.as_ptr(), record.len() as u32)
-        };
-        match r.status {
-            RING_OK => AppendOutcome::Cached(r.entry_id),
-            RING_TOO_LARGE => AppendOutcome::TooLarge,
-            _ => AppendOutcome::Full,
-        }
-    }
-
     /// Discards page `index` and makes it active.
     ///
     /// `normfs_wal_ring_rotate_to` requires the page to be reusable — nothing

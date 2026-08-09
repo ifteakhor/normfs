@@ -27,7 +27,7 @@ pub use wal_entry_v1::{
     WalEntryV1Error, crc32c, derive_entry_id, encoded_len,
 };
 pub use wal_header::{WalHeader, WalHeaderError};
-pub use page_pool::{PagePool, PendingWrite, Placement, PoolError, RotateDecision, RotateHint};
+pub use page_pool::{PagePool, PendingWrite, Placement, PoolError, RotateHint};
 pub use wal_ring_v1::{AppendOutcome, WalRing};
 pub use wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_MAX_SIZE,

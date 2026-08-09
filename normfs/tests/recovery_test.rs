@@ -2684,28 +2684,33 @@ async fn test_read_empty_queue_absolute() {
 /// Records written as pages must read back in id order across file rotations.
 ///
 /// This is the end-to-end form of the trap the page pool was switched off for.
-/// The pool is filled at enqueue time but a file is closed later, so unless the
-/// rotation draws its boundary before the bytes enter a page -- and unless the
-/// closing flush stops at that boundary -- the record that opens a file is
-/// written into the previous one instead. V1 stores no entry id; the reader
-/// derives it from `num_entries_before + index`, so the result is not a missing
-/// record but every later record answering to the wrong id.
+/// The pool is filled at enqueue time but a file is closed later, so unless each
+/// page belongs to exactly one file -- and unless a flush takes only its own
+/// file's pages -- the record that opens a file is written into the previous one
+/// instead. V1 stores no entry id; the reader derives it from
+/// `num_entries_before + index`, so the result is not a missing record but every
+/// later record answering to the wrong id.
 ///
 /// The payload is checked per id, not just the count. A count-only assertion
 /// passes under duplication-plus-truncation, which is exactly the failure this
 /// test exists to catch.
+///
+/// The volume is deliberate: a file now ends where a page ends, so the records
+/// have to fill several pages before any rotation happens at all. A small
+/// `max_file_size` alone no longer produces one.
 #[tokio::test]
 async fn pooled_rotation_reads_back_in_id_order() {
-    const COUNT: usize = 200;
+    const COUNT: usize = 600;
 
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
     let mut settings = NormFsSettings::default();
-    // Small enough that 200 records rotate many times.
+    // Below one page, so every page that opens rotates the file.
     settings.wal_settings.max_file_size = 1024;
 
-    let payload = |i: usize| Bytes::from(format!("entry-{i:04}-{}", "x".repeat(48)));
+    // ~1.5 KiB each, so 600 records span several 256 KiB pages.
+    let payload = |i: usize| Bytes::from(format!("entry-{i:04}-{}", "x".repeat(1500)));
 
     let instance_id = {
         let fs = NormFS::new(path.clone(), settings.clone()).await.unwrap();

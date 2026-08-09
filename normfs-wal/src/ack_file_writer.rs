@@ -66,9 +66,10 @@ async fn flush_pool(
     state: &Arc<Mutex<WriterState>>,
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: &Arc<PagePool>,
+    epoch: u64,
     fsync: bool,
 ) {
-    let pending = pool.take_pending();
+    let pending = pool.take_pending(epoch);
     if pending.is_empty() {
         return;
     }
@@ -181,6 +182,7 @@ impl AckFileWriter {
         ack_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
         header: Bytes,
         pool: Option<Arc<PagePool>>,
+        epoch: u64,
     ) -> std::io::Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -217,6 +219,7 @@ impl AckFileWriter {
             buffer_full_notify.clone(),
             ack_sender,
             pool,
+            epoch,
         ));
 
         Ok(Self {
@@ -287,6 +290,7 @@ async fn writer_task(
     buffer_full_notify: Arc<Notify>,
     ack_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: Option<Arc<PagePool>>,
+    epoch: u64,
 ) {
     let mut interval = tokio::time::interval(settings.write_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
@@ -295,14 +299,14 @@ async fn writer_task(
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => {
-                flush(&path, &file, &state, &ack_sender, &pool, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
                 break;
             }
             _ = buffer_full_notify.notified() => {
-                flush(&path, &file, &state, &ack_sender, &pool, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
             }
             _ = interval.tick() => {
-                flush(&path, &file, &state, &ack_sender, &pool, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
             }
         }
     }
@@ -316,6 +320,7 @@ async fn flush(
     state: &Arc<Mutex<WriterState>>,
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: &Option<Arc<PagePool>>,
+    epoch: u64,
     fsync: bool,
 ) {
     // Buffer first, then pages. A record only lands in the buffer when it was
@@ -324,7 +329,7 @@ async fn flush(
     // hold, and this order is the id order the reader depends on.
     flush_buffer(path, file, state, ack_sender, fsync).await;
     if let Some(pool) = pool {
-        flush_pool(path, file, state, ack_sender, pool, fsync).await;
+        flush_pool(path, file, state, ack_sender, pool, epoch, fsync).await;
     }
 }
 

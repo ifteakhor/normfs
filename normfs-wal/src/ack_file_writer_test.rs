@@ -28,7 +28,7 @@ async fn test_write_single_entry_and_ack() {
         fsync: true,
     };
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None)
+    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None, 0)
         .await
         .unwrap();
 
@@ -66,7 +66,7 @@ async fn test_write_multiple_entries_and_ack() {
         fsync: true,
     };
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None)
+    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None, 0)
         .await
         .unwrap();
 
@@ -117,7 +117,7 @@ async fn test_buffer_full_triggers_write_and_ack() {
         fsync: true,
     };
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None)
+    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None, 0)
         .await
         .unwrap();
 
@@ -189,7 +189,7 @@ async fn test_writer_with_header() {
     let (ack_sender, mut ack_receiver) = mpsc::unbounded_channel();
     let header = Bytes::from_static(b"test header");
 
-    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, header.clone(), None)
+    let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, header.clone(), None, 0)
         .await
         .unwrap();
 
@@ -238,6 +238,7 @@ async fn pages_reach_the_file_before_the_watermark_moves() {
         ack_sender,
         header.clone(),
         Some(Arc::clone(&pool)),
+        0,
     )
     .await
     .unwrap();

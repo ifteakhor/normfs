@@ -4,7 +4,7 @@ use tokio::sync::mpsc::Sender;
 
 use bytes::Bytes;
 use normfs_types::{DataSource, QueueId, ReadEntry, SubscriberCallback};
-use normfs_wal::{AppendOutcome, PagePool, Placement, RotateHint};
+use normfs_wal::{AppendOutcome, PagePool, Placement};
 use uintn::UintN;
 
 // Geometry of the in-memory paged store. A record larger than a page is not
@@ -222,9 +222,8 @@ impl MemQueue {
     /// rotation decided then would flush them into the file they were meant to
     /// come after.
     pub async fn enqueue_awaiting(&self, data: Bytes) -> (UintN, Placement) {
-        // Held across charge, seal and append together. Two records
-        // interleaving between the charge and the seal would draw the file
-        // boundary on the wrong entry.
+        // Held across the append and the charge together, so the pool sees ids
+        // in order: it follows the caller's sequence rather than owning it.
         let _gate = self.append_gate.lock().await;
         self.enqueue_gated(data).await
     }
@@ -269,41 +268,18 @@ impl MemQueue {
         let mut placement = Placement::legacy();
         if let Some(pool) = pool {
             if pool.has_drainer() {
-                // Charged on the encoded length -- the varint prefix and the
-                // CRC take file space too -- which is the same number the
-                // writer used to hand to `can_add`, so the file boundary lands
-                // where it always did.
-                let entry_len = u32::try_from(data.len())
-                    .map(|n| normfs_wal::encoded_len(n) as u64)
-                    .unwrap_or(u64::MAX);
-                let decision = pool.charge(entry_len);
-
-                if decision.rotate_before {
-                    // Rotating the file rotates the page. Without this the
-                    // record that opens the new file shares a page with the
-                    // records that closed the old one, and a flush cannot split
-                    // them -- there is no boundary inside a page to split at.
-                    pool.seal_active();
-                }
-                placement.rotate = if decision.rotate_before {
-                    RotateHint::Before
-                } else {
-                    RotateHint::None
-                };
-                placement.epoch = decision.epoch;
-
-                match pool.append_at(id_to_u64(&id), &data).await {
-                    Ok(()) => placement.in_pool = true,
+                placement = match pool.place(id_to_u64(&id), &data).await {
+                    Ok(placed) => placed,
                     Err(_) => {
-                        // Too large for a page: step over this id without
-                        // dropping what the pool holds, and let the file writer
-                        // buffer this one record the old way. It was charged
-                        // before it was refused, so it can still be the record
-                        // that triggers a rotation -- the one path where
-                        // something that never enters a page still seals one.
+                        // Too large for a page. It is charged as a buffered
+                        // record, which is the one path that can still rotate
+                        // before a record, and then the pool steps over this id
+                        // without dropping what it is still holding.
+                        let placed = pool.charge_buffered(data.len());
                         pool.skip_to(id_to_u64(&id).wrapping_add(1)).await;
+                        placed
                     }
-                }
+                };
             } else {
                 let mut inner = self.inner.write().unwrap();
                 self.cache_append(&mut inner, id_to_u64(&id), &data);

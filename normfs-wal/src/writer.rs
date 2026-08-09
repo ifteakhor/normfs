@@ -102,6 +102,7 @@ impl WalWriter {
             &settings,
             written_sender.clone(),
             pool.clone(),
+            0,
         )
         .await?;
 
@@ -422,6 +423,14 @@ impl WriterState {
             self.header.data_size_bytes
         );
 
+        self.has_written = false;
+        self.entry_index = 0;
+        self.file_epoch += 1;
+
+        // After `close()`, and carrying the new epoch. The old file's final
+        // flush ran inside `close()` and asked the pool for its own epoch's
+        // pages, so it could not take this file's records however far ahead the
+        // enqueue side had run — which is the whole of trap 3.
         self.file_writer = new_file_writer(
             &self.queue_path,
             &self.file_id,
@@ -429,21 +438,9 @@ impl WriterState {
             &self.settings,
             self.written_sender.clone(),
             self.pool.clone(),
+            self.file_epoch,
         )
         .await?;
-        self.has_written = false;
-        self.entry_index = 0;
-        self.file_epoch += 1;
-
-        // Only now. `close()` above ran the old file's final flush, and that
-        // flush had to stay bounded or it would have drained this file's
-        // records into the previous one — which is the whole of trap 3. Lifting
-        // the bound before the new writer exists reintroduces it. `close()`
-        // joins the old writer task, so no flush of the old file can still be
-        // in flight here.
-        if let Some(pool) = self.pool.as_ref() {
-            pool.advance_file();
-        }
 
         log::info!(
             "WAL writer: successfully rotated from file {} to {} for queue '{}'",
@@ -463,6 +460,7 @@ async fn new_file_writer(
     settings: &WalSettings,
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: Option<Arc<PagePool>>,
+    epoch: u64,
 ) -> Result<AckFileWriter, WalError> {
     let file_path = file_id.to_file_path(queue_path.to_str().unwrap(), "wal");
 
@@ -483,6 +481,7 @@ async fn new_file_writer(
         written_sender,
         header_buf.freeze(),
         pool,
+        epoch,
     )
     .await?;
 
