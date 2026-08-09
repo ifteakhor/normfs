@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::page_pool::{PagePool, PoolError, RotateHint};
+use crate::page_pool::{PagePool, Placement, PoolError, RotateHint};
 use crate::wal_ring_v1::AppendOutcome;
 
 // Two small pages, so the pool fills after a handful of records. A 16 B record
@@ -17,6 +17,9 @@ use crate::wal_ring_v1::AppendOutcome;
 const PAGE_SIZE: usize = 64;
 const PAGE_COUNT: usize = 2;
 const RECORD: [u8; 16] = [0xAB; 16];
+/// The widest a V1 header gets, which is what the pool is armed with here.
+const HEADER: u64 = 16;
+/// The widest a V1 header gets, as the pool is armed with it in these tests.
 
 fn pool() -> Arc<PagePool> {
     Arc::new(PagePool::new(PAGE_COUNT, PAGE_SIZE, 0))
@@ -68,9 +71,9 @@ async fn append_waits_for_a_page_and_resumes_when_one_is_durable() {
 
     tokio::time::timeout(Duration::from_secs(5), waiter)
         .await
-        .expect("append_at should resume once a page is reclaimable")
+        .expect("place should resume once a page is reclaimable")
         .expect("task panicked")
-        .expect("append_at should succeed");
+        .expect("place should succeed");
     assert_eq!(
         pool.next_entry_id(),
         n + 1,
@@ -195,25 +198,30 @@ fn record_charge() -> u64 {
 }
 
 /// A pool whose file is smaller than one page, so every page rotates it.
-fn armed_pool(header_len: u64) -> Arc<PagePool> {
+fn armed_pool() -> Arc<PagePool> {
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
-    pool.arm_file_fill(header_len + record_charge(), header_len);
+    pool.arm_file_fill(HEADER + record_charge(), HEADER);
     pool
+}
+
+/// Places the next record and frees its page, so the pool never blocks.
+async fn place_next(pool: &PagePool) -> (u64, Placement) {
+    let id = pool.next_entry_id();
+    let placement = pool.place(id, &RECORD).await.unwrap();
+    pool.mark_durable(id);
+    (id, placement)
 }
 
 #[tokio::test]
 async fn a_page_never_holds_entries_for_two_files() {
-    const HEADER: u64 = 16;
-    let pool = armed_pool(HEADER);
+    let pool = armed_pool();
 
     // Drive what the enqueue path drives, and record which file each id landed
     // in. Freeing as we go, so the pool never blocks on a page.
     let mut file_of: Vec<(u64, u64)> = Vec::new();
     for _ in 0..8 {
-        let id = pool.next_entry_id();
-        let placement = pool.place(id, &RECORD).await.unwrap();
+        let (id, placement) = place_next(&pool).await;
         file_of.push((id, placement.epoch));
-        pool.mark_durable(id);
     }
 
     assert!(
@@ -246,7 +254,6 @@ async fn a_page_never_holds_entries_for_two_files() {
 /// rotation reported anywhere else means a page is about to be split.
 #[tokio::test]
 async fn a_file_ends_only_where_a_page_ends() {
-    const HEADER: u64 = 16;
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
     // One record over, so the threshold is crossed in the middle of page 0.
     pool.arm_file_fill(HEADER + record_charge(), HEADER);
@@ -273,17 +280,13 @@ async fn a_file_ends_only_where_a_page_ends() {
 /// A flush takes the pages of its own file and no others.
 #[tokio::test]
 async fn a_flush_takes_only_its_own_files_pages() {
-    const HEADER: u64 = 16;
-    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
-    pool.arm_file_fill(HEADER + record_charge(), HEADER);
+    let pool = armed_pool();
 
     // Fill until the file rotates, remembering what each file was given.
     let mut of_epoch: Vec<(u64, u64)> = Vec::new();
     while pool.epoch() < 2 {
-        let id = pool.next_entry_id();
-        let placement = pool.place(id, &RECORD).await.unwrap();
+        let (id, placement) = place_next(&pool).await;
         of_epoch.push((id, placement.epoch));
-        pool.mark_durable(id);
     }
 
     for epoch in 0..=pool.epoch() {
@@ -315,7 +318,6 @@ async fn a_flush_takes_only_its_own_files_pages() {
 /// Without this a queue whose records are all oversized would never rotate.
 #[tokio::test]
 async fn a_buffered_record_rotates_before_itself() {
-    const HEADER: u64 = 16;
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
     pool.arm_file_fill(HEADER + record_charge() * 2, HEADER);
 
@@ -355,7 +357,6 @@ async fn a_buffered_record_rotates_before_itself() {
 
 #[tokio::test]
 async fn the_fill_counts_each_entry_exactly_once() {
-    const HEADER: u64 = 16;
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
     pool.arm_file_fill(1 << 20, HEADER);
 
@@ -364,9 +365,7 @@ async fn the_fill_counts_each_entry_exactly_once() {
     // second, redundant count there would not move any boundary and a test that
     // compared boundaries would pass with the double count still in place.
     for n in 1..=5u64 {
-        let id = pool.next_entry_id();
-        pool.place(id, &RECORD).await.unwrap();
-        pool.mark_durable(id);
+        place_next(&pool).await;
         assert_eq!(
             pool.fill_used(),
             Some(HEADER + record_charge() * n),
@@ -427,9 +426,7 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
 /// moves the watermark past it. The records were acked and end up in no file.
 #[tokio::test]
 async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
-    const HEADER: u64 = 16;
-    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
-    pool.arm_file_fill(HEADER + record_charge(), HEADER);
+    let pool = armed_pool();
 
     // File 0 takes a record and never writes it: no commit_written, standing in
     // for a flush that failed every retry before close().
@@ -448,9 +445,7 @@ async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
     pool.mark_durable(id0);
     let mut rotated = false;
     while !rotated {
-        let id = pool.next_entry_id();
-        rotated = pool.place(id, &RECORD).await.unwrap().rotate == RotateHint::Before;
-        pool.mark_durable(id);
+        rotated = place_next(&pool).await.1.rotate == RotateHint::Before;
     }
     let epoch = pool.epoch();
     assert!(epoch > 0);
@@ -471,7 +466,6 @@ async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
 /// an epoch no flush asks for, and the queue stops reaching disk entirely.
 #[tokio::test]
 async fn a_record_too_wide_to_frame_does_not_move_the_epoch() {
-    const HEADER: u64 = 16;
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
     pool.arm_file_fill(HEADER + record_charge() * 2, HEADER);
 
@@ -497,7 +491,6 @@ async fn a_record_too_wide_to_frame_does_not_move_the_epoch() {
 /// num_entries_before, which recovery uses to order them.
 #[tokio::test]
 async fn a_file_is_never_closed_before_it_takes_a_record() {
-    const HEADER: u64 = 16;
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
 
     // Fill the active page before the writer arms, so the queue's first record

@@ -320,11 +320,6 @@ impl WriterState {
                 )
                 .await;
 
-            // The file has its opening record now, so its flushes may take
-            // pages. Idempotent, and cheap enough not to be worth tracking
-            // which record was the first.
-            self.file_writer.allow_pool_flush();
-
             // Update last written entry ID
             self.has_written = true;
             self.entry_index += 1;

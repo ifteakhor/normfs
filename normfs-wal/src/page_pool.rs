@@ -173,9 +173,10 @@ struct FileFill {
     used: u64,
     max: u64,
     header_len: u64,
-    /// Whether this file has been charged an entry yet. Only the buffered path
-    /// consults it: a file takes its first record however large it is, or a
-    /// record bigger than `max` would rotate forever into empty files.
+    /// Whether this file has been charged an entry yet. Both paths consult it,
+    /// so a file takes its first record however large it is: without it a
+    /// record bigger than `max` would rotate forever into empty files, and a
+    /// file whose max is below its own header would be closed holding nothing.
     has_written: bool,
     epoch: u64,
 }
@@ -222,13 +223,14 @@ struct Inner {
     page_epoch: Vec<u64>,
 }
 
-/// Appends under the pool lock, keeping the file writer's cursor honest.
-///
 /// What a record of this length costs the file: framing and CRC, not payload.
-fn encoded_len_of(record_len: usize) -> u64 {
+///
+/// `None` for a record wider than the V1 frame, which is a record no file can
+/// take. Callers decide what that means for them.
+fn encoded_len_of(record_len: usize) -> Option<u64> {
     u32::try_from(record_len)
+        .ok()
         .map(|n| crate::wal_entry_v1::encoded_len(n) as u64)
-        .unwrap_or(u64::MAX)
 }
 
 /// Charges a record that landed on a page, and stamps that page with the file
@@ -246,8 +248,8 @@ fn charge_paged(inner: &mut Inner, entry_len: u64, opened_page: bool) -> Placeme
     let active = inner.ring.active_page();
     let Some(fill) = inner.fill.as_mut() else {
         // Not armed: no writer is taking pages from this pool yet, so there is
-        // no file to fill and nothing to decide.
-        inner.page_epoch[active] = 0;
+        // no file to fill and nothing to decide. Nothing has stamped a page
+        // either, so they are all still at the zero this would write.
         return Placement {
             in_pool: true,
             rotate: RotateHint::None,
@@ -401,7 +403,9 @@ impl PagePool {
     /// disagree after a record the pool refused, and re-seeding to catch up
     /// discards pages, so callers must serialise their appends.
     pub async fn place(&self, expected_id: u64, record: &[u8]) -> Result<Placement, PoolError> {
-        let entry_len = encoded_len_of(record.len());
+        // Unwrap-free: a record too wide to frame never reaches `charge_paged`,
+        // because `append_locked` reports `TooLarge` for it first.
+        let entry_len = encoded_len_of(record.len()).unwrap_or(u64::MAX);
         let mut waited = false;
         loop {
             let woken = self.space.notified();
@@ -438,14 +442,13 @@ impl PagePool {
     /// larger than a page would never rotate at all, because rotation would be
     /// waiting for a page boundary that never comes.
     pub fn charge_buffered(&self, record_len: usize) -> Placement {
-        let Ok(record_len) = u32::try_from(record_len) else {
+        let Some(entry_len) = encoded_len_of(record_len) else {
             // Wider than the V1 frame, so `WriterState::write` rejects it before
             // it can rotate anything. Charging it would move the file on for a
             // record that never reaches one, and the pool's epoch would outrun
             // the writer's for good.
             return Placement::default();
         };
-        let entry_len = crate::wal_entry_v1::encoded_len(record_len) as u64;
         let mut inner = self.inner.lock().unwrap();
         let Some(fill) = inner.fill.as_mut() else {
             return Placement::default();

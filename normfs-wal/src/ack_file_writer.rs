@@ -242,10 +242,9 @@ impl AckFileWriter {
         })
     }
 
-    /// Lets this file's flushes start taking pages.
-    ///
-    /// Called once the first record of the file has been handed over, so that
-    /// record cannot be overtaken by the pages behind it.
+    /// Lets this file's flushes start taking pages, for tests that drive an
+    /// `AckFileWriter` without handing it a record first. Production opens the
+    /// gate through `write_maybe_pooled`, where the record itself does it.
     pub fn allow_pool_flush(&self) {
         self.pool_ready.store(true, Ordering::Release);
     }
@@ -284,6 +283,12 @@ impl AckFileWriter {
             state.current_size += entry.len() as u64;
         }
         state.acks.push((queue_id, entry_id));
+
+        // This file now holds a record, so its flushes may take pages. Set here
+        // rather than by the caller afterwards: a buffered record has to be in
+        // the buffer before any page can be written, and here it already is,
+        // under the lock a flush takes to read it.
+        self.pool_ready.store(true, Ordering::Release);
 
         if state.buffer.len() >= self.settings.max_buffer_size {
             self.buffer_full_notify.notify_one();
