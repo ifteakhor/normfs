@@ -132,6 +132,10 @@ cargo zigbuild --release --features server-bin --bin normfs-server --target x86_
 | macOS | x86_64, aarch64 | ✅ |
 | FreeBSD | x86_64 | ✅ |
 
+The WAL checksums with the CPU's CRC32 instruction, so x86_64 needs SSE4.2
+(Nehalem, Bulldozer and later) and aarch64 needs the CRC extension. A CPU
+without it is not supported and faults rather than falling back.
+
 ## 📦 Components
 
 - **normfs**: Core Rust library and server

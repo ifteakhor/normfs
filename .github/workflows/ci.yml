@@ -35,11 +35,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The runner's gcc, not the pinned image: this checks portability.
-      # test implies build. It exercises the SSE4.2 CRC32C path against the
-      # proven portable one, and checks that check-proved.sh still rejects a
+      # test implies build. It exercises the SSE4.2 CRC32C path against a
+      # polynomial reference, and checks that check-proved.sh still rejects a
       # report with an open goal — neither is something the proof job can do.
       - name: Build and test every C module
         run: make -f verify/Makefile test
+
+  cross:
+    name: cross build (zig)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+      - run: cargo install cargo-zigbuild@0.23.0 --locked
+      # Every other job is a native gcc build, where the compiler's baseline
+      # hides what breaks here. The runner is x86_64, so the cross-built tests
+      # also run: WP assumes the intrinsic path rather than proving it.
+      - name: x86_64
+        run: |
+          cargo zigbuild -p normfs-wal --release --target x86_64-unknown-linux-gnu --tests
+          ran=0
+          for t in target/x86_64-unknown-linux-gnu/release/deps/normfs_wal-*; do
+              if [ -f "$t" ] && [ -x "$t" ]; then "$t"; ran=$((ran + 1)); fi
+          done
+          # A glob that matches no binary means the layout moved, not that the
+          # tests passed.
+          test "$ran" -gt 0
+      - name: aarch64
+        run: cargo zigbuild -p normfs-wal --release --target aarch64-unknown-linux-gnu
 
   image:
     name: toolchain image
