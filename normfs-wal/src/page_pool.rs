@@ -105,6 +105,9 @@ impl std::fmt::Debug for PageGuard {
 /// indefinite wait with no explanation is not debuggable.
 const STALL_WARN_AFTER: Duration = Duration::from_secs(5);
 
+/// Pages a read may never pin, so the writer always has one to append into.
+const PIN_RESERVE: usize = 1;
+
 /// Why an append could not be satisfied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolError {
@@ -221,6 +224,9 @@ struct Inner {
     /// several rotations can be outstanding at once and each file still gets
     /// exactly its own records.
     page_epoch: Vec<u64>,
+    /// Bytes appended and not yet reported written. An estimate: it drives the
+    /// flush hint, not a decision.
+    unwritten: usize,
 }
 
 /// What a record of this length costs the file: framing and CRC, not payload.
@@ -310,6 +316,10 @@ pub struct PagePool {
     /// Woken when [`PagePool::mark_durable`] advances the watermark, which is
     /// the only event that can turn a full pool into a pool with room.
     space: Notify,
+    /// Poked at `flush_watermark` unwritten bytes. Otherwise the writer's
+    /// interval tick is the only thing on this path that can start a flush.
+    flush: Mutex<Option<Arc<Notify>>>,
+    flush_watermark: usize,
 }
 
 impl PagePool {
@@ -322,9 +332,22 @@ impl PagePool {
                 written: vec![0; page_count],
                 fill: None,
                 page_epoch: vec![0; page_count],
+                unwritten: 0,
             }),
             space: Notify::new(),
             drainer: std::sync::atomic::AtomicBool::new(false),
+            flush: Mutex::new(None),
+            flush_watermark: (page_count * page_size / 2).max(page_size),
+        }
+    }
+
+    pub fn set_flush_signal(&self, flush: Arc<Notify>) {
+        *self.flush.lock().unwrap() = Some(flush);
+    }
+
+    fn signal_flush(&self) {
+        if let Some(flush) = self.flush.lock().unwrap().as_ref() {
+            flush.notify_one();
         }
     }
 
@@ -338,6 +361,14 @@ impl PagePool {
     /// pool. Callers may wait for a page only after this.
     pub fn set_drainer(&self) {
         self.drainer.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Gives up that responsibility. Waiting for a page nothing drains is a
+    /// wait nothing can end.
+    pub fn clear_drainer(&self) {
+        self.drainer
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.space.notify_waiters();
     }
 
     /// Takes over the rotation decision from the writer.
@@ -406,32 +437,67 @@ impl PagePool {
         // Unwrap-free: a record too wide to frame never reaches `charge_paged`,
         // because `append_locked` reports `TooLarge` for it first.
         let entry_len = encoded_len_of(record.len()).unwrap_or(u64::MAX);
-        let mut waited = false;
+        match self.try_place(expected_id, record, entry_len) {
+            Ok(Some(placed)) => return Ok(placed),
+            Ok(None) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Registered before the retry re-tests the pool: `notify_waiters`
+        // leaves no permit, and `enable()` is what joins the waiter list.
         loop {
             let woken = self.space.notified();
-            {
-                let mut inner = self.inner.lock().unwrap();
-                if inner.ring.next_entry_id() != expected_id {
-                    inner.ring.reinit(expected_id);
-                    inner.written.iter_mut().for_each(|w| *w = 0);
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+
+            match self.try_place(expected_id, record, entry_len) {
+                Ok(Some(placed)) => {
+                    log::debug!(target: "normfs-wal", "page pool: resumed at entry {expected_id}");
+                    return Ok(placed);
                 }
-                let (outcome, opened_page) = append_locked(&mut inner, record);
-                match outcome {
-                    AppendOutcome::Cached(_) => {
-                        if waited {
-                            log::debug!(target: "normfs-wal", "page pool: resumed at entry {expected_id}");
-                        }
-                        return Ok(charge_paged(&mut inner, entry_len, opened_page));
-                    }
-                    AppendOutcome::TooLarge => return Err(PoolError::TooLarge),
-                    AppendOutcome::Full => {}
-                }
+                Ok(None) => {}
+                Err(e) => return Err(e),
             }
-            waited = true;
+
             if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {
                 self.warn_stalled();
             }
         }
+    }
+
+    /// `Ok(None)` means no page can take the record yet.
+    fn try_place(
+        &self,
+        expected_id: u64,
+        record: &[u8],
+        entry_len: u64,
+    ) -> Result<Option<Placement>, PoolError> {
+        let over_watermark;
+        let placed = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.ring.next_entry_id() != expected_id {
+                // Every page pinned: nothing to append into either, so wait.
+                if !inner.ring.reinit(expected_id) {
+                    return Ok(None);
+                }
+                inner.written.iter_mut().for_each(|w| *w = 0);
+                inner.unwritten = 0;
+            }
+            let (outcome, opened_page) = append_locked(&mut inner, record);
+            match outcome {
+                AppendOutcome::Cached(_) => {
+                    inner.unwritten = inner.unwritten.saturating_add(entry_len as usize);
+                    over_watermark = inner.unwritten >= self.flush_watermark;
+                    charge_paged(&mut inner, entry_len, opened_page)
+                }
+                AppendOutcome::TooLarge => return Err(PoolError::TooLarge),
+                AppendOutcome::Full => return Ok(None),
+            }
+        };
+        if over_watermark {
+            self.signal_flush();
+        }
+        Ok(Some(placed))
     }
 
     /// Charges a record the pool refused, which the writer will buffer instead.
@@ -488,13 +554,17 @@ impl PagePool {
     pub async fn skip_to(&self, next_id: u64) {
         loop {
             let woken = self.space.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
             {
                 let mut inner = self.inner.lock().unwrap();
                 let nothing_to_lose = inner.ring.is_empty()
                     || inner.ring.min_essential_id() >= inner.ring.next_entry_id();
-                if nothing_to_lose {
-                    inner.ring.reinit(next_id);
+                // A pinned page is something to lose too, and `reinit` reports
+                // that by refusing.
+                if nothing_to_lose && inner.ring.reinit(next_id) {
                     inner.written.iter_mut().for_each(|w| *w = 0);
+                    inner.unwritten = 0;
                     return;
                 }
             }
@@ -619,7 +689,9 @@ impl PagePool {
     pub fn commit_written(&self, page_index: usize, up_to: usize) {
         let mut inner = self.inner.lock().unwrap();
         if up_to > inner.written[page_index] {
+            let taken = up_to - inner.written[page_index];
             inner.written[page_index] = up_to;
+            inner.unwritten = inner.unwritten.saturating_sub(taken);
         }
     }
 
@@ -684,9 +756,19 @@ impl PagePool {
     /// why that is sound.
     pub fn pin_range(self: &Arc<Self>, start: u64, end: u64) -> Vec<(u64, Bytes)> {
         let mut found: Vec<(u64, usize, *const u8, usize)> = Vec::new();
+        let mut copied: Vec<(u64, Bytes)> = Vec::new();
         {
             let inner = self.inner.lock().unwrap();
-            for k in 0..inner.ring.page_count() {
+            let count = inner.ring.page_count();
+            let pinned_now = (0..count).filter(|&k| inner.ring.page_pin_count(k) > 0).count();
+            // Past this budget records are copied, not borrowed: a pin lasts as
+            // long as the payload, and a pinned page is one no append can use.
+            let mut budget = count
+                .saturating_sub(PIN_RESERVE)
+                .saturating_sub(pinned_now);
+            let mut taking: Vec<bool> = vec![false; count];
+
+            for k in 0..count {
                 let n = inner.ring.page_len(k);
                 let Some(first) = inner.ring.page_first_entry_id(k) else {
                     continue;
@@ -696,6 +778,22 @@ impl PagePool {
                 if last < start || first > end {
                     continue;
                 }
+                if !taking[k] && inner.ring.page_pin_count(k) == 0 {
+                    if budget == 0 {
+                        for i in 0..n {
+                            let id = first + u64::from(i);
+                            if id < start || id > end {
+                                continue;
+                            }
+                            if let Some(rec) = inner.ring.record(k, i) {
+                                copied.push((id, Bytes::copy_from_slice(rec)));
+                            }
+                        }
+                        continue;
+                    }
+                    budget -= 1;
+                }
+                taking[k] = true;
                 for i in 0..n {
                     let id = first + u64::from(i);
                     if id < start || id > end {
@@ -729,6 +827,7 @@ impl PagePool {
                 (id, Bytes::from_owner(guard))
             })
             .collect();
+        out.extend(copied);
         out.sort_by_key(|(id, _)| *id);
         out
     }
@@ -750,9 +849,14 @@ impl PagePool {
     /// This drops whatever the pages held, so it is only for resynchronising a
     /// pool that has fallen out of step with the id sequence — never for making
     /// room. Making room is what waiting is for.
-    pub fn reseed(&self, first_entry_id: u64) {
+    /// False when every page is pinned, in which case nothing was reseeded.
+    pub fn reseed(&self, first_entry_id: u64) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        inner.ring.reinit(first_entry_id);
+        if !inner.ring.reinit(first_entry_id) {
+            return false;
+        }
         inner.written.iter_mut().for_each(|w| *w = 0);
+        inner.unwritten = 0;
+        true
     }
 }

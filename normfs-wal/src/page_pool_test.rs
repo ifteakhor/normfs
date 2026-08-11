@@ -639,3 +639,78 @@ async fn every_pin_is_released_even_when_payloads_are_dropped_unread() {
     });
     assert_eq!(pinned, 0, "a dropped payload leaks a pin, and a leaked pin holds the page for good");
 }
+
+#[tokio::test]
+async fn a_reseed_does_not_reset_a_page_a_reader_is_holding() {
+    let pool = pool();
+    fill(&pool);
+
+    let borrowed = pool.pin_range(0, 0);
+    assert_eq!(borrowed.len(), 1);
+    let (_, payload) = borrowed.into_iter().next().unwrap();
+    let pinned_page = pool
+        .with_ring(|ring| (0..ring.page_count()).find(|&k| ring.page_pin_count(k) > 0))
+        .expect("the payload holds a pin");
+
+    assert!(pool.reseed(64), "one page is free, so this can proceed");
+    assert_eq!(
+        pool.with_ring(|ring| ring.page_pin_count(pinned_page)),
+        1,
+        "a reseed must carry the pin across, or the page is handed out to be overwritten"
+    );
+
+    // Whatever the pool does next, the reader's bytes are its own.
+    for _ in 0..64 {
+        let _ = pool.try_append(&RECORD);
+    }
+    assert_eq!(&payload[..], &RECORD[..]);
+
+    drop(payload);
+    assert_eq!(
+        pool.with_ring(|ring| ring.page_pin_count(pinned_page)),
+        0,
+        "and the count comes back to zero rather than underflowing"
+    );
+}
+
+#[tokio::test]
+async fn a_read_never_pins_the_last_page() {
+    let pool = pool();
+    fill(&pool);
+
+    // Everything the pool holds, borrowed at once.
+    let held = pool.pin_range(0, u64::MAX);
+    assert!(!held.is_empty());
+
+    let unpinned = pool.with_ring(|ring| {
+        (0..ring.page_count())
+            .filter(|&k| ring.page_pin_count(k) == 0)
+            .count()
+    });
+    assert!(
+        unpinned >= 1,
+        "a read that pins every page leaves the writer nowhere to append"
+    );
+}
+
+#[tokio::test]
+async fn an_append_makes_progress_while_a_reader_holds_everything() {
+    let pool = pool();
+    fill(&pool);
+    pool.set_drainer();
+
+    // The payloads stay alive for the whole of this test.
+    let _held = pool.pin_range(0, u64::MAX);
+
+    // Resyncing to an id the pool is not expecting must not wait on a pin.
+    let next = pool.next_entry_id();
+    let placed = tokio::time::timeout(
+        Duration::from_secs(5),
+        pool.place(next.wrapping_add(500), &RECORD),
+    )
+    .await;
+    assert!(
+        placed.is_ok(),
+        "a reader holding payloads must not stall an append for ever"
+    );
+}

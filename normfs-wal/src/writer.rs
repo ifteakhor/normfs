@@ -158,6 +158,11 @@ impl WalWriter {
                                 e
                             );
                         }
+                        // After the closing flush, so it releases whatever is
+                        // still waiting.
+                        if let Some(pool) = state.pool.as_ref() {
+                            pool.clear_drainer();
+                        }
                         let _ = responder.send(());
                         break;
                     }
@@ -249,7 +254,6 @@ impl WriterState {
             let record_size = u32::try_from(data.len()).map_err(|_| {
                 WalError::WalEntryV1Error(WalEntryV1Error::RecordTooLarge(data.len()))
             })?;
-            let entry_len = wal_entry_v1::encoded_len(record_size);
 
             // With a pool the decision was already taken, at enqueue time and
             // before these bytes entered a page — so the writer carries it out
@@ -258,7 +262,11 @@ impl WriterState {
             // and, worse, decide it after the record was already placed.
             let must_rotate = match placement.rotate {
                 RotateHint::WriterDecides => {
-                    self.has_written && !self.file_writer.can_add(entry_len).await
+                    self.has_written
+                        && !self
+                            .file_writer
+                            .can_add(wal_entry_v1::encoded_len(record_size))
+                            .await
                 }
                 RotateHint::Before => true,
                 RotateHint::None => false,
@@ -286,9 +294,18 @@ impl WriterState {
 
             // [record_size varint32][record][crc32c u32 LE] — the id is not
             // stored; the reader derives it from num_entries_before + index.
-            let mut entry_buf = BytesMut::new();
-            WalEntryV1::new(&data).write_to_bytes(&mut entry_buf)?;
-            let entry_buf = entry_buf.freeze();
+            //
+            // A record in a page is already framed by the same codec, in the
+            // bytes the flush takes, and `write_maybe_pooled` drops this one
+            // unread.
+            let pooled = self.pool.is_some() && placement.in_pool;
+            let entry_buf = if pooled {
+                Bytes::new()
+            } else {
+                let mut entry_buf = BytesMut::new();
+                WalEntryV1::new(&data).write_to_bytes(&mut entry_buf)?;
+                entry_buf.freeze()
+            };
 
             log::debug!(
                 "WAL writer: writing entry {} to file {} for queue '{}', total size: {} bytes",

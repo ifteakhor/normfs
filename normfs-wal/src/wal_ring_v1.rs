@@ -135,6 +135,14 @@ impl WalRing {
     pub fn new(page_count: usize, page_size: usize, first_entry_id: u64) -> Self {
         assert!(page_count >= 1, "ring needs at least one page");
         assert!(page_size >= 9, "page must hold the smallest entry plus its offset");
+        // Preconditions of normfs_wal_page_init and normfs_wal_ring_init: the
+        // offset table holds a page offset as a u32, and the page pointers are
+        // derived from the arena size.
+        assert!(page_size <= u32::MAX as usize, "page must be addressable by a u32 offset");
+        assert!(
+            page_count.checked_mul(page_size).is_some(),
+            "arena size overflows"
+        );
 
         // One allocation, never reallocated. Page k starts at k * page_size,
         // which is what makes the pages provably disjoint without a pairwise
@@ -257,7 +265,19 @@ impl WalRing {
 
     /// Resets the ring to empty, with `first_entry_id` as the next id to cache.
     /// Used to resync the cache after an entry could not be cached.
-    pub fn reinit(&mut self, first_entry_id: u64) {
+    ///
+    /// A pin outlives this. `normfs_wal_page_init` zeroes `pin_count`, so
+    /// carrying the counts across is what keeps `normfs_wal_page_is_reusable`
+    /// false for a page a reader is still borrowing bytes from, and moving the
+    /// active page off a pinned one keeps appends off those bytes.
+    ///
+    /// False when every page is pinned, changing nothing.
+    pub fn reinit(&mut self, first_entry_id: u64) -> bool {
+        let pins: Vec<u32> = self.pages.iter().map(|p| p.pin_count).collect();
+        let Some(free) = pins.iter().position(|&c| c == 0) else {
+            return false;
+        };
+
         let page_size = self.page_size;
         let n = self.pages.len();
         let base = self.arena.as_mut_ptr();
@@ -266,6 +286,7 @@ impl WalRing {
                 let buf = base.add(k * page_size);
                 normfs_wal_page_init(&mut self.pages[k], buf, page_size, k as u64, first_entry_id);
             }
+            self.pages[k].pin_count = pins[k];
         }
         let pages_ptr = self.pages.as_mut_ptr();
         unsafe {
@@ -278,6 +299,10 @@ impl WalRing {
                 first_entry_id,
             );
         }
+        if self.pages[self.ring.active].pin_count != 0 {
+            self.rotate_into(free);
+        }
+        true
     }
 
     /// The lowest entry id currently cached, or `None` if the ring is empty.

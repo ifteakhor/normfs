@@ -212,6 +212,11 @@ impl AckFileWriter {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let pooled = pool.is_some();
+        // The pooled path never fills `buffer`, so the interval tick would
+        // otherwise be the only thing that can start a flush.
+        if let Some(p) = pool.as_ref() {
+            p.set_flush_signal(buffer_full_notify.clone());
+        }
         // Closed until the record that opens this file has been handed over.
         // A buffered record has no page, so nothing else orders it against the
         // pages that follow it: without this the new file's first flush can
@@ -445,11 +450,13 @@ async fn flush_buffer(
 
 impl Drop for AckFileWriter {
     fn drop(&mut self) {
+        // Ask for the shutdown flush and let the task run it. Aborting here
+        // killed it before it could be polled once after the request, so the
+        // flush never ran -- and on the pooled path everything not yet written
+        // is in the pages, not in a buffer.
         let _ = self.shutdown_tx.try_send(());
-        if let Ok(mut guard) = self.writer_handle.try_lock()
-            && let Some(handle) = guard.take()
-        {
-            handle.abort();
+        if let Ok(mut guard) = self.writer_handle.try_lock() {
+            let _ = guard.take();
         }
     }
 }

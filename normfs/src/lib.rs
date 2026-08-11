@@ -621,6 +621,20 @@ impl NormFS {
             }
         };
 
+        // A file that could not be read is not an empty file: `get_file_end`
+        // already reports "absent" and "no entries" as Ok(None), and the reuse
+        // branch below hands its id to a writer that opens with truncate(true).
+        let latest_unreadable = match self.wal.get_file_end(queue, &latest_file_id).await {
+            Err(e) => {
+                log::error!(target: "normfs",
+                    "Queue '{}' - Latest file {} could not be read ({:?}); writing to the next \
+                     file id rather than reusing it",
+                    queue, latest_file_id, e);
+                true
+            }
+            Ok(_) => false,
+        };
+
         // Walk backward from the latest file ID to find the first file with actual entries
         let mut current_file_id = latest_file_id.clone();
 
@@ -654,8 +668,8 @@ impl NormFS {
                     // - If current file (with entries) == latest file: write to latest + 1
                     // - If current file (with entries) < latest file: reuse empty latest file
                     let is_latest_file = current_file_id == latest_file_id;
-                    let next_file_id = if is_latest_file {
-                        // Latest file has entries, create new file
+                    let next_file_id = if is_latest_file || latest_unreadable {
+                        // Has entries, or could not be read: new file either way
                         latest_file_id.increment()
                     } else {
                         // Found entries in older file, latest file is empty - reuse it
@@ -687,11 +701,16 @@ impl NormFS {
                     // File is empty or corrupted, move to previous file
                     if current_file_id == UintN::one() {
                         // We've reached the first file and it's empty - start fresh
+                        let start_at = if latest_unreadable {
+                            latest_file_id.increment()
+                        } else {
+                            UintN::one()
+                        };
                         log::info!(target: "normfs",
-                            "Queue '{}' - Reached first file with no entries, starting fresh",
-                            queue
+                            "Queue '{}' - Reached first file with no entries, starting fresh at file {}",
+                            queue, start_at
                         );
-                        return Ok((UintN::one(), Default::default(), None));
+                        return Ok((start_at, Default::default(), None));
                     }
 
                     // Decrement to previous file

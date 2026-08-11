@@ -37,15 +37,20 @@ struct BlockReader<R> {
     buf: BytesMut,
     eof: bool,
     block: usize,
+    /// Most bytes the source can hold. A record size is a `u32` off disk whose
+    /// CRC is only checked once the bytes are in hand, so without this one
+    /// corrupt prefix reserves up to 4 GiB before the frame is rejected.
+    limit: usize,
 }
 
 impl<R: AsyncRead + Unpin> BlockReader<R> {
-    fn new(inner: R, block: usize) -> Self {
+    fn new(inner: R, block: usize, limit: usize) -> Self {
         Self {
             inner,
             buf: BytesMut::with_capacity(block),
             eof: false,
             block,
+            limit,
         }
     }
 
@@ -121,6 +126,10 @@ async fn next_v1_frame<R: AsyncRead + Unpin>(
     };
 
     let total = prefix + record_size + WAL_ENTRY_V1_CRC_SIZE;
+    // A frame longer than the whole file, so the prefix is corrupt.
+    if total > block.limit {
+        return Ok(V1Frame::Truncated);
+    }
     if block.unread().len() < total {
         block.fill(total).await?;
         if block.unread().len() < total {
@@ -190,12 +199,13 @@ pub async fn get_wal_range(
         Err(e) => return Err(e.into()),
     };
 
-    if file.metadata().await?.len() == 0 {
+    let file_len = file.metadata().await?.len();
+    if file_len == 0 {
         log::warn!("WAL reader: file {} is empty", file_id);
         return Err(WalError::WalEmpty(file_id.clone()));
     }
 
-    let mut block = BlockReader::new(file, WAL_SCAN_BLOCK_CAPACITY);
+    let mut block = BlockReader::new(file, WAL_SCAN_BLOCK_CAPACITY, file_len as usize);
     block.fill(WAL_HEADER_PROBE).await?;
 
     let (any_header, header_size) = match AnyWalHeader::from_bytes(block.unread()) {
@@ -523,7 +533,8 @@ pub async fn read_wal_file_range(
         Err(e) => return Err(e.into()),
     };
 
-    if file.metadata().await?.len() == 0 {
+    let file_len = file.metadata().await?.len();
+    if file_len == 0 {
         log::debug!("WAL reader: file {} is empty", file_id);
         return Ok(ReadRangeResult::PartialRead {
             last_read_id: None,
@@ -531,9 +542,21 @@ pub async fn read_wal_file_range(
         });
     }
 
-    let mut block = BlockReader::new(file, WAL_READ_BUFFER_CAPACITY);
+    let mut block = BlockReader::new(file, WAL_READ_BUFFER_CAPACITY, file_len as usize);
     block.fill(WAL_HEADER_PROBE).await?;
-    let (any_header, header_size) = AnyWalHeader::from_bytes(block.unread())?;
+    // A header too short to decode is a file nothing has finished writing yet,
+    // which is what the other three readers report it as.
+    let (any_header, header_size) = match AnyWalHeader::from_bytes(block.unread()) {
+        Ok(v) => v,
+        Err(AnyWalHeaderError::V0(WalHeaderError::SliceTooShort))
+        | Err(AnyWalHeaderError::V1(WalHeaderV1Error::Truncated)) => {
+            return Ok(ReadRangeResult::PartialRead {
+                last_read_id: None,
+                last_id_in_file: from_id.clone(),
+            });
+        }
+        Err(e) => return Err(e.into()),
+    };
     block.consume(header_size);
     let wal_header = WalHeader::from(&any_header);
 

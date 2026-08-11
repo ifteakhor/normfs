@@ -2765,3 +2765,54 @@ async fn pooled_rotation_reads_back_in_id_order() {
 
     fs.close().await.unwrap();
 }
+
+/// A latest WAL file whose header cannot be read is not an empty file, and
+/// must not be handed to a writer that opens it with `truncate(true)`.
+#[tokio::test]
+async fn test_recovery_keeps_a_latest_file_it_cannot_read() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+
+    let instance_id = {
+        let fs = NormFS::new(path.clone(), NormFsSettings::default())
+            .await
+            .unwrap();
+        let instance_id = fs.get_instance_id().to_string();
+        let queue_id = fs.resolve("test-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+        for i in 0..10 {
+            fs.enqueue(&queue_id, Bytes::from(format!("entry-{}", i)))
+                .await
+                .unwrap();
+        }
+        fs.close().await.unwrap();
+        instance_id
+    };
+
+    let resolver = QueueIdResolver::new(&instance_id);
+    let queue_id = resolver.resolve("test-queue");
+    let wal_path = get_queue_wal_path(&path, &queue_id);
+    let file_1 = UintN::from(1u64).to_file_path(wal_path.to_str().unwrap(), "wal");
+    let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
+
+    // A second file with real records, whose header has one bad byte.
+    let mut bytes = tokio::fs::read(&file_1).await.unwrap();
+    bytes[8] ^= 0xFF;
+    tokio::fs::write(&file_2, &bytes).await.unwrap();
+
+    {
+        let fs = NormFS::new(path.clone(), NormFsSettings::default())
+            .await
+            .unwrap();
+        let queue_id = fs.resolve("test-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+        fs.enqueue(&queue_id, Bytes::from("new-entry")).await.unwrap();
+        fs.close().await.unwrap();
+    }
+
+    assert_eq!(
+        tokio::fs::read(&file_2).await.unwrap(),
+        bytes,
+        "a file recovery could not read must be left exactly as it was"
+    );
+}
