@@ -86,17 +86,50 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     });
     normfs.close().await?;
 
-    // `enqueue` hands off to a writer task, so the close is where the tail
-    // reaches disk. Timing only the loop reports memory speed.
-    let total_elapsed = start_time.elapsed();
+    let close_elapsed = start_time.elapsed();
+
+    // `close()` stops the Store writers before flushing the WAL, so a run can
+    // exit with the migration unstarted. Reopening resumes it.
+    let (backlog_files, backlog_bytes) = common::wal_backlog(&cfg.dir);
+    println!(
+        "At close: {} unmigrated WAL file(s), {:.2} GiB",
+        backlog_files,
+        backlog_bytes as f64 / (1u64 << 30) as f64
+    );
+    let settle_start = Instant::now();
+    {
+        let normfs = NormFS::new(cfg.dir.clone(), cfg.settings()).await?;
+        let queue_name = normfs.resolve("write_bench_queue");
+        normfs.ensure_queue_exists_for_write(&queue_name).await?;
+        let deadline = Instant::now() + std::time::Duration::from_secs(900);
+        loop {
+            if common::wal_backlog(&cfg.dir).0 <= 1 {
+                break;
+            }
+            if Instant::now() > deadline {
+                eprintln!("WARNING: migration did not drain within 900 s");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        normfs.close().await?;
+    }
+    let settle_elapsed = settle_start.elapsed();
+    println!(
+        "Settle: {:.2} s to drain the migration backlog",
+        settle_elapsed.as_secs_f64()
+    );
+
+    let total_elapsed = close_elapsed + settle_elapsed;
     let total_mb = cfg.total_bytes() as f64 / (1024.0 * 1024.0);
 
     println!();
     println!("Write benchmark completed!");
     println!("========================");
     println!(
-        "Enqueue time: {:.2} s | including close: {:.2} s",
+        "Enqueue time: {:.2} s | including close: {:.2} s | settled: {:.2} s",
         enqueue_elapsed.as_secs_f64(),
+        close_elapsed.as_secs_f64(),
         total_elapsed.as_secs_f64()
     );
     // Records per second is the figure that matters at this size: a small

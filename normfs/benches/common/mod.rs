@@ -199,3 +199,26 @@ pub fn dir_size(dir: &std::path::Path) -> u64 {
     }
     total
 }
+
+/// Unmigrated WAL files under `dir`, and their bytes: work the run has not finished.
+pub fn wal_backlog(dir: &std::path::Path) -> (usize, u64) {
+    let mut files = 0;
+    let mut bytes = 0;
+    fn walk(dir: &std::path::Path, files: &mut usize, bytes: &mut u64) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                match e.file_type() {
+                    Ok(t) if t.is_dir() => walk(&p, files, bytes),
+                    Ok(_) if p.extension().is_some_and(|x| x == "wal") => {
+                        *files += 1;
+                        *bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    walk(dir, &mut files, &mut bytes);
+    (files, bytes)
+}
