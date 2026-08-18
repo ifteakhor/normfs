@@ -37,9 +37,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::sync::Notify;
 
+use crate::wal_arena::{SlotRange, WalArena};
+use crate::wal_entry_v1::WalEntryV1;
 use crate::wal_ring_v1::{AppendOutcome, WalRing};
 
 /// Keeps a page alive for as long as a reader is looking at bytes on it.
@@ -105,15 +107,55 @@ impl std::fmt::Debug for PageGuard {
 /// indefinite wait with no explanation is not debuggable.
 const STALL_WARN_AFTER: Duration = Duration::from_secs(5);
 
-/// Pages a read may never pin, so the writer always has one to append into.
+/// The share of the pool reads may hold pinned at once, as a divisor: pages
+/// beyond `page_count / PIN_SHARE_DIVISOR` are copied out rather than borrowed.
+///
+/// A pin lasts as long as the payload, and a payload lives until the client has
+/// been sent it — through a 2048-deep read channel and a bounded response
+/// channel, and released only when the response is encoded onto the wire. So a
+/// client that stops reading its socket holds pages for as long as it likes.
+///
+/// The reserve used to be a single page. That is enough to prove the pool never
+/// deadlocks, and it was proved: an append always has somewhere to go. It is
+/// not enough to keep it *working*. With one page to append into, a queue
+/// advances one page per flush — 256 KiB per interval against otherwise
+/// unbounded throughput — and the cache degrades to nothing but the stalled
+/// reader's pages, so every other reader starts missing memory too. Half the
+/// pool is the smallest share that leaves the writer a working set rather than
+/// a single page.
+const PIN_SHARE_DIVISOR: usize = 2;
+
+/// Pages a read may never pin, whatever the share works out to, so the writer
+/// always has one to append into.
 const PIN_RESERVE: usize = 1;
+
+/// Payloads one `pin_range` may hand out borrowed rather than copied.
+///
+/// The page share bounds how much of the *pool* one reader can hold; this
+/// bounds how much of it a single call can claim in one go. `read_full`
+/// materialises the whole requested range before sending any of it, so without
+/// this one large read takes its share of the pool in a single step and holds
+/// it for the length of the send.
+const PIN_PAYLOADS_PER_READ: usize = 4096;
+
+/// How far ahead of the pool the caller's id may run before re-seeding.
+///
+/// The two can only disagree if something allocated an id for this queue
+/// without holding its append gate. Stepping keeps every record already held;
+/// re-seeding throws them away, so it is the fallback and the gap that reaches
+/// it has to be one no bookkeeping slip explains.
+const MAX_STEPPABLE_GAP: u64 = 1024;
 
 /// Why an append could not be satisfied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolError {
-    /// The record is larger than a whole page, so no page could ever hold it.
-    /// Waiting would never help.
-    TooLarge,
+    /// The record is wider than the V1 frame, so no *file* can hold it either.
+    /// Waiting would never help and nor would a bigger page.
+    ///
+    /// A record merely larger than a page is not an error: the pool holds it
+    /// whole and hands it over in its turn, which is what keeps it in the id
+    /// sequence rather than beside it.
+    Unframeable,
 }
 
 /// What the enqueue side decided about a record, for the writer to carry out.
@@ -184,26 +226,54 @@ struct FileFill {
     epoch: u64,
 }
 
-/// A run of bytes on one page that the file writer has not written yet.
+/// Where a run of unwritten bytes lives.
+///
+/// Two places, and the reason there are two is that a record wider than a page
+/// cannot be on one. It is still the pool's to hand over, though, and handing
+/// it over *here* rather than through a buffer of the writer's own is what puts
+/// it in the same id order as everything else — see [`PagePool::take_pending`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingSource {
+    /// Bytes `from..to` of page `index`.
+    Page {
+        index: usize,
+        from: usize,
+        to: usize,
+    },
+    /// A record too large for any page, framed once and held whole.
+    Oversize { entry_id: u64 },
+}
+
+/// A run of bytes the file writer has not written yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingWrite {
-    pub page_index: usize,
-    /// Offset into the page's entry region where the unwritten run starts.
-    pub from: usize,
-    /// Offset one past its end.
-    pub to: usize,
+    pub source: PendingSource,
+    /// The first entry id covered. Runs are handed out in this order.
+    pub first_entry_id: u64,
     /// The last entry id covered, so the caller knows what its `fsync` makes
     /// durable.
     pub last_entry_id: u64,
 }
 
-impl PendingWrite {
-    pub fn len(&self) -> usize {
-        self.to - self.from
-    }
+/// A record no page can hold, waiting its turn in the id sequence.
+struct Oversize {
+    /// The framed V1 entry, ready for the file. Framed once, at enqueue time,
+    /// rather than at every flush: the record is by definition larger than a
+    /// page, so a second pass over it is the one copy worth not repeating.
+    framed: Bytes,
+    /// Where the payload sits inside `framed`, so a read can be handed the
+    /// record itself without a second copy of it — `Bytes::slice` is a refcount
+    /// bump over the same allocation.
+    record: std::ops::Range<usize>,
+    epoch: u64,
+    /// Set once the run has been written but before it is known durable, so a
+    /// second flush in the same window does not write it twice.
+    written: bool,
+}
 
-    pub fn is_empty(&self) -> bool {
-        self.from == self.to
+impl Oversize {
+    fn record(&self) -> Bytes {
+        self.framed.slice(self.record.clone())
     }
 }
 
@@ -227,20 +297,84 @@ struct Inner {
     /// Bytes appended and not yet reported written. An estimate: it drives the
     /// flush hint, not a decision.
     unwritten: usize,
+    /// Records too large for a page, by id.
+    ///
+    /// They are held here rather than pushed into the writer's own buffer, and
+    /// that is the whole of what keeps them in order. A buffer of the writer's
+    /// own is a second road to the same file, and two roads cannot be ordered
+    /// against each other: the pages are filled at enqueue time while the
+    /// buffer is filled when the writer gets round to the entry, so a later
+    /// pooled record could reach the file ahead of an earlier buffered one.
+    /// V1 derives ids from position, so that is not a lost record but every
+    /// record after it answering to the wrong id.
+    oversize: std::collections::BTreeMap<u64, Oversize>,
+    /// Bytes held in `oversize`, so an appender can be made to wait for the
+    /// disk instead of letting them accumulate without bound.
+    oversize_bytes: usize,
+    /// Ids below this are no longer served from memory even if a page still
+    /// holds them.
+    ///
+    /// Raised when an oversized record's bytes are released, which is the one
+    /// event that can put a gap in what memory can answer. Reads are a
+    /// contiguous run or they are wrong -- a range that silently omits the id
+    /// in the middle is worse than one that says "read it from the file".
+    cache_floor: u64,
+    /// The highest id the file writer has taken responsibility for, in order.
+    /// `None` until it has taken any. Nothing above it may be written.
+    handed_through: Option<u64>,
 }
 
-fn offset_after(ring: &WalRing, page_index: usize, index: u32) -> usize {
-    (0..=index)
-        .filter_map(|j| ring.record(page_index, j))
-        .filter_map(|r| encoded_len_of(r.len()))
-        .sum::<u64>() as usize
+impl Inner {
+    /// Drops everything held, for a pool that has fallen out of step with the
+    /// id sequence.
+    ///
+    /// Only `reinit` gets here, and only after it has already renumbered the
+    /// pages, so the pages are gone whatever this does. What this adds is that
+    /// the oversized records go with them rather than being written under ids
+    /// that no longer mean anything -- and that memory stops claiming to hold
+    /// the ids it just dropped.
+    fn forget_pages_and_oversize(&mut self) {
+        self.written.iter_mut().for_each(|w| *w = 0);
+        self.unwritten = 0;
+        if let Some(&highest) = self.oversize.keys().next_back() {
+            let unwritten = self.oversize.values().filter(|o| !o.written).count();
+            if unwritten > 0 {
+                log::error!(
+                    target: "normfs-wal",
+                    "pool re-seeded with {unwritten} oversized record(s) not yet on disk: \
+                     they are lost. The id sequence and the pool disagreed, which means \
+                     something appended without holding the queue's append gate."
+                );
+            }
+            self.cache_floor = self.cache_floor.max(highest.saturating_add(1));
+        }
+        self.oversize.clear();
+        self.oversize_bytes = 0;
+    }
+
+    /// The lowest id memory can answer for, or `None` when it can answer for
+    /// nothing.
+    ///
+    /// Both stores have to agree on this: an oversized record sitting between
+    /// two pages is part of the run, and once it is released the run starts
+    /// above it however much the pages still hold.
+    fn min_cached(&self) -> Option<u64> {
+        let paged = self.ring.min_cached_id();
+        let held = self.oversize.keys().next().copied();
+        let lowest = match (paged, held) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }?;
+        let floor = lowest.max(self.cache_floor);
+        (floor < self.ring.next_entry_id()).then_some(floor)
+    }
 }
 
 /// What a record of this length costs the file: framing and CRC, not payload.
 ///
 /// `None` for a record wider than the V1 frame, which is a record no file can
 /// take. Callers decide what that means for them.
-fn encoded_len_of(record_len: usize) -> Option<u64> {
+pub(crate) fn encoded_len_of(record_len: usize) -> Option<u64> {
     u32::try_from(record_len)
         .ok()
         .map(|n| crate::wal_entry_v1::encoded_len(n) as u64)
@@ -312,6 +446,14 @@ fn append_locked(inner: &mut Inner, record: &[u8]) -> (AppendOutcome, bool) {
         let active = inner.ring.active_page();
         inner.written[active] = 0;
     }
+    // Counted here rather than at the caller, because this is the one place
+    // bytes enter a page: `try_append` reaches it too, and a count kept only on
+    // the `place` path would tell an idle writer there was nothing to flush.
+    if matches!(outcome, AppendOutcome::Cached(_))
+        && let Some(entry_len) = encoded_len_of(record.len())
+    {
+        inner.unwritten = inner.unwritten.saturating_add(entry_len as usize);
+    }
     (outcome, rotated)
 }
 
@@ -326,12 +468,36 @@ pub struct PagePool {
     /// Poked at `flush_watermark` unwritten bytes. Otherwise the writer's
     /// interval tick is the only thing on this path that can start a flush.
     flush: Mutex<Option<Arc<Notify>>>,
+    /// Fixed at construction, from the range the queue started with. A pool
+    /// that has grown flushes a little earlier than half full, which is the
+    /// harmless direction for a hint.
     flush_watermark: usize,
+    /// The shared arena this pool's pages come from, if any. A pool built by
+    /// [`PagePool::new`] owns its pages and can neither grow nor shrink.
+    arena: Option<Arc<WalArena>>,
+    /// The fewest pages this pool will shrink to. One to append into and one
+    /// the writer is draining; below that an appender waits for its own page to
+    /// reach disk, which serialises the queue against the disk rather than
+    /// merely bounding it.
+    floor: usize,
+    /// How many bytes of records too large for a page this pool will hold
+    /// before an appender waits.
+    ///
+    /// The queue's own page allowance, so a record that cannot go in a page
+    /// costs the same memory it would have cost in one. Measured against what
+    /// the queue started with rather than what it has grown to, because growing
+    /// is for pages. The first record is always taken however large it is:
+    /// refusing it would be the discarding this pool exists to avoid.
+    oversize_budget: usize,
 }
 
 impl PagePool {
     /// Allocates `page_count` pages of `page_size` bytes. This is the only
     /// allocation the pool ever performs.
+    ///
+    /// The pages are this pool's for life. See [`PagePool::new_in`] for a pool
+    /// that borrows a slot range from the process-wide arena and can trade
+    /// pages with other queues.
     pub fn new(page_count: usize, page_size: usize, first_entry_id: u64) -> Self {
         PagePool {
             inner: Mutex::new(Inner {
@@ -340,11 +506,18 @@ impl PagePool {
                 fill: None,
                 page_epoch: vec![0; page_count],
                 unwritten: 0,
+                oversize: std::collections::BTreeMap::new(),
+                oversize_bytes: 0,
+                cache_floor: 0,
+                handed_through: None,
             }),
             space: Notify::new(),
             drainer: std::sync::atomic::AtomicBool::new(false),
             flush: Mutex::new(None),
             flush_watermark: (page_count * page_size / 2).max(page_size),
+            arena: None,
+            floor: page_count,
+            oversize_budget: page_count * page_size,
         }
     }
 
@@ -358,6 +531,107 @@ impl PagePool {
         }
     }
 
+    /// Borrows the slot range `arena` has reserved for `ring_id`.
+    ///
+    /// Unlike [`PagePool::new`] this allocates nothing: the bytes already
+    /// exist, and what the pool holds is a claim on part of them. The claim can
+    /// move — see [`PagePool::append_at`], which grows into a free slot rather
+    /// than waiting for one of its own pages to reach disk, and
+    /// [`PagePool::mark_durable`], which hands the top page back once it is
+    /// safe to.
+    pub fn new_in(
+        arena: &Arc<WalArena>,
+        range: SlotRange,
+        ring_id: u64,
+        first_entry_id: u64,
+        floor: usize,
+    ) -> Self {
+        let ring = WalRing::in_arena(arena, range, ring_id, first_entry_id);
+        let page_count = ring.page_count();
+        let page_size = ring.page_size();
+        PagePool {
+            inner: Mutex::new(Inner {
+                written: vec![0; page_count],
+                page_epoch: vec![0; page_count],
+                ring,
+                fill: None,
+                unwritten: 0,
+                oversize: std::collections::BTreeMap::new(),
+                oversize_bytes: 0,
+                cache_floor: 0,
+                handed_through: None,
+            }),
+            space: Notify::new(),
+            drainer: std::sync::atomic::AtomicBool::new(false),
+            flush: Mutex::new(None),
+            flush_watermark: (page_count * page_size / 2).max(page_size),
+            arena: Some(Arc::clone(arena)),
+            floor: floor.max(1),
+            oversize_budget: page_count * page_size,
+        }
+    }
+
+    /// Takes the free arena slot above this pool's range, if there is one.
+    ///
+    /// The per-page bookkeeping grows with it. `written` starts at zero because
+    /// the page is empty, and `page_epoch` at zero because nothing has been
+    /// charged to it yet — the append that lands on it stamps it with the file
+    /// it belongs to, exactly as `charge_paged` does for every other page.
+    fn try_grow(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.ring.grow() {
+            return false;
+        }
+        let pages = inner.ring.page_count();
+        inner.written.resize(pages, 0);
+        inner.page_epoch.resize(pages, 0);
+        log::debug!(
+            target: "normfs-wal",
+            "page pool grew into arena slot {}, now {pages} pages",
+            inner.ring.slot_range().map_or(0, |r| r.first_slot + pages - 1),
+        );
+        true
+    }
+
+    /// The arena this pool's pages come from, if it shares one.
+    pub fn arena(&self) -> Option<&Arc<WalArena>> {
+        self.arena.as_ref()
+    }
+
+    /// How many pages this pool currently holds.
+    pub fn page_count(&self) -> usize {
+        self.inner.lock().unwrap().ring.page_count()
+    }
+
+    /// This pool's slot range in the shared arena, if it has one.
+    pub fn slot_range(&self) -> Option<SlotRange> {
+        self.inner.lock().unwrap().ring.slot_range()
+    }
+
+    /// Hands every page back to the arena, for a queue that is shutting down.
+    ///
+    /// Does nothing unless every page is reusable: `give_back` requires it, so
+    /// a range still holding records that are not on disk stays put.
+    pub fn release_to_arena(&self) {
+        let (Some(arena), Some(range)) = (self.arena.as_ref(), self.slot_range()) else {
+            return;
+        };
+        let inner = self.inner.lock().unwrap();
+        let essential = inner.ring.min_essential_id();
+        let all_reusable =
+            (0..inner.ring.page_count()).all(|k| inner.ring.page_is_reusable(k, essential));
+        if !all_reusable {
+            log::debug!(
+                target: "normfs-wal",
+                "not releasing {} pages to the arena: some still hold records that are not on disk",
+                range.page_count,
+            );
+            return;
+        }
+        arena.release(range, inner.ring.ring_id(), essential);
+        arena.forget_label(inner.ring.ring_id());
+    }
+
     /// Whether a file writer is taking pages from this pool, and therefore
     /// whether waiting for a page can ever end.
     pub fn has_drainer(&self) -> bool {
@@ -367,7 +641,8 @@ impl PagePool {
     /// Marks that a file writer has taken responsibility for draining this
     /// pool. Callers may wait for a page only after this.
     pub fn set_drainer(&self) {
-        self.drainer.store(true, std::sync::atomic::Ordering::Release);
+        self.drainer
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Gives up that responsibility. Waiting for a page nothing drains is a
@@ -410,11 +685,19 @@ impl PagePool {
         // turn into every later entry reading back under the wrong one.
         //
         // So the cursor starts at what is there: this writer emits only the
-        // records it is told about.
+        // records it is told about. `handed_through` is what enforces that --
+        // cleared here, it holds every flush back until this writer has taken
+        // an entry of its own, and the cursors keep the pages it inherited out
+        // of that entry's file.
         for k in 0..inner.ring.page_count() {
             inner.written[k] = inner.ring.page_bytes(k).len();
             inner.page_epoch[k] = 0;
         }
+        for held in inner.oversize.values_mut() {
+            held.written = true;
+            held.epoch = 0;
+        }
+        inner.handed_through = None;
     }
 
     /// Bytes charged to the open file so far, including its header. For tests.
@@ -424,7 +707,12 @@ impl PagePool {
 
     /// The file the next record will be charged to, counted from zero.
     pub fn epoch(&self) -> u64 {
-        self.inner.lock().unwrap().fill.as_ref().map_or(0, |f| f.epoch)
+        self.inner
+            .lock()
+            .unwrap()
+            .fill
+            .as_ref()
+            .map_or(0, |f| f.epoch)
     }
 
     /// Appends without waiting. `Full` means every page is either pinned by a
@@ -466,13 +754,34 @@ impl PagePool {
                 Err(e) => return Err(e),
             }
 
+            // `Full` means every page this queue holds is pinned or still holds
+            // records that are not on disk. Before waiting for the disk, take
+            // the free slot above the range if there is one: growing costs
+            // nothing anybody else is using, and the process-wide total does
+            // not move -- the page came from the arena, and some other queue
+            // released it.
+            //
+            // A ring grows into the slot directly above it and nowhere else, so
+            // this fails on a fragmented arena even when free pages exist. That
+            // is the price of a contiguous range, and waiting is the correct
+            // fallback rather than an error.
+            if self.try_grow() {
+                continue;
+            }
+
+            // Only a flush can end this wait, so ask for one rather than
+            // waiting for the writer's next tick. Without this an appender that
+            // is over budget pays a whole flush interval per record, which for
+            // a queue of records larger than a page is every record.
+            self.signal_flush();
+
             if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {
                 self.warn_stalled();
             }
         }
     }
 
-    /// `Ok(None)` means no page can take the record yet.
+    /// `Ok(None)` means the pool cannot take the record yet.
     fn try_place(
         &self,
         expected_id: u64,
@@ -483,21 +792,52 @@ impl PagePool {
         let placed = {
             let mut inner = self.inner.lock().unwrap();
             if inner.ring.next_entry_id() != expected_id {
-                // Every page pinned: nothing to append into either, so wait.
-                if !inner.ring.reinit(expected_id) {
-                    return Ok(None);
+                // Behind, and by a small enough margin to walk: step the
+                // sequence over the ids that went past without a record, which
+                // keeps everything already held. Re-seeding is the fallback,
+                // not the first move, because it discards -- and a discarded
+                // record here is one that was accepted and never written.
+                let behind = expected_id.checked_sub(inner.ring.next_entry_id());
+                match behind.filter(|&n| n > 0 && n <= MAX_STEPPABLE_GAP) {
+                    Some(n) => {
+                        for _ in 0..n {
+                            if !inner.ring.skip_entry() {
+                                return Ok(None);
+                            }
+                            let active = inner.ring.active_page();
+                            inner.written[active] = 0;
+                        }
+                        log::warn!(
+                            target: "normfs-wal",
+                            "page pool stepped over {n} id(s) nothing appended: something \
+                             took ids for this queue without holding its append gate"
+                        );
+                    }
+                    None => {
+                        // Every page pinned: nothing to append into either, so
+                        // wait.
+                        if !inner.ring.reinit(expected_id) {
+                            return Ok(None);
+                        }
+                        inner.forget_pages_and_oversize();
+                    }
                 }
-                inner.written.iter_mut().for_each(|w| *w = 0);
-                inner.unwritten = 0;
             }
             let (outcome, opened_page) = append_locked(&mut inner, record);
             match outcome {
                 AppendOutcome::Cached(_) => {
-                    inner.unwritten = inner.unwritten.saturating_add(entry_len as usize);
                     over_watermark = inner.unwritten >= self.flush_watermark;
                     charge_paged(&mut inner, entry_len, opened_page)
                 }
-                AppendOutcome::TooLarge => return Err(PoolError::TooLarge),
+                AppendOutcome::TooLarge => {
+                    match self.hold_oversize(&mut inner, expected_id, record, entry_len)? {
+                        Some(placed) => {
+                            over_watermark = true;
+                            placed
+                        }
+                        None => return Ok(None),
+                    }
+                }
                 AppendOutcome::Full => return Ok(None),
             }
         };
@@ -507,81 +847,77 @@ impl PagePool {
         Ok(Some(placed))
     }
 
-    /// Charges a record the pool refused, which the writer will buffer instead.
+    /// Takes a record no page can hold, keeping it in the id sequence.
     ///
-    /// Such a record has no page, so there is no page boundary for the file to
-    /// end at and it takes the decision the writer used to take: rotate before
-    /// it when it does not fit. Without this a queue whose records are all
-    /// larger than a page would never rotate at all, because rotation would be
-    /// waiting for a page boundary that never comes.
-    pub fn charge_buffered(&self, record_len: usize) -> Placement {
-        let Some(entry_len) = encoded_len_of(record_len) else {
-            // Wider than the V1 frame, so `WriterState::write` rejects it before
-            // it can rotate anything. Charging it would move the file on for a
-            // record that never reaches one, and the pool's epoch would outrun
-            // the writer's for good.
-            return Placement::default();
-        };
-        let mut inner = self.inner.lock().unwrap();
-        let Some(fill) = inner.fill.as_mut() else {
-            return Placement::default();
-        };
-        let rotate = if fill.has_written && fill.used.saturating_add(entry_len) > fill.max {
-            fill.epoch += 1;
-            fill.used = fill.header_len.saturating_add(entry_len);
-            RotateHint::Before
-        } else {
-            fill.used = fill.used.saturating_add(entry_len);
-            RotateHint::None
-        };
-        fill.has_written = true;
-        Placement {
-            in_pool: false,
-            rotate,
-            epoch: fill.epoch,
+    /// `Ok(None)` means the caller must wait: either the held records are
+    /// already at their budget, or the active page has records on it and no
+    /// page can be rotated into so the sequence cannot be stepped. Both end the
+    /// same way, when a flush reports something durable.
+    ///
+    /// The record is framed here, once. It is by definition larger than a page,
+    /// so this is the copy worth not repeating at every flush — and holding the
+    /// framed bytes is what lets a flush write them with no pass over them at
+    /// all.
+    fn hold_oversize(
+        &self,
+        inner: &mut Inner,
+        entry_id: u64,
+        record: &[u8],
+        entry_len: u64,
+    ) -> Result<Option<Placement>, PoolError> {
+        // Wider than the V1 frame: no page and no file can hold it, and there
+        // is no id to give it. `NormFS::enqueue` refuses such a record before it
+        // takes one; reaching here means that guard was bypassed, and taking it
+        // now would leave a gap in the file that the reader turns into every
+        // later entry answering to the wrong id.
+        if encoded_len_of(record.len()).is_none() {
+            return Err(PoolError::Unframeable);
         }
-    }
 
-    /// Steps the id sequence over a record the pool could not hold, without
-    /// losing anything it is still holding.
-    ///
-    /// Re-seeding drops whatever the pages contain, so it waits until there is
-    /// nothing left to drop. A record too large for a page is rare, and paying
-    /// a drain for it is the price of never losing one that was accepted.
-    ///
-    /// "Nothing left to drop" is two cases, and only testing the second of them
-    /// deadlocks: a pool that holds nothing has nothing to lose, and a pool
-    /// whose every record is already durable has nothing to lose either.
-    /// `reinit` resets the watermark to zero while moving `next_entry_id`
-    /// forward, so after one oversized record the durability test alone can
-    /// never become true again — and when every record is oversized, nothing
-    /// ever enters a page, so nothing can ever report one durable to make it
-    /// true. That is a hang, not a failure. A 1 MiB record against a 256 KiB
-    /// page is the ordinary way in.
-    pub async fn skip_to(&self, next_id: u64) {
-        loop {
-            let woken = self.space.notified();
-            tokio::pin!(woken);
-            woken.as_mut().enable();
-            {
-                let mut inner = self.inner.lock().unwrap();
-                let nothing_to_lose = inner.ring.is_empty()
-                    || inner.ring.min_essential_id() >= inner.ring.next_entry_id();
-                // A pinned page is something to lose too, and `reinit` reports
-                // that by refusing.
-                if nothing_to_lose && inner.ring.reinit(next_id) {
-                    inner.written.iter_mut().for_each(|w| *w = 0);
-                    inner.unwritten = 0;
-                    return;
-                }
-            }
-            if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {
-                log::warn!(
-                    target: "normfs-wal",
-                    "waiting to step over an oversized record: pool not yet drained"
-                );
-            }
+        // Back-pressure, and the reason an oversized record no longer drains
+        // the whole queue: it waits for room exactly as a pooled one does,
+        // rather than for every page to reach disk first.
+        if inner.oversize_bytes >= self.oversize_budget && !inner.oversize.is_empty() {
+            return Ok(None);
         }
+
+        // Empties the active page, so the skipped id falls between two pages
+        // rather than inside one. False means no page could be rotated into.
+        if !inner.ring.skip_entry() {
+            return Ok(None);
+        }
+        let active = inner.ring.active_page();
+        inner.written[active] = 0;
+
+        let mut framed = BytesMut::with_capacity(entry_len as usize);
+        // Infallible here: the length was checked against the V1 frame above,
+        // and the buffer grows as needed.
+        if WalEntryV1::new(record).write_to_bytes(&mut framed).is_err() {
+            return Err(PoolError::Unframeable);
+        }
+        let framed = framed.freeze();
+        // The frame is [record_size varint32][record][crc32c u32 LE], so the
+        // payload starts where the varint ends and stops four bytes short.
+        let record_span = (framed.len() - crate::wal_entry_v1::WAL_ENTRY_V1_CRC_SIZE - record.len())
+            ..(framed.len() - crate::wal_entry_v1::WAL_ENTRY_V1_CRC_SIZE);
+
+        // A record that never entered a page opens no page, but it does end a
+        // file: it is the first thing in whatever comes after it, so the
+        // boundary has somewhere to land. That is what `true` says here, and it
+        // is why a queue whose every record is oversized still rotates files.
+        let placed = charge_paged(inner, entry_len, true);
+
+        inner.oversize_bytes = inner.oversize_bytes.saturating_add(framed.len());
+        inner.oversize.insert(
+            entry_id,
+            Oversize {
+                framed,
+                record: record_span,
+                epoch: placed.epoch,
+                written: false,
+            },
+        );
+        Ok(Some(placed))
     }
 
     /// Reports which page is holding the pool up, so an indefinite wait can be
@@ -614,14 +950,45 @@ impl PagePool {
                 STALL_WARN_AFTER.as_secs(),
             ),
         }
+
+        // With one arena for the whole process, "the pool is full" is only half
+        // the story: this queue could not grow because the slot above it is
+        // taken, and what a reader wants to know is by whom. Naming the holders
+        // turns a stall into something to act on rather than guess at.
+        if let Some(arena) = self.arena.as_ref() {
+            let holders = arena.holders();
+            let free = arena.free_pages();
+            log::warn!(
+                target: "normfs-wal",
+                "arena: {free} of {} pages free, held by {}",
+                arena.page_count(),
+                if holders.is_empty() {
+                    "nobody".to_string()
+                } else {
+                    holders
+                        .iter()
+                        .map(|(name, pages)| format!("{name} ({pages})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            );
+        }
     }
 
     /// Byte runs that have been appended but not yet handed to the file writer,
-    /// oldest first — and never past the end of the file that is open.
+    /// **in id order** — and never past the end of the file that is open, nor
+    /// past the last entry the writer has actually taken responsibility for.
+    ///
+    /// This is the only road to the file. Pages and oversized records come out
+    /// of the same call, interleaved by id, because two roads to one file
+    /// cannot be ordered against each other and V1 turns a swapped pair into
+    /// every later entry answering to the wrong id.
     ///
     /// The bytes are copied out under the lock rather than borrowed: the writer
     /// awaits I/O, and holding the pool locked across that would block every
-    /// appender for the duration of a disk write.
+    /// appender for the duration of a disk write. An oversized record is the
+    /// exception — it is already a `Bytes`, framed once when it arrived, so it
+    /// is cloned rather than copied however large it is.
     ///
     /// This does not mark the runs as taken — call
     /// [`PagePool::commit_written`] once a run is actually on disk, or an
@@ -642,17 +1009,39 @@ impl PagePool {
     /// a page ends, so this is a filter rather than a cut: nothing has to be
     /// split, and there is no straddling case left to detect.
     ///
-    /// A page of a closed file is skipped and logged, not absorbed: taking it
-    /// would renumber every record after it, and a gap is at least visible.
-    pub fn take_pending(&self, epoch: u64, accepted_through: Option<u64>) -> Vec<(PendingWrite, Vec<u8>)> {
+    /// Older epochs are taken too, and that is deliberate. A page of an earlier
+    /// file is normally written out long before its writer closes, so it is
+    /// already past its cursor and skipped here. One arrives only when that
+    /// file's last flush failed outright, and then the choice is between this
+    /// file and no file at all: nothing else will ever ask for that epoch
+    /// again, and the ring will reuse the page as soon as a later fsync moves
+    /// the watermark past it. Handing it to the open file keeps the bytes.
+    ///
+    /// ## Why the handover bound
+    ///
+    /// A record's bytes are in its page from the moment `place` returns, which
+    /// is before the writer has been told the entry exists — the two are joined
+    /// by an unbounded channel and `NormFS::enqueue` releases the append gate
+    /// between them, so entries reach the writer out of order and wait in its
+    /// `OrderedBuffer`. Without a bound, a flush landing in that window writes
+    /// the later record first.
+    ///
+    /// `note_handed_over` is the writer saying "this id is mine now", in the id
+    /// order its buffer restores. Nothing above that id is taken, and a page is
+    /// cut at the offset of the first entry beyond it — which the page's own
+    /// offset table gives exactly, so the cut is between two entries and never
+    /// inside one.
+    pub fn take_pending(&self, epoch: u64) -> Vec<(PendingWrite, Bytes)> {
         let inner = self.inner.lock().unwrap();
         let count = inner.ring.page_count();
-        let mut out: Vec<(PendingWrite, Vec<u8>)> = Vec::new();
+        let bound = inner.handed_through;
+        let mut out: Vec<(PendingWrite, Bytes)> = Vec::new();
 
         for k in 0..count {
             let used = inner.ring.page_bytes(k).len();
             let from = inner.written[k];
-            if from >= used || inner.ring.page_len(k) == 0 {
+            let entries = inner.ring.page_len(k);
+            if from >= used || entries == 0 {
                 continue;
             }
             let (Some(first_entry_id), Some(last_entry_id)) = (
@@ -661,58 +1050,109 @@ impl PagePool {
             ) else {
                 continue;
             };
-            if inner.page_epoch[k] != epoch {
-                if inner.page_epoch[k] < epoch {
-                    log::error!(
-                        target: "normfs-wal",
-                        "page {k} still holds unwritten entries ..={last_entry_id} for file {}, \
-                         which is already closed: its last flush did not complete and these \
-                         records reach no file",
-                        inner.page_epoch[k],
-                    );
-                }
+            if inner.page_epoch[k] > epoch {
                 continue;
             }
 
-            // Nothing past what the writer has accepted: a record it has not
-            // reached may be one it will buffer, and pages written first renumber it.
-            let (to, last_entry_id) = match accepted_through {
-                None => continue,
-                Some(ceiling) if ceiling < first_entry_id => continue,
-                Some(ceiling) if ceiling < last_entry_id => {
-                    let index = (ceiling - first_entry_id) as u32;
-                    (offset_after(&inner.ring, k, index), ceiling)
-                }
-                Some(_) => (used, last_entry_id),
-            };
-            if to <= from {
+            // Cut at the handover bound. `to` is where the first entry the
+            // writer has not claimed begins; the whole page when it has claimed
+            // them all.
+            let Some(bound) = bound else { continue };
+            if first_entry_id > bound {
                 continue;
             }
-            let bytes = inner.ring.page_bytes(k)[from..to].to_vec();
+            let (to, last_entry_id) = if last_entry_id <= bound {
+                (used, last_entry_id)
+            } else {
+                let next = (bound - first_entry_id + 1) as u32;
+                (inner.ring.page_entry_offset(k, next), bound)
+            };
+            if from >= to {
+                continue;
+            }
+
+            if inner.page_epoch[k] < epoch {
+                log::error!(
+                    target: "normfs-wal",
+                    "page {k} still holds unwritten entries ..={last_entry_id} for file {}, \
+                     which is already closed: its last flush did not complete, so they are \
+                     being written into file {epoch} instead of being lost",
+                    inner.page_epoch[k],
+                );
+            }
             out.push((
                 PendingWrite {
-                    page_index: k,
-                    from,
-                    to,
+                    source: PendingSource::Page { index: k, from, to },
+                    first_entry_id,
                     last_entry_id,
                 },
-                bytes,
+                Bytes::copy_from_slice(&inner.ring.page_bytes(k)[from..to]),
             ));
         }
 
-        out.sort_by_key(|(w, _)| w.last_entry_id);
+        for (&entry_id, held) in inner.oversize.iter() {
+            if held.written || held.epoch > epoch {
+                continue;
+            }
+            if bound.is_none_or(|b| entry_id > b) {
+                continue;
+            }
+            if held.epoch < epoch {
+                log::error!(
+                    target: "normfs-wal",
+                    "record {entry_id} is still unwritten for file {}, which is already \
+                     closed: its last flush did not complete, so it is being written into \
+                     file {epoch} instead of being lost",
+                    held.epoch,
+                );
+            }
+            out.push((
+                PendingWrite {
+                    source: PendingSource::Oversize { entry_id },
+                    first_entry_id: entry_id,
+                    last_entry_id: entry_id,
+                },
+                held.framed.clone(),
+            ));
+        }
+
+        // One order over both kinds. A skipped id falls strictly between two
+        // pages -- `skip_entry` empties the active page first -- so no page's id
+        // span contains an oversized record's id, and comparing first ids is a
+        // total order rather than an approximation of one.
+        out.sort_by_key(|(w, _)| w.first_entry_id);
         out
     }
 
     /// Marks a run from [`PagePool::take_pending`] as written. Only moves the
     /// cursor forward.
-    pub fn commit_written(&self, page_index: usize, up_to: usize) {
+    pub fn commit_written(&self, write: &PendingWrite) {
         let mut inner = self.inner.lock().unwrap();
-        if up_to > inner.written[page_index] {
-            let taken = up_to - inner.written[page_index];
-            inner.written[page_index] = up_to;
-            inner.unwritten = inner.unwritten.saturating_sub(taken);
+        match write.source {
+            PendingSource::Page { index, to, .. } => {
+                if to > inner.written[index] {
+                    let taken = to - inner.written[index];
+                    inner.written[index] = to;
+                    inner.unwritten = inner.unwritten.saturating_sub(taken);
+                }
+            }
+            PendingSource::Oversize { entry_id } => {
+                if let Some(held) = inner.oversize.get_mut(&entry_id) {
+                    held.written = true;
+                }
+            }
         }
+    }
+
+    /// The writer has taken responsibility for every entry up to `entry_id`, in
+    /// id order. Nothing above it may be written yet — see the handover bound
+    /// on [`PagePool::take_pending`].
+    pub fn note_handed_over(&self, entry_id: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.handed_through = Some(match inner.handed_through {
+            Some(prev) => prev.max(entry_id),
+            None => entry_id,
+        });
     }
 
     /// Records that every entry below `first_non_durable_id` is on disk, and
@@ -729,8 +1169,68 @@ impl PagePool {
                 return;
             }
             inner.ring.set_essential(first_non_durable_id);
+
+            // An oversized record is durable on the same terms as a page: the
+            // flush that covered it has returned from fsync. Its bytes are the
+            // pool's largest single holding, so they go back as soon as that is
+            // true -- and the floor rises with them, because memory that can
+            // answer for the ids either side of a released record but not for
+            // the record itself would hand a reader a run with a hole in it.
+            let released: Vec<u64> = inner
+                .oversize
+                .range(..first_non_durable_id)
+                .map(|(&id, _)| id)
+                .collect();
+            for id in released {
+                if let Some(held) = inner.oversize.remove(&id) {
+                    inner.oversize_bytes = inner.oversize_bytes.saturating_sub(held.framed.len());
+                    inner.cache_floor = inner.cache_floor.max(id.saturating_add(1));
+                }
+            }
+
+            // Advancing the watermark is the only event that can make a page
+            // reusable, so it is also the only moment a queue can discover it
+            // is holding more of the arena than it needs. Give the top pages
+            // back while they are safe to give, down to the floor.
+            //
+            // `shrink` refuses the active page, refuses to go below the floor,
+            // and checks `normfs_wal_page_reusable` -- which is the predicate
+            // `normfs_wal_ring_shrink` requires, not a restatement of it. So a
+            // page carrying records that are not yet on disk, or that a reader
+            // is holding, cannot leave this queue.
+            let mut released = 0usize;
+            while inner.ring.shrink(self.floor) {
+                released += 1;
+            }
+            if released > 0 {
+                let pages = inner.ring.page_count();
+                inner.written.resize(pages, 0);
+                inner.page_epoch.resize(pages, 0);
+                log::debug!(
+                    target: "normfs-wal",
+                    "page pool returned {released} page(s) to the arena, now {pages} pages",
+                );
+            }
         }
         self.space.notify_waiters();
+    }
+
+    /// Whether the writer still owes the file work.
+    ///
+    /// The timer asks this before taking the pool lock and walking every page:
+    /// a queue written to once a week is idle for the whole of that week, and
+    /// the tick is what puts its one record on disk, so the tick has to be
+    /// cheap rather than rare.
+    ///
+    /// "Not yet durable" rather than "not yet written", which is two scalars
+    /// and covers a case the narrower question does not: bytes that reached the
+    /// file but whose fsync failed are written, so a not-yet-written test would
+    /// report nothing to do and no later tick would ever retry the sync. The
+    /// watermark is what actually says the work is finished, because it is what
+    /// only moves once a sync has returned.
+    pub fn has_pending(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.ring.min_essential_id() < inner.ring.next_entry_id()
     }
 
     /// The id the next appended record will get.
@@ -755,17 +1255,25 @@ impl PagePool {
 
     /// Whether the pool holds no records.
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().unwrap().ring.is_empty()
+        let inner = self.inner.lock().unwrap();
+        inner.ring.is_empty() && inner.oversize.is_empty()
     }
 
     /// The lowest id still held in memory, or `None` when nothing is.
     pub fn min_cached_id(&self) -> Option<u64> {
-        self.inner.lock().unwrap().ring.min_cached_id()
+        self.inner.lock().unwrap().min_cached()
     }
 
     /// Every held record with id in `[start, end]`, in id order.
     pub fn collect_range(&self, start: u64, end: u64) -> Vec<(u64, Vec<u8>)> {
-        self.inner.lock().unwrap().ring.collect_range(start, end)
+        let inner = self.inner.lock().unwrap();
+        let start = start.max(inner.cache_floor);
+        let mut out = inner.ring.collect_range(start, end);
+        for (&id, held) in inner.oversize.range(start..=end) {
+            out.push((id, held.record().to_vec()));
+        }
+        out.sort_by_key(|(id, _)| *id);
+        out
     }
 
     /// Every held record with id in `[start, end]`, in id order, **borrowed
@@ -779,13 +1287,23 @@ impl PagePool {
         let mut copied: Vec<(u64, Bytes)> = Vec::new();
         {
             let inner = self.inner.lock().unwrap();
+            let start = start.max(inner.cache_floor);
             let count = inner.ring.page_count();
-            let pinned_now = (0..count).filter(|&k| inner.ring.page_pin_count(k) > 0).count();
+
+            // An oversized record needs no pin: its bytes are a `Bytes` of the
+            // pool's own, not a slice of a page an append could reuse, so a
+            // slice of it keeps itself alive.
+            for (&id, held) in inner.oversize.range(start..=end) {
+                copied.push((id, held.record()));
+            }
+            let pinned_now = (0..count)
+                .filter(|&k| inner.ring.page_pin_count(k) > 0)
+                .count();
             // Past this budget records are copied, not borrowed: a pin lasts as
             // long as the payload, and a pinned page is one no append can use.
-            let mut budget = count
-                .saturating_sub(PIN_RESERVE)
-                .saturating_sub(pinned_now);
+            let share = (count / PIN_SHARE_DIVISOR).min(count.saturating_sub(PIN_RESERVE));
+            let mut budget = share.saturating_sub(pinned_now);
+            let active = inner.ring.active_page();
             let mut taking: Vec<bool> = vec![false; count];
 
             for k in 0..count {
@@ -799,7 +1317,10 @@ impl PagePool {
                     continue;
                 }
                 if !taking[k] && inner.ring.page_pin_count(k) == 0 {
-                    if budget == 0 {
+                    // Never the page being appended into. Pinning it stops the
+                    // rotation that would free it, and it is the one page the
+                    // writer cannot do without.
+                    if budget == 0 || k == active {
                         for i in 0..n {
                             let id = first + u64::from(i);
                             if id < start || id > end {
@@ -819,7 +1340,12 @@ impl PagePool {
                     if id < start || id > end {
                         continue;
                     }
-                    if let Some(rec) = inner.ring.record(k, i) {
+                    let Some(rec) = inner.ring.record(k, i) else {
+                        continue;
+                    };
+                    if found.len() >= PIN_PAYLOADS_PER_READ {
+                        copied.push((id, Bytes::copy_from_slice(rec)));
+                    } else {
                         found.push((id, k, rec.as_ptr(), rec.len()));
                     }
                 }

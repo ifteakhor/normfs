@@ -68,9 +68,25 @@ struct normfs_wal_page_find_result {
 
       // Every stored offset points inside the entries region: entry i begins
       // before the forward cursor used_bytes.
+      //
+      // And they increase with i, which is the ordering half: entry i begins
+      // strictly before entry i + 1, so the bytes on a page are laid out in the
+      // order the ids were given. Stated between neighbours rather than over
+      // every pair -- a \forall over pairs is the shape the automatic provers
+      // will not transport across a mutation, and append only ever adds at the
+      // end, so neighbours are what it has to re-establish.
+      //
+      // This is what lets a file take a page whole. A flush writes
+      // buf[from .. to) in one call and the reader derives each entry's id from
+      // its position in the file, so bytes out of id order on a page would be
+      // entries out of id order in the file -- which V1 does not report as a
+      // missing record but as every later record answering to the wrong id.
       predicate normfs_wal_page_offsets_wf{L}(struct normfs_wal_page *p) =
         (\forall integer i; 0 <= i < p->count ==>
-           0 <= normfs_wal_page_offset_logic(p, i) < p->used_bytes);
+           0 <= normfs_wal_page_offset_logic(p, i) < p->used_bytes) &&
+        (\forall integer i; 0 <= i < (integer)p->count - 1 ==>
+           normfs_wal_page_offset_logic(p, i) <
+             normfs_wal_page_offset_logic(p, i + 1));
 
       predicate normfs_wal_page_ids_wf{L}(struct normfs_wal_page *p) =
         (integer)p->first_entry_id + (integer)p->count <= 0xFFFFFFFFFFFFFFFF &&
@@ -140,7 +156,14 @@ void normfs_wal_page_reset(struct normfs_wal_page *page, uint64_t page_id,
               \old(page->used_bytes) + normfs_wal_entry_v1_size_logic(record_size) &&
             page->last_entry_id == page->first_entry_id + (integer)page->count - 1 &&
             // the new offset slot records where this entry begins
-            normfs_wal_page_offset_logic(page, \old(page->count)) == \old(page->used_bytes);
+            normfs_wal_page_offset_logic(page, \old(page->count)) == \old(page->used_bytes) &&
+            // The ordering theorem at its one point of use: an append lands
+            // after everything already on the page, never between two entries.
+            // Every byte a page holds is therefore in id order, and a flush can
+            // hand a run of them to the file without looking inside.
+            (\forall integer i; 0 <= i < \old(page->count) ==>
+               normfs_wal_page_offset_logic(page, i) <
+                 normfs_wal_page_offset_logic(page, \old(page->count)));
     ensures \result.status == NORMFS_WAL_PAGE_ERR_NO_SPACE ==>
             page->count == \old(page->count) &&
             page->used_bytes == \old(page->used_bytes);

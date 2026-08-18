@@ -98,12 +98,6 @@ if(FRAMAC)
         normfs_wal_page_unpin
         normfs_wal_page_reusable)
 
-    set(NORMFS_WAL_POOL_WP_FCTS
-        normfs_wal_pool_init
-        normfs_wal_pool_find_free
-        normfs_wal_pool_take
-        normfs_wal_pool_give_back)
-
     # try_append is excluded: its assigns includes
     # ring->pages[ring->active].buf[0 .. page_size - 1], so re-establishing
     # every other page's offsets_wf needs the pairwise buffer separation, and
@@ -119,12 +113,49 @@ if(FRAMAC)
     # unscheduled function generates no obligation anywhere, which is why
     # having it here is the difference between that theorem being a
     # specification and being a verdict.
+    #
+    # shrink is here for the same reason. A page moving between queues is the
+    # other way a record can leave the queue that accepted it, and shrink is
+    # where the durability theorem stands at that boundary, so leaving it
+    # unscheduled would make that clause a comment.
+    #
+    # skip_entry likewise. It is the one place the id sequence moves without a
+    # record behind it, and its ensures is what says no page's bytes move with
+    # it -- unscheduled, that would be a comment rather than a check.
+    #
+    # grow is excluded, and unlike its neighbour it carries no durability
+    # clause: a free page belongs to nobody and holds nothing anyone is owed,
+    # so what it re-establishes is well-formedness and nothing more. Three of
+    # its clauses -- ring_layout, ring_pages_wf and ring_in_pool -- sit either
+    # side of a context cliff. Asserting the case split that pages_wf and
+    # in_pool need makes both go through in milliseconds and puts layout out of
+    # reach; leaving them out proves layout and loses the other two. A goal
+    # that depends on how much else is in scope is the same kind of
+    # not-a-proof as one that depends on machine load, and pinning it to
+    # whichever half happens to be green today would be worse than saying so.
+    #
+    # It stays covered by the WalRing Rust tests -- a ring grows into the free
+    # slot above it, will not grow into another ring's slot, and cannot grow at
+    # the top of the arena. Its callee pool_take is proven, and shrink, which
+    # is the direction that can lose a record, is proven here.
     set(NORMFS_WAL_RING_WP_FCTS
         normfs_wal_ring_init
         normfs_wal_ring_set_essential
         normfs_wal_ring_find_reusable
         normfs_wal_ring_rotate_to
+        normfs_wal_ring_shrink
+        normfs_wal_ring_skip_entry
         normfs_wal_ring_seek)
+
+    # The pool proves against its own contracts, in its own target.
+    # verify-wal-ring does not compile this unit: the ring's calls are checked
+    # against wal_pool.h's contracts, which is what WP would use even with the
+    # body present, so adding it there only makes that target slower.
+    set(NORMFS_WAL_POOL_WP_FCTS
+        normfs_wal_pool_init
+        normfs_wal_pool_find_free
+        normfs_wal_pool_take
+        normfs_wal_pool_give_back)
 
     # An empty fcts list drops -wp-fct entirely: WP then also schedules global
     # lemma goals, which a function list silently excludes.

@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use std::sync::Arc;
 
-use crate::page_pool::{PagePool, Placement, RotateHint};
 use crate::ack_file_writer::{AckFileWriter, AckFileWriterSettings};
+use crate::page_pool::{PagePool, Placement, RotateHint};
 use crate::wal_entry_v1::{self, WalEntryV1, WalEntryV1Error};
 use crate::wal_header::WalHeader;
 use crate::wal_header_v1::WalHeaderV1;
@@ -178,7 +177,12 @@ impl WalWriter {
         Ok(Self { write_chan: tx })
     }
 
-    pub fn enqueue(&self, entry_id: UintN, data: Bytes, placement: Placement) -> Result<(), WalError> {
+    pub fn enqueue(
+        &self,
+        entry_id: UintN,
+        data: Bytes,
+        placement: Placement,
+    ) -> Result<(), WalError> {
         log::trace!("WAL writer: enqueuing entry {} for write", entry_id);
 
         self.write_chan
@@ -387,7 +391,10 @@ impl WriterState {
         }
     }
 
-    async fn write_batch(&mut self, entries: Vec<(UintN, Bytes, Placement)>) -> Result<(), WalError> {
+    async fn write_batch(
+        &mut self,
+        entries: Vec<(UintN, Bytes, Placement)>,
+    ) -> Result<(), WalError> {
         log::debug!(
             "WAL writer: writing batch of {} entries to queue '{}'",
             entries.len(),
@@ -492,7 +499,7 @@ async fn new_file_writer(
         AckFileWriterSettings {
             max_buffer_size: settings.write_buffer_size,
             max_file_size: settings.max_file_size as u64,
-            write_interval: Duration::from_millis(50),
+            write_interval: settings.write_interval,
             fsync: settings.enable_fsync,
         },
         written_sender,

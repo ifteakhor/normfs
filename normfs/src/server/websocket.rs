@@ -20,14 +20,24 @@ use fastwebsockets::{FragmentCollector, Frame, OpCode};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 
+/// How many responses may be queued for one WebSocket client.
+///
+/// Bounded, and bounded at the same depth as the TCP path. A response holds its
+/// payload, and a payload read from memory holds a pin on the page it was read
+/// from until it is encoded onto the wire. Unbounded, a client that stops
+/// reading accumulates pinned pages until the queue it is reading has no memory
+/// left to append into — the read side deciding how much of the write side's
+/// memory it may hold, which is what back-pressure exists to prevent.
+const RESPONSE_CHANNEL_BUFFER: usize = 10;
+
 /// WebSocket implementation of ResponseSender for normfs
 pub struct WebSocketResponseSender {
     client_id: String,
-    response_tx: mpsc::UnboundedSender<ServerResponse>,
+    response_tx: mpsc::Sender<ServerResponse>,
 }
 
 impl WebSocketResponseSender {
-    pub fn new(client_id: String, response_tx: mpsc::UnboundedSender<ServerResponse>) -> Self {
+    pub fn new(client_id: String, response_tx: mpsc::Sender<ServerResponse>) -> Self {
         WebSocketResponseSender {
             client_id,
             response_tx,
@@ -40,7 +50,7 @@ impl ResponseSender for WebSocketResponseSender {
         &self,
         response: ServerResponse,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
-        Box::pin(async move { self.response_tx.send(response).is_ok() })
+        Box::pin(async move { self.response_tx.send(response).await.is_ok() })
     }
 
     fn client_id(&self) -> String {
@@ -61,7 +71,8 @@ pub async fn handle_websocket(
     let mut ws = FragmentCollector::new(ws);
 
     // Create channel for normfs responses
-    let (normfs_response_tx, mut normfs_response_rx) = mpsc::unbounded_channel::<ServerResponse>();
+    let (normfs_response_tx, mut normfs_response_rx) =
+        mpsc::channel::<ServerResponse>(RESPONSE_CHANNEL_BUFFER);
 
     // Create command processor
     let command_processor = CommandProcessor::new(normfs.clone());

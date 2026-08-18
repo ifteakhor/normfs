@@ -11,29 +11,31 @@ mod ack_file_writer;
 mod errors;
 mod page_pool;
 mod reader;
+mod wal_arena;
 mod wal_entry;
 mod wal_entry_v1;
 mod wal_header;
-mod wal_ring_v1;
 mod wal_header_v1;
+mod wal_ring_v1;
 mod writer;
 mod writer_buffer;
 
 pub use errors::*;
-pub use reader::{ReadRangeResult, WalContent, get_wal_header};
+pub use page_pool::{PagePool, PendingWrite, Placement, PoolError, RotateHint};
+pub use reader::{ReadRangeResult, WalContent, get_wal_header, read_wal_file_range, read_wal_header};
+pub use wal_arena::{POOL_FREE, SlotRange, WalArena};
 pub use wal_entry::{WAL_ENTRY_HEADER_FIXED_OVERHEAD, WalEntryHeader};
 pub use wal_entry_v1::{
     WAL_ENTRY_V1_CRC_SIZE, WAL_ENTRY_V1_MAX_OVERHEAD, WAL_ENTRY_V1_MIN_SIZE, WalEntryV1,
     WalEntryV1Error, crc32c, derive_entry_id, encoded_len,
 };
 pub use wal_header::{WalHeader, WalHeaderError};
-pub use page_pool::{PagePool, PendingWrite, Placement, PoolError, RotateHint};
-pub use wal_ring_v1::{AppendOutcome, WalRing};
 pub use wal_header_v1::{
     AnyWalHeader, AnyWalHeaderError, WAL_HEADER_V0_VERSION, WAL_HEADER_V1_MAX_SIZE,
     WAL_HEADER_V1_MIN_SIZE, WAL_HEADER_V1_VERSION, WAL_HEADER_VERSION_SIZE, WalHeaderV1,
     WalHeaderV1Error, peek_version as peek_wal_header_version,
 };
+pub use wal_ring_v1::{AppendOutcome, WalRing};
 
 #[cfg(test)]
 mod wal_header_test;
@@ -49,6 +51,9 @@ mod page_pool_test;
 
 #[cfg(test)]
 mod wal_ring_v1_test;
+
+#[cfg(test)]
+mod wal_arena_test;
 
 #[cfg(test)]
 mod wal_entry_test;
@@ -71,6 +76,16 @@ mod writer_test;
 pub struct WalSettings {
     pub max_file_size: usize,
     pub write_buffer_size: usize,
+    /// How long a record may sit in memory before a flush is started for it,
+    /// whatever else is going on.
+    ///
+    /// This is the only trigger a quiet queue has. The others -- the pool's
+    /// unwritten-bytes watermark and the buffer filling -- are reached by
+    /// volume, so a queue written to once a week never reaches either, and its
+    /// one record would wait for the next one to arrive. It is therefore an
+    /// upper bound on how long an accepted record can be only in memory, and
+    /// that is what it should be tuned against.
+    pub write_interval: std::time::Duration,
     pub enable_fsync: bool,
     pub encryption_type: normfs_types::EncryptionType,
     pub compression_type: normfs_types::CompressionType,
@@ -81,6 +96,7 @@ impl Default for WalSettings {
         Self {
             max_file_size: 128 * 1024 * 1024,     // 128MB
             write_buffer_size: 128 * 1024 * 1024, // 128MB
+            write_interval: std::time::Duration::from_millis(50),
             enable_fsync: true,
             encryption_type: normfs_types::EncryptionType::Aes,
             compression_type: normfs_types::CompressionType::Zstd,
