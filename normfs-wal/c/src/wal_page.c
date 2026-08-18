@@ -85,6 +85,13 @@ normfs_wal_page_append(struct normfs_wal_page *page, const uint8_t *record,
 	/*@ assert \forall integer i; 0 <= i < page->count ==>
 	             normfs_wal_page_offset_logic(page, i) < page->used_bytes; */
 
+	/* The offsets kept their order because they kept their bytes; the new one
+	 * is at used_bytes, which the assert above puts strictly above all of them.
+	 * Those two are the whole of offsets_wf's ordering half at the new count. */
+	/*@ assert \forall integer i; 0 <= i < (integer)page->count - 1 ==>
+	             normfs_wal_page_offset_logic(page, i) <
+	               normfs_wal_page_offset_logic(page, i + 1); */
+
 	r.entry_offset = page->used_bytes;
 	page->used_bytes = page->used_bytes + enc.written;
 	page->count = page->count + 1u;

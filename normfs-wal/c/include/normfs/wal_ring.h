@@ -198,6 +198,41 @@ struct normfs_wal_ring_seek_result {
  * out from under itself; without the second, an accepted record is gone before
  * it was ever written.
  */
+/*
+ * Order
+ * =====
+ *
+ * The other property this ring exists to give: **records reach the file in the
+ * order they were accepted.**
+ *
+ * V1 stores no entry id. A reader derives one from position -- the file
+ * header's num_entries_before plus the entry's index within the file -- so the
+ * byte order in a file *is* the id order, and two records swapped there are not
+ * one record out of place but every entry after them answering to the wrong id,
+ * permanently and without an error anywhere.
+ *
+ * The ring is not what writes the file, so it cannot own that property alone.
+ * What it gives is the two halves that make it derivable:
+ *
+ *   within a page   normfs_wal_page_offsets_wf: entry i begins strictly before
+ *                   entry i + 1, so a flush can hand a run of a page's bytes to
+ *                   the file without looking inside it.
+ *
+ *   across pages    rotate_to ensures pages[index].first_entry_id ==
+ *                   \old(next_entry_id), and skip_entry ensures the same of the
+ *                   active page. next_entry_id only ever moves forward, so a
+ *                   page opened later starts above every id already placed, and
+ *                   the ids on any one page are a dense run.
+ *
+ * Together those say the pages carry a total order on ids that comparing their
+ * first ids recovers -- which is what lets the Rust side merge the pages, and
+ * the records too large to be on one, into a single ordered stream.
+ *
+ * The other half of the theorem is the caller's, as with durability: the file
+ * writer must hand those runs to the file in the order it is given them, and
+ * must not write a record before the entry has reached it. In this tree that is
+ * PagePool::take_pending and its handover bound.
+ */
 /*@ axiomatic NormfsWalRingDurability {
       // Everything this page holds has been reported durable. An empty page
       // trivially qualifies -- it holds nothing to lose.
