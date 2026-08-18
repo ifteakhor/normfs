@@ -802,5 +802,42 @@ impl WalRing {
 // this ring's, and the C pool proves that ownership is exclusive: there is one
 // owner slot per page, so two rings holding one page is not a representable
 // state. The `Arc` keeps the arena alive for at least as long as the ring.
+impl Drop for WalRing {
+    fn drop(&mut self) {
+        // A shared ring's slots go back to the arena, or queue churn bleeds it
+        // dry. Only pages the durability predicate allows: one still pinned or
+        // holding records not yet on disk is leaked instead, and loudly -- a
+        // leak is recoverable by restart, an overwritten record is not.
+        let Backing::Shared(arena) = &self.backing else {
+            return;
+        };
+        let arena = Arc::clone(arena);
+        let slots = arena.lock_slots();
+        let essential = self.ring.min_essential_id;
+        let mut leaked = 0usize;
+        for k in 0..self.ring.page_count {
+            let slot = self.ring.first_slot + k;
+            if arena.owner_at(slot) != self.ring_id {
+                continue;
+            }
+            if unsafe { normfs_wal_page_reusable(self.page(k), essential) } != 0 {
+                arena.give_back_slot(slot, self.ring_id, essential);
+            } else {
+                leaked += 1;
+            }
+        }
+        if leaked > 0 {
+            log::error!(
+                target: "normfs-wal",
+                "dropping a ring that still holds {leaked} page(s) pinned or unwritten: \
+                 they stay out of the arena for the life of the process"
+            );
+        }
+        // forget_label takes the slot lock itself.
+        drop(slots);
+        arena.forget_label(self.ring_id);
+    }
+}
+
 unsafe impl Send for WalRing {}
 unsafe impl Sync for WalRing {}

@@ -283,3 +283,37 @@ fn holders_names_who_is_using_the_arena() {
     assert_eq!(holders[0], ("/inst/idle-queue".to_string(), 3));
     assert_eq!(holders[1], ("/inst/busy-queue".to_string(), 2));
 }
+
+#[test]
+fn a_dropped_ring_gives_its_reusable_slots_back() {
+    let arena = Arc::new(WalArena::new(4, PAGE));
+    {
+        let range = arena.reserve(3, RING_A, 0).unwrap();
+        let mut ring = WalRing::in_arena(&arena, range, RING_A, 0);
+        assert!(matches!(ring.append(b"abcd"), AppendOutcome::Cached(_)));
+        ring.set_essential(ring.next_entry_id());
+        assert_eq!(arena.free_pages(), 1);
+    }
+    assert_eq!(
+        arena.free_pages(),
+        4,
+        "queue churn must not bleed the arena dry"
+    );
+}
+
+#[test]
+fn a_dropped_ring_leaks_rather_than_releases_unwritten_pages() {
+    let arena = Arc::new(WalArena::new(4, PAGE));
+    {
+        let range = arena.reserve(3, RING_A, 0).unwrap();
+        let mut ring = WalRing::in_arena(&arena, range, RING_A, 0);
+        // A record accepted and never reported durable: its page must not
+        // reach another ring, whatever happens to this one.
+        assert!(matches!(ring.append(b"abcd"), AppendOutcome::Cached(_)));
+    }
+    assert_eq!(
+        arena.free_pages(),
+        3,
+        "two empty pages return; the unwritten one is deliberately leaked"
+    );
+}

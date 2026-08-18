@@ -192,6 +192,13 @@ impl WalArena {
         self.owner_at(slot)
     }
 
+    /// Gives one slot back. The caller holds the slot lock, owns the slot, and
+    /// has checked `normfs_wal_page_reusable` -- this is the ring-drop path,
+    /// where the range is released page by page rather than whole.
+    pub(crate) fn give_back_slot(&self, slot: usize, ring_id: u64, min_essential_id: u64) {
+        unsafe { normfs_wal_pool_give_back(self.pool_ptr(), slot, ring_id, min_essential_id) };
+    }
+
     /// As [`WalArena::owner_of`], for callers already under the slot lock.
     pub(crate) fn owner_at(&self, slot: usize) -> u64 {
         assert!(slot < self.page_count, "slot {slot} is outside the arena");

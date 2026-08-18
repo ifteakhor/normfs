@@ -513,9 +513,13 @@ impl PagePool {
     /// that borrows a slot range from the process-wide arena and can trade
     /// pages with other queues.
     pub fn new(page_count: usize, page_size: usize, first_entry_id: u64) -> Self {
+        // Nothing below the first id was ever accepted, so the watermark
+        // starts there: a recovered idle queue is durable, not busy.
+        let mut ring = WalRing::new(page_count, page_size, first_entry_id);
+        ring.set_essential(first_entry_id);
         PagePool {
             inner: Mutex::new(Inner {
-                ring: WalRing::new(page_count, page_size, first_entry_id),
+                ring,
                 written: vec![0; page_count],
                 fill: None,
                 page_epoch: vec![0; page_count],
@@ -549,7 +553,7 @@ impl PagePool {
     ///
     /// Unlike [`PagePool::new`] this allocates nothing: the bytes already
     /// exist, and what the pool holds is a claim on part of them. The claim can
-    /// move — see [`PagePool::append_at`], which grows into a free slot rather
+    /// move — see [`PagePool::place`], which grows into a free slot rather
     /// than waiting for one of its own pages to reach disk, and
     /// [`PagePool::mark_durable`], which hands the top page back once it is
     /// safe to.
@@ -627,10 +631,15 @@ impl PagePool {
     /// Does nothing unless every page is reusable: `give_back` requires it, so
     /// a range still holding records that are not on disk stays put.
     pub fn release_to_arena(&self) {
-        let (Some(arena), Some(range)) = (self.arena.as_ref(), self.slot_range()) else {
+        let Some(arena) = self.arena.as_ref() else {
             return;
         };
+        // One lock: the range is read and released under the same guard, so it
+        // cannot shrink between the two.
         let inner = self.inner.lock().unwrap();
+        let Some(range) = inner.ring.slot_range() else {
+            return;
+        };
         let essential = inner.ring.min_essential_id();
         let all_reusable =
             (0..inner.ring.page_count()).all(|k| inner.ring.page_is_reusable(k, essential));
