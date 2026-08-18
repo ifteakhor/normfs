@@ -107,8 +107,13 @@ impl std::error::Error for Error {
 /// record answering to the wrong id.
 ///
 /// Refusing it here costs the caller an error and costs the sequence nothing.
-fn check_framable(record: &Bytes) -> Result<(), Error> {
-    if u32::try_from(record.len()).is_err() {
+///
+/// The memory bound is a cap too: a record larger than a page is held whole in
+/// memory until it reaches disk, and one wider than the configured total could
+/// never be held at all — accepting it would put the process arbitrarily far
+/// over `max_memory_usage` on a single call.
+fn check_framable(record: &Bytes, max_memory_usage: usize) -> Result<(), Error> {
+    if u32::try_from(record.len()).is_err() || record.len() > max_memory_usage {
         return Err(Error::RecordTooLarge(record.len()));
     }
     Ok(())
@@ -846,7 +851,7 @@ impl NormFS {
     /// not yet on disk. That wait is the back-pressure: the queue declines to
     /// run ahead of the disk rather than dropping what it already took.
     pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
-        check_framable(&data)?;
+        check_framable(&data, self.settings.max_memory_usage)?;
         let (entry_id, placement) = self.mem.enqueue_awaiting(queue, data.clone()).await;
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
@@ -866,7 +871,7 @@ impl NormFS {
         }
 
         for record in &data {
-            check_framable(record)?;
+            check_framable(record, self.settings.max_memory_usage)?;
         }
 
         log::debug!(target: "normfs", "Enqueuing batch - Queue: '{}', Batch size: {} entries", queue, data.len());

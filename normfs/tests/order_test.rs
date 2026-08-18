@@ -308,3 +308,26 @@ async fn an_oversized_record_keeps_its_place_among_ordinary_ones() {
         );
     }
 }
+
+/// A record wider than the configured memory total is refused before it takes
+/// an id: nothing could ever hold it, and accepting it would put the process
+/// arbitrarily far over `max_memory_usage` on a single call.
+#[tokio::test]
+async fn a_record_wider_than_the_memory_bound_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), settings()).await.unwrap();
+    let queue = fs.resolve("bounded");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+
+    let too_wide = Bytes::from(vec![0u8; settings().max_memory_usage + 1]);
+    let refused = fs.enqueue(&queue, too_wide).await;
+    assert!(
+        matches!(refused, Err(normfs::Error::RecordTooLarge(_))),
+        "got {refused:?}"
+    );
+
+    // The sequence is untouched: the next record gets the first id.
+    let id = fs.enqueue(&queue, Bytes::from_static(b"fits")).await.unwrap();
+    assert_eq!(id, UintN::zero());
+    fs.close().await.unwrap();
+}
