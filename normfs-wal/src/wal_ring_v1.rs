@@ -110,6 +110,7 @@ unsafe extern "C" {
     fn normfs_wal_ring_set_essential(ring: *mut CWalRing, min_essential_id: u64);
     fn normfs_wal_ring_grow(ring: *mut CWalRing, ring_id: u64);
     fn normfs_wal_ring_shrink(ring: *mut CWalRing, ring_id: u64);
+    fn normfs_wal_ring_skip_entry(ring: *mut CWalRing);
 
     fn normfs_wal_entry_v1_decode(buf: *const u8, len: usize) -> CEntryDecodeResult;
 }
@@ -168,11 +169,17 @@ impl WalRing {
     /// [`WalRing::in_arena`] for a ring that borrows from the shared arena.
     pub fn new(page_count: usize, page_size: usize, first_entry_id: u64) -> Self {
         assert!(page_count >= 1, "ring needs at least one page");
-        assert!(page_size >= 9, "page must hold the smallest entry plus its offset");
+        assert!(
+            page_size >= 9,
+            "page must hold the smallest entry plus its offset"
+        );
         // Preconditions of normfs_wal_page_init and normfs_wal_ring_init: the
         // offset table holds a page offset as a u32, and the page pointers are
         // derived from the arena size.
-        assert!(page_size <= u32::MAX as usize, "page must be addressable by a u32 offset");
+        assert!(
+            page_size <= u32::MAX as usize,
+            "page must be addressable by a u32 offset"
+        );
         assert!(
             page_count.checked_mul(page_size).is_some(),
             "arena size overflows"
@@ -456,6 +463,45 @@ impl WalRing {
             }
         }
         empty.or(oldest.map(|(k, _)| k))
+    }
+
+    /// Steps the id sequence over a record no page can hold, keeping every
+    /// record already on a page.
+    ///
+    /// This is what replaces re-seeding. A record wider than a page still takes
+    /// an id, and V1 derives every entry id from position, so the gap has to be
+    /// in the sequence the pages agree with. Re-seeding put it there by
+    /// renumbering from scratch, which discards the pages — including records
+    /// that had been accepted and were not yet on disk.
+    ///
+    /// The active page is emptied first, by rotation, because
+    /// `normfs_wal_ring_scalar_wf` ties `next_entry_id` to the active page's
+    /// `first_entry_id + count`. That is also what makes the skipped id fall
+    /// strictly *between* two pages, so the ids on any one page stay a dense
+    /// run and the pages and the skipped records have one id order between
+    /// them.
+    ///
+    /// False when the active page holds records and no page can be rotated
+    /// into — the same condition an append reports as `Full`, and the caller
+    /// waits on it the same way.
+    pub fn skip_entry(&mut self) -> bool {
+        if self.page_ref(self.ring.active).count != 0 {
+            let Some(idx) = self.oldest_reclaimable_page() else {
+                return false;
+            };
+            self.rotate_into(idx);
+        }
+        unsafe { normfs_wal_ring_skip_entry(self.ring.as_mut()) };
+        true
+    }
+
+    /// Where entry `index` of page `page_index` begins, in that page's bytes.
+    ///
+    /// The offset table the C page keeps is the only thing that can answer
+    /// this, and it is what lets a flush stop part-way through a page: the
+    /// bytes of entries up to some id end exactly where the next entry begins.
+    pub fn page_entry_offset(&self, page_index: usize, index: u32) -> usize {
+        unsafe { normfs_wal_page_offset(self.page(page_index), index) as usize }
     }
 
     /// Resets the ring to empty, with `first_entry_id` as the next id to cache.

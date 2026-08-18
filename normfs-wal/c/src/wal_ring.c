@@ -241,3 +241,18 @@ normfs_wal_ring_seek(struct normfs_wal_ring *ring, uint64_t entry_id)
 
 	return r;
 }
+
+void
+normfs_wal_ring_skip_entry(struct normfs_wal_ring *ring)
+{
+	/* Splits ring_wf's \forall over pages into the active page and the
+	 * rest, which WP does not split on its own -- the same shape rotate_to
+	 * and grow need, for the same reason. The rest follows from the frame:
+	 * this assigns two scalars and no page's bytes at all. */
+	/*@ assert other_pages_wf:
+	      \forall integer k; 0 <= k < ring->page_count && k != ring->active ==>
+	        normfs_wal_page_wf(&ring->pages[k]); */
+
+	ring->next_entry_id = ring->next_entry_id + 1u;
+	ring->pages[ring->active].first_entry_id = ring->next_entry_id;
+}

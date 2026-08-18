@@ -54,6 +54,9 @@ pub enum Error {
     QueueEmpty,
     NotFound,
     ClientDisconnected,
+    /// The record is wider than a V1 WAL entry can frame, so no file can hold
+    /// it. Refused before an id is taken — see [`NormFS::enqueue`].
+    RecordTooLarge(usize),
 }
 
 impl std::fmt::Display for Error {
@@ -67,6 +70,11 @@ impl std::fmt::Display for Error {
             Error::QueueEmpty => write!(f, "Queue is empty"),
             Error::NotFound => write!(f, "Entry not found"),
             Error::ClientDisconnected => write!(f, "Client disconnected"),
+            Error::RecordTooLarge(n) => write!(
+                f,
+                "Record of {n} bytes exceeds the {} bytes a WAL entry can frame",
+                u32::MAX
+            ),
         }
     }
 }
@@ -82,8 +90,28 @@ impl std::error::Error for Error {
             Error::QueueEmpty => None,
             Error::NotFound => None,
             Error::ClientDisconnected => None,
+            Error::RecordTooLarge(_) => None,
         }
     }
+}
+
+/// Refuses a record no WAL entry can frame, **before** it is given an id.
+///
+/// The frame carries the record's size as a varint32, so a wider record has no
+/// encoding at all. The writer used to discover that after the fact
+/// (`WriterState::write`) and could only log it: the id had already been
+/// returned to the caller, the writer's ordered buffer had already counted it,
+/// and the pool had already stepped past it. The record was then simply absent
+/// from the file while every id after it kept counting — and V1 derives entry
+/// ids from position, so the result is not a missing record but every later
+/// record answering to the wrong id.
+///
+/// Refusing it here costs the caller an error and costs the sequence nothing.
+fn check_framable(record: &Bytes) -> Result<(), Error> {
+    if u32::try_from(record.len()).is_err() {
+        return Err(Error::RecordTooLarge(record.len()));
+    }
+    Ok(())
 }
 
 impl From<WalError> for Error {
@@ -818,6 +846,7 @@ impl NormFS {
     /// not yet on disk. That wait is the back-pressure: the queue declines to
     /// run ahead of the disk rather than dropping what it already took.
     pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
+        check_framable(&data)?;
         let (entry_id, placement) = self.mem.enqueue_awaiting(queue, data.clone()).await;
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
@@ -834,6 +863,10 @@ impl NormFS {
     pub async fn enqueue_batch(&self, queue: &QueueId, data: Vec<Bytes>) -> Result<Vec<UintN>, Error> {
         if data.is_empty() {
             return Ok(Vec::new());
+        }
+
+        for record in &data {
+            check_framable(record)?;
         }
 
         log::debug!(target: "normfs", "Enqueuing batch - Queue: '{}', Batch size: {} entries", queue, data.len());

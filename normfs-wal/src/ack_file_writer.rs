@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -39,7 +38,6 @@ struct WriterState {
     current_size: u64,
 }
 
-#[derive(Debug)]
 pub struct AckFileWriter {
     settings: AckFileWriterSettings,
     state: Arc<Mutex<WriterState>>,
@@ -47,7 +45,9 @@ pub struct AckFileWriter {
     shutdown_tx: mpsc::Sender<()>,
     buffer_full_notify: Arc<Notify>,
     pooled: bool,
-    pool_ready: Arc<AtomicBool>,
+    /// The pool this writer drains, so `write_maybe_pooled` can tell it which
+    /// entries it has taken responsibility for.
+    pool: Option<Arc<PagePool>>,
 }
 
 /// Writes out everything the pool has appended since the last flush, then
@@ -95,8 +95,9 @@ async fn flush_pool(
             if let Err(e) = file_guard.write_all(bytes).await {
                 log::error!(
                     target: "normfs",
-                    "Failed to write page {} to {} (attempt {}/{}): {}",
-                    write.page_index,
+                    "Failed to write entries {}..={} to {} (attempt {}/{}): {}",
+                    write.first_entry_id,
+                    write.last_entry_id,
                     path.display(),
                     attempt + 1,
                     MAX_RETRIES,
@@ -113,13 +114,15 @@ async fn flush_pool(
         if !written {
             log::error!(
                 target: "normfs",
-                "All attempts to write page {} to {} failed; it stays pending for the next flush",
-                write.page_index,
+                "All attempts to write entries {}..={} to {} failed; they stay pending for \
+                 the next flush",
+                write.first_entry_id,
+                write.last_entry_id,
                 path.display()
             );
             break;
         }
-        pool.commit_written(write.page_index, write.to);
+        pool.commit_written(write);
         durable_through = Some(write.last_entry_id);
     }
 
@@ -217,12 +220,6 @@ impl AckFileWriter {
         if let Some(p) = pool.as_ref() {
             p.set_flush_signal(buffer_full_notify.clone());
         }
-        // Closed until the record that opens this file has been handed over.
-        // A buffered record has no page, so nothing else orders it against the
-        // pages that follow it: without this the new file's first flush can
-        // write them ahead of it, and V1's positional ids then hand every
-        // payload in the file out under the wrong id.
-        let pool_ready = Arc::new(AtomicBool::new(false));
         let writer_handle = tokio::spawn(writer_task(
             path.clone(),
             Arc::new(Mutex::new(file)),
@@ -231,9 +228,8 @@ impl AckFileWriter {
             shutdown_rx,
             buffer_full_notify.clone(),
             ack_sender,
-            pool,
+            pool.clone(),
             epoch,
-            pool_ready.clone(),
         ));
 
         Ok(Self {
@@ -243,7 +239,7 @@ impl AckFileWriter {
             shutdown_tx,
             buffer_full_notify,
             pooled,
-            pool_ready,
+            pool,
         })
     }
 
@@ -254,12 +250,13 @@ impl AckFileWriter {
 
     /// Records that an entry belongs to this file, buffering its bytes.
     pub async fn write(&self, queue_id: QueueId, entry_id: UintN, entry: Bytes) {
-        self.write_maybe_pooled(queue_id, entry_id, entry, false).await
+        self.write_maybe_pooled(queue_id, entry_id, entry, false)
+            .await
     }
 
-    /// `in_pool` says the record is already in a page, so its bytes reach the
-    /// file from there. Anything else still has to be buffered, or a record the
-    /// pool refused -- one larger than a page -- would reach no file at all.
+    /// `in_pool` says the record's bytes are the pool's to hand over, so they
+    /// must not be buffered again here. With a pool that is every record: one
+    /// larger than a page is held whole by the pool rather than routed round it.
     ///
     /// A pooled record is not counted into `current_size` either. That counter
     /// exists only to answer `can_add`, and `can_add` is not consulted on the
@@ -267,6 +264,17 @@ impl AckFileWriter {
     /// runs before the bytes enter a page. Keeping a second, unread counter in
     /// step with the pool's would be a source of drift and no source of truth,
     /// so there is exactly one fill accounting per path and they never meet.
+    ///
+    /// ## Why the pool is told
+    ///
+    /// This is the point at which the writer takes responsibility for an entry,
+    /// and it runs in id order — `OrderedBuffer` is what makes that true. The
+    /// pool may not write anything above the highest id that has reached here,
+    /// because a record's bytes are in its page from the moment `place`
+    /// returned, which is before the entry reaches the writer at all. Without
+    /// the mark, a flush landing in that window writes a later record ahead of
+    /// an earlier one, and V1's positional ids turn that into every entry after
+    /// it answering under the wrong id.
     pub async fn write_maybe_pooled(
         &self,
         queue_id: QueueId,
@@ -280,13 +288,14 @@ impl AckFileWriter {
             state.buffer.extend_from_slice(&entry);
             state.current_size += entry.len() as u64;
         }
+        // Under the state lock, which a flush also takes: the mark and the
+        // buffered bytes move together, so a flush sees either both or neither.
+        if let Some(pool) = self.pool.as_ref()
+            && let Ok(id) = entry_id.to_u64()
+        {
+            pool.note_handed_over(id);
+        }
         state.acks.push((queue_id, entry_id));
-
-        // This file now holds a record, so its flushes may take pages. Set here
-        // rather than by the caller afterwards: a buffered record has to be in
-        // the buffer before any page can be written, and here it already is,
-        // under the lock a flush takes to read it.
-        self.pool_ready.store(true, Ordering::Release);
 
         if state.buffer.len() >= self.settings.max_buffer_size {
             self.buffer_full_notify.notify_one();
@@ -312,7 +321,6 @@ async fn writer_task(
     ack_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: Option<Arc<PagePool>>,
     epoch: u64,
-    pool_ready: Arc<AtomicBool>,
 ) {
     let mut interval = tokio::time::interval(settings.write_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
@@ -321,14 +329,14 @@ async fn writer_task(
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => {
-                flush(&path, &file, &state, &ack_sender, &pool, epoch, &pool_ready, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
                 break;
             }
             _ = buffer_full_notify.notified() => {
-                flush(&path, &file, &state, &ack_sender, &pool, epoch, &pool_ready, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
             }
             _ = interval.tick() => {
-                flush(&path, &file, &state, &ack_sender, &pool, epoch, &pool_ready, settings.fsync).await;
+                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
             }
         }
     }
@@ -343,32 +351,39 @@ async fn flush(
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: &Option<Arc<PagePool>>,
     epoch: u64,
-    pool_ready: &AtomicBool,
     fsync: bool,
 ) {
-    // Buffer first, then pages. A record only lands in the buffer when it was
-    // too large for a page, and stepping the pool over such a record drains it
-    // first -- so whatever is buffered is always older than whatever the pages
-    // hold, and this order is the id order the reader depends on.
-    flush_buffer(path, file, state, ack_sender, fsync).await;
-    if let Some(pool) = pool
-        && pool_ready.load(Ordering::Acquire)
-    {
+    // Buffer first, then pages. With a pool the buffer is always empty --
+    // everything the pool accepted comes out of `take_pending`, in one id
+    // order -- so this is the unpooled path only, and the two never mix within
+    // a file.
+    //
+    // The early return is not tidiness. `flush_buffer` returns its bytes to the
+    // head of the buffer when every attempt failed, so they are still owed to
+    // the file; going on to write pages would put later records in front of
+    // them, and V1's positional ids would hand every payload after that point
+    // out under the wrong id.
+    if !flush_buffer(path, file, state, ack_sender, fsync).await {
+        return;
+    }
+    if let Some(pool) = pool {
         flush_pool(path, file, state, ack_sender, pool, epoch, fsync).await;
     }
 }
 
+/// False when the buffer still owes the file bytes, so nothing may be written
+/// after them.
 async fn flush_buffer(
     path: &Path,
     file: &Arc<Mutex<File>>,
     state: &Arc<Mutex<WriterState>>,
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
     fsync: bool,
-) {
+) -> bool {
     let (data_to_write, acks_to_send) = {
         let mut state_guard = state.lock().await;
         if state_guard.buffer.is_empty() {
-            return;
+            return true;
         }
         let data = state_guard.buffer.split().freeze();
         let mut acks = std::mem::take(&mut state_guard.acks);
@@ -383,7 +398,7 @@ async fn flush_buffer(
     };
 
     if data_to_write.is_empty() {
-        return;
+        return true;
     }
 
     log::debug!(
@@ -446,6 +461,8 @@ async fn flush_buffer(
         new_acks.append(&mut state_guard.acks);
         state_guard.acks = new_acks;
     }
+
+    write_successful
 }
 
 impl Drop for AckFileWriter {

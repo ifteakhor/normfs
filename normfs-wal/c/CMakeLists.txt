@@ -118,6 +118,10 @@ if(FRAMAC)
     # queues is the other way a record can leave the queue that accepted it,
     # and shrink is where the durability theorem stands at that boundary, so
     # leaving either unscheduled would make that clause a comment.
+    #
+    # skip_entry likewise. It is the one place the id sequence moves without a
+    # record behind it, and its ensures is what says no page's bytes move with
+    # it -- unscheduled, that would be a comment rather than a check.
     set(NORMFS_WAL_RING_WP_FCTS
         normfs_wal_ring_init
         normfs_wal_ring_set_essential
@@ -125,6 +129,7 @@ if(FRAMAC)
         normfs_wal_ring_rotate_to
         normfs_wal_ring_grow
         normfs_wal_ring_shrink
+        normfs_wal_ring_skip_entry
         normfs_wal_ring_seek)
 
     # The pool proves against its own contracts, in its own target.

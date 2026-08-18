@@ -456,6 +456,47 @@ void normfs_wal_ring_rotate_to(struct normfs_wal_ring *ring, size_t index);
 struct normfs_wal_ring_seek_result
 normfs_wal_ring_seek(struct normfs_wal_ring *ring, uint64_t entry_id);
 
+/*
+ * Steps the id sequence over one record without putting it on a page.
+ *
+ * A record whose frame is wider than a page can never be cached, but the id it
+ * was given is part of the sequence all the same, and the sequence is what the
+ * reader derives every entry id from. The ring is therefore told about the gap
+ * rather than left to discover it: the alternative is to renumber, which means
+ * discarding the pages -- and a record that has been accepted and is not yet on
+ * disk cannot be discarded.
+ *
+ * The active page must be empty, because scalar_wf ties next_entry_id to
+ * `pages[active].first_entry_id + count` and there is no way to advance the one
+ * without moving the other. That is not a limitation but the point: the caller
+ * rotates first, so a skipped id always falls *between* two pages and never
+ * inside one. The ids a page holds therefore stay a dense run, which is what
+ * lets a reader ask a page for an id by subtracting first_entry_id, and what
+ * lets a writer put the pages and the skipped records into one id order by
+ * comparing their first ids alone.
+ */
+/*@ requires normfs_wal_ring_wf(ring);
+    requires ring->pages[ring->active].count == 0;
+    requires ring->next_entry_id < 0xFFFFFFFFFFFFFFFF;
+    assigns ring->next_entry_id, ring->pages[ring->active].first_entry_id;
+    ensures normfs_wal_ring_wf(ring);
+    ensures ring->next_entry_id == \old(ring->next_entry_id) + 1;
+    ensures ring->pages[ring->active].first_entry_id == ring->next_entry_id;
+    ensures ring->pages[ring->active].count == 0;
+
+    // Nothing that is on a page moves. The skipped record never entered one, so
+    // unlike rotate_to this needs no durability clause: there is nothing here
+    // that could overwrite an accepted record.
+    ensures \forall integer k; 0 <= k < ring->page_count ==>
+              ring->pages[k].used_bytes == \at(ring->pages[k].used_bytes, Pre) &&
+              ring->pages[k].count == \at(ring->pages[k].count, Pre) &&
+              ring->pages[k].pin_count == \at(ring->pages[k].pin_count, Pre);
+    ensures \forall integer k; 0 <= k < ring->page_count && k != ring->active ==>
+              ring->pages[k].first_entry_id ==
+                \at(ring->pages[k].first_entry_id, Pre);
+*/
+void normfs_wal_ring_skip_entry(struct normfs_wal_ring *ring);
+
 /*@ requires \valid(ring);
     assigns ring->min_essential_id;
     ensures ring->min_essential_id == min_essential_id;

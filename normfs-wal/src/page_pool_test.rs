@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::page_pool::{PagePool, Placement, PoolError, RotateHint};
+use crate::page_pool::{PagePool, Placement, RotateHint};
 use crate::wal_ring_v1::AppendOutcome;
 
 // Two small pages, so the pool fills after a handful of records. A 16 B record
@@ -23,6 +23,16 @@ const HEADER: u64 = 16;
 
 fn pool() -> Arc<PagePool> {
     Arc::new(PagePool::new(PAGE_COUNT, PAGE_SIZE, 0))
+}
+
+/// Stands in for the file writer taking responsibility for everything placed so
+/// far. `take_pending` hands out nothing above this, so a test that skips it is
+/// testing an empty flush.
+fn hand_over_all(pool: &PagePool) {
+    let next = pool.next_entry_id();
+    if next > 0 {
+        pool.note_handed_over(next - 1);
+    }
 }
 
 /// Fills every page, returning how many records it took.
@@ -108,18 +118,56 @@ async fn nothing_accepted_is_ever_lost() {
     assert_eq!(ids, expected);
 }
 
+/// A record larger than a page is held by the pool, not routed round it.
+///
+/// It used to be handed to the writer's own buffer, and the pool then re-seeded
+/// to step its id sequence past it -- a drain and an fsync per record, and a
+/// second road to the same file that nothing ordered against the first.
 #[tokio::test]
-async fn a_record_larger_than_a_page_fails_instead_of_waiting() {
+async fn a_record_larger_than_a_page_is_held_rather_than_refused() {
     let pool = pool();
-    let huge = vec![0u8; PAGE_SIZE * 2];
-    // No amount of waiting would ever make room, so this must not block.
-    let outcome = tokio::time::timeout(
+    let huge = vec![0xEE; PAGE_SIZE * 2];
+
+    // No amount of waiting makes a page fit it, so this must not block.
+    let placed = tokio::time::timeout(
         Duration::from_secs(2),
         pool.place(pool.next_entry_id(), &huge),
     )
     .await
-    .expect("TooLarge must not wait");
-    assert_eq!(outcome, Err(PoolError::TooLarge));
+    .expect("an oversized record must not wait for a page it can never have")
+    .expect("an oversized record is held, not refused");
+
+    assert!(
+        placed.in_pool,
+        "the pool holds it, so the writer must not buffer it again"
+    );
+    assert_eq!(
+        pool.next_entry_id(),
+        1,
+        "it takes its id like any other record"
+    );
+
+    hand_over_all(&pool);
+    let pending = pool.take_pending(placed.epoch);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0.first_entry_id, 0);
+    assert_eq!(pending[0].0.last_entry_id, 0);
+    assert_eq!(
+        &pending[0].1[pending[0].1.len() - 4 - huge.len()..pending[0].1.len() - 4],
+        &huge[..],
+        "the framed entry carries the record whole"
+    );
+}
+
+/// A record wider than the V1 frame has no encoding at all, and no id can save
+/// it. `NormFS::enqueue` refuses one before it takes an id; this is the pool
+/// refusing to accept one if that guard is ever bypassed.
+#[tokio::test]
+async fn a_record_too_wide_to_frame_is_refused() {
+    // A real 4 GiB record is not allocatable here, so this asserts the shape of
+    // the check rather than driving it: encoded_len is None exactly there.
+    assert!(crate::page_pool::encoded_len_of(u32::MAX as usize + 1).is_none());
+    assert!(crate::page_pool::encoded_len_of(u32::MAX as usize).is_some());
 }
 
 #[tokio::test]
@@ -127,24 +175,37 @@ async fn pending_yields_each_byte_once_and_in_id_order() {
     let pool = pool();
     fill(&pool);
 
+    assert!(
+        pool.take_pending(0).is_empty(),
+        "nothing may be written before the writer has taken responsibility for it"
+    );
+
+    hand_over_all(&pool);
     let first = pool.take_pending(0);
-    assert!(!first.is_empty(), "appended records should be pending a write");
+    assert!(
+        !first.is_empty(),
+        "appended records should be pending a write"
+    );
     let total: usize = first.iter().map(|(_, b)| b.len()).sum();
     assert!(total > 0);
     for w in first.windows(2) {
         assert!(
-            w[0].0.last_entry_id < w[1].0.last_entry_id,
-            "pending runs must come out in id order"
+            w[0].0.last_entry_id < w[1].0.first_entry_id,
+            "pending runs must come out in id order and must not overlap"
         );
     }
 
     // Not written yet, so it must come back: an untried write must not lose
     // the run.
-    assert_eq!(pool.take_pending(0), first, "an uncommitted run must stay pending");
+    assert_eq!(
+        pool.take_pending(0),
+        first,
+        "an uncommitted run must stay pending"
+    );
 
     // The writer commits each run once it is actually on disk.
     for (w, _) in &first {
-        pool.commit_written(w.page_index, w.to);
+        pool.commit_written(w);
     }
 
     // Committed once: a second call has nothing to give, so the writer cannot
@@ -154,6 +215,7 @@ async fn pending_yields_each_byte_once_and_in_id_order() {
     // A further record produces only the new bytes, not the whole page again.
     pool.mark_durable(pool.next_entry_id());
     assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
+    hand_over_all(&pool);
     let second = pool.take_pending(0);
     let second_total: usize = second.iter().map(|(_, b)| b.len()).sum();
     assert!(
@@ -208,6 +270,9 @@ fn armed_pool() -> Arc<PagePool> {
 async fn place_next(pool: &PagePool) -> (u64, Placement) {
     let id = pool.next_entry_id();
     let placement = pool.place(id, &RECORD).await.unwrap();
+    // What the writer does when the entry reaches it, in the id order its
+    // ordered buffer restores. Without it a flush takes nothing.
+    pool.note_handed_over(id);
     pool.mark_durable(id);
     (id, placement)
 }
@@ -303,7 +368,7 @@ async fn a_flush_takes_only_its_own_files_pages() {
         }
         // Committed once, so nothing reaches a file twice.
         for (w, _) in &taken {
-            pool.commit_written(w.page_index, w.to);
+            pool.commit_written(w);
         }
         assert!(
             pool.take_pending(epoch).is_empty(),
@@ -312,21 +377,29 @@ async fn a_flush_takes_only_its_own_files_pages() {
     }
 }
 
-/// A record too large for a page keeps the old pre-record rotation.
+/// A record too large for a page still ends a file.
 ///
-/// It never enters a page, so there is no page boundary for its file to end at.
-/// Without this a queue whose records are all oversized would never rotate.
+/// It never enters a page, so no page rotation will come along carrying a
+/// boundary for it. `skip_entry` empties the active page before stepping the
+/// sequence, which is what gives the boundary somewhere to land — and it is why
+/// a queue whose records are all oversized still rotates its files rather than
+/// growing one for ever.
 #[tokio::test]
-async fn a_buffered_record_rotates_before_itself() {
-    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
-    pool.arm_file_fill(HEADER + record_charge() * 2, HEADER);
+async fn an_oversized_record_still_ends_a_file() {
+    let huge = vec![0x5A; PAGE_SIZE * 2];
+    let charge = crate::wal_entry_v1::encoded_len(huge.len() as u32) as u64;
 
-    let placements: Vec<(RotateHint, u64)> = (0..6)
-        .map(|_| {
-            let p = pool.charge_buffered(RECORD.len());
-            (p.rotate, p.epoch)
-        })
-        .collect();
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+    pool.arm_file_fill(HEADER + charge * 2, HEADER);
+
+    let mut placements: Vec<(RotateHint, u64)> = Vec::new();
+    for _ in 0..6 {
+        let id = pool.next_entry_id();
+        let p = pool.place(id, &huge).await.expect("held, not refused");
+        pool.note_handed_over(id);
+        pool.mark_durable(id + 1);
+        placements.push((p.rotate, p.epoch));
+    }
     assert_eq!(
         placements,
         vec![
@@ -341,16 +414,23 @@ async fn a_buffered_record_rotates_before_itself() {
     );
 
     // A record larger than the whole file still opens the file it finds rather
-    // than rotating into an empty one, which would rotate forever.
+    // than rotating into an empty one, which would rotate for ever.
     let tiny = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
     tiny.arm_file_fill(HEADER + 4, HEADER);
+    let id = tiny.next_entry_id();
+    let first = tiny.place(id, &huge).await.unwrap();
+    tiny.note_handed_over(id);
+    tiny.mark_durable(id + 1);
     assert_eq!(
-        tiny.charge_buffered(RECORD.len()).rotate,
+        first.rotate,
         RotateHint::None,
         "a record larger than max_file_size still opens the first file rather than skipping it"
     );
     for expected in 1..=3u64 {
-        let p = tiny.charge_buffered(RECORD.len());
+        let id = tiny.next_entry_id();
+        let p = tiny.place(id, &huge).await.unwrap();
+        tiny.note_handed_over(id);
+        tiny.mark_durable(id + 1);
         assert_eq!((p.rotate, p.epoch), (RotateHint::Before, expected));
     }
 }
@@ -385,6 +465,7 @@ async fn the_fill_counts_each_entry_exactly_once() {
 async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     let pool = pool();
     fill(&pool);
+    hand_over_all(&pool);
     assert!(
         !pool.take_pending(0).is_empty() || pool.next_entry_id() > 0,
         "the pool should be holding records before the writer arms"
@@ -393,6 +474,7 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     // Put a fresh run in that a previous writer had not taken.
     pool.mark_durable(pool.next_entry_id());
     assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
+    hand_over_all(&pool);
     assert!(
         !pool.take_pending(0).is_empty(),
         "that run is pending a write"
@@ -406,10 +488,13 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
         "a newly armed writer must not adopt records it has no header entry for"
     );
 
-    // What it is told about afterwards still reaches the file.
+    // What it is told about afterwards still reaches the file. `arm_file_fill`
+    // cleared the handover mark with the cursors, so the new writer's own first
+    // entry is what re-opens the flush.
     let id = pool.next_entry_id();
     pool.mark_durable(id);
     pool.place(id, &RECORD).await.unwrap();
+    pool.note_handed_over(id);
     let pending = pool.take_pending(0);
     assert_eq!(
         pending.iter().map(|(w, _)| w.last_entry_id).max(),
@@ -432,11 +517,12 @@ async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
     // for a flush that failed every retry before close().
     let id0 = pool.next_entry_id();
     pool.place(id0, &RECORD).await.unwrap();
+    pool.note_handed_over(id0);
     let stranded_page = pool.with_ring(|r| r.active_page());
     assert!(
         pool.take_pending(0)
             .iter()
-            .any(|(w, _)| w.page_index == stranded_page),
+            .any(|(w, _)| w.first_entry_id == id0),
         "file 0 has a run pending on page {stranded_page}, and this test is about it \
          never being written"
     );
@@ -451,19 +537,21 @@ async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
     assert!(epoch > 0);
 
     let taken = pool.take_pending(epoch);
-    let pages: Vec<usize> = taken.iter().map(|(w, _)| w.page_index).collect();
+    let ids: Vec<u64> = taken.iter().map(|(w, _)| w.first_entry_id).collect();
     assert!(
-        pages.contains(&stranded_page),
-        "the open file must pick up page {stranded_page}, which the closed file left \
-         unwritten, or entry {id0} is in no file at all: took pages {pages:?}"
+        ids.contains(&id0),
+        "the open file must pick up the run the closed file left unwritten on page \
+         {stranded_page}, or entry {id0} is in no file at all: took runs from {ids:?}"
     );
 }
 
 /// A record too wide for the V1 frame must not move the file on.
 ///
-/// The writer rejects it before it can rotate anything, so charging it advances
-/// the pool's epoch past the writer's for good: every later page is stamped with
-/// an epoch no flush asks for, and the queue stops reaching disk entirely.
+/// There is no encoding for it, so no file can hold it and no id should have
+/// been given to it. `NormFS::enqueue` refuses it before that happens; if that
+/// guard is ever bypassed the pool must refuse too, and refuse without charging
+/// — charging would advance the pool's epoch past the writer's for good, and
+/// every later page would be stamped with an epoch no flush asks for.
 #[tokio::test]
 async fn a_record_too_wide_to_frame_does_not_move_the_epoch() {
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
@@ -471,15 +559,21 @@ async fn a_record_too_wide_to_frame_does_not_move_the_epoch() {
 
     // One real record first, so has_written is set and a rotation is otherwise
     // possible.
-    pool.charge_buffered(RECORD.len());
-    let before = (pool.epoch(), pool.fill_used());
+    let id = pool.next_entry_id();
+    pool.place(id, &RECORD).await.unwrap();
+    pool.note_handed_over(id);
+    pool.mark_durable(id + 1);
+    let before = (pool.epoch(), pool.fill_used(), pool.next_entry_id());
 
-    let placement = pool.charge_buffered(u32::MAX as usize + 1);
-    assert_eq!(placement.rotate, RotateHint::WriterDecides);
+    // The check itself: `encoded_len_of` is what `hold_oversize` consults, and
+    // it is `None` exactly at the frame's limit. A 4 GiB buffer is not
+    // allocatable in a test, so this pins the boundary rather than driving it.
+    assert!(crate::page_pool::encoded_len_of(u32::MAX as usize).is_some());
+    assert!(crate::page_pool::encoded_len_of(u32::MAX as usize + 1).is_none());
     assert_eq!(
-        (pool.epoch(), pool.fill_used()),
+        (pool.epoch(), pool.fill_used(), pool.next_entry_id()),
         before,
-        "a record the writer will reject must leave the file accounting untouched"
+        "consulting the frame limit must not move the file accounting"
     );
 }
 
@@ -523,43 +617,225 @@ async fn a_file_is_never_closed_before_it_takes_a_record() {
     assert_eq!(first.epoch, 0);
 }
 
-/// Stepping over a record too large for a page must not wait for a page.
+/// A queue of nothing but oversized records keeps running.
 ///
-/// `skip_to` waits until the pool has nothing left to lose before it re-seeds.
-/// Testing that by the durable watermark alone hangs: `reinit` resets the
-/// watermark to zero while moving `next_entry_id` forward, so after one
-/// oversized record the watermark can never catch up -- and when every record
-/// is oversized nothing ever enters a page, so nothing can ever report one
-/// durable. An empty pool has nothing to lose and must proceed at once.
+/// This used to be the worst case by a distance. Every record went round the
+/// pool into the writer's buffer, and the pool then re-seeded to step its id
+/// sequence past it — which it could only do once it had nothing left to lose,
+/// so every record cost a drain and an fsync of the whole queue. A 1 MiB record
+/// against a 256 KiB page is the ordinary way in, and `signature_test` does
+/// exactly that 150 times.
+///
+/// Now the record is held whole and the sequence is stepped in place, so this
+/// runs at the speed of the flush rather than one record per fsync.
 #[tokio::test]
 async fn every_record_being_oversized_does_not_stall_the_queue() {
     let pool = Arc::new(PagePool::new(PAGE_COUNT, PAGE_SIZE, 0));
     pool.set_drainer();
     pool.arm_file_fill(1 << 20, 16);
 
-    let huge = vec![0u8; PAGE_SIZE * 4];
+    let huge = vec![0x11; PAGE_SIZE * 4];
 
-    // Ten in a row, each stepped over. Nothing reports anything durable,
-    // because nothing ever reaches a page.
+    // Ten in a row. The budget is one page, so all but the first wait for a
+    // flush — which the loop performs, exactly as the writer would.
     let run = async {
         for id in 0..10u64 {
-            assert_eq!(
-                pool.place(id, &huge).await,
-                Err(PoolError::TooLarge),
-                "a record larger than a page is never cached"
-            );
-            pool.charge_buffered(huge.len());
-            pool.skip_to(id + 1).await;
+            let placed = pool
+                .place(id, &huge)
+                .await
+                .expect("an oversized record is held, not refused");
+            assert!(placed.in_pool);
             assert_eq!(
                 pool.next_entry_id(),
                 id + 1,
-                "the id sequence steps over the record the pool refused"
+                "the id sequence steps over the record no page can hold"
             );
+
+            // What the writer does: take, write, sync, report durable.
+            pool.note_handed_over(id);
+            let pending = pool.take_pending(placed.epoch);
+            assert_eq!(pending.len(), 1, "one held record, one run");
+            for (w, _) in &pending {
+                pool.commit_written(w);
+            }
+            pool.mark_durable(id + 1);
         }
     };
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
-        .expect("stepping over oversized records must not wait for a page");
+        .expect("a queue of oversized records must keep moving");
+
+    assert!(pool.is_empty(), "everything durable is released");
+}
+
+/// The pool holds oversized records rather than letting them accumulate.
+///
+/// A record larger than a page is memory the pages cannot use, so it has to be
+/// bounded the same way they are — by making the appender wait for the disk.
+/// The first one is always taken however large it is: refusing it would be the
+/// discarding this pool exists to avoid.
+#[tokio::test]
+async fn a_held_oversized_record_makes_the_next_one_wait() {
+    let pool = Arc::new(PagePool::new(PAGE_COUNT, PAGE_SIZE, 0));
+    pool.set_drainer();
+    let huge = vec![0x22; PAGE_SIZE * 4];
+
+    pool.place(0, &huge)
+        .await
+        .expect("the first is always taken");
+
+    // The second is over budget, so it waits — and only a flush can end that.
+    let waited = tokio::time::timeout(Duration::from_millis(150), pool.place(1, &huge)).await;
+    assert!(
+        waited.is_err(),
+        "a second oversized record must wait for the first to reach disk"
+    );
+
+    let pool2 = Arc::clone(&pool);
+    let resumed = tokio::spawn(async move { pool2.place(1, &huge).await });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    pool.note_handed_over(0);
+    for (w, _) in &pool.take_pending(0) {
+        pool.commit_written(w);
+    }
+    pool.mark_durable(1);
+    tokio::time::timeout(Duration::from_secs(5), resumed)
+        .await
+        .expect("the wait must end when the held record reaches disk")
+        .unwrap()
+        .expect("held, not refused");
+}
+
+/// Memory answers for an oversized record like any other, until it is released.
+///
+/// It sits between two pages in the id sequence, so a read that could answer
+/// for the ids either side of it but not for the record itself would hand back
+/// a run with a hole in it — and a hole is worse than a miss, because the
+/// caller cannot see it.
+#[tokio::test]
+async fn a_held_oversized_record_reads_back_between_its_neighbours() {
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+    pool.set_drainer();
+    let huge = vec![0x33; PAGE_SIZE * 2];
+
+    pool.place(0, &RECORD).await.unwrap();
+    pool.place(1, &huge).await.unwrap();
+    pool.place(2, &RECORD).await.unwrap();
+
+    let got = pool.collect_range(0, 2);
+    let ids: Vec<u64> = got.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, vec![0, 1, 2], "the run must have no hole in it");
+    assert_eq!(got[1].1, huge, "and the record must come back whole");
+
+    let pinned = Arc::clone(&pool).pin_range(0, 2);
+    assert_eq!(
+        pinned.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(&pinned[1].1[..], &huge[..]);
+
+    // Released once durable, and memory then says so rather than answering for
+    // its neighbours and not for it.
+    hand_over_all(&pool);
+    for (w, _) in &pool.take_pending(0) {
+        pool.commit_written(w);
+    }
+    pool.mark_durable(2);
+    assert_eq!(
+        pool.min_cached_id(),
+        Some(2),
+        "memory starts above the record it released, not below it"
+    );
+    assert_eq!(
+        pool.collect_range(0, 2)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "the ids either side of a released record are no longer offered from memory"
+    );
+}
+
+/// Nothing is written before the writer has taken responsibility for it.
+///
+/// A record's bytes are in its page from the moment `place` returns, which is
+/// before the entry has reached the writer at all — the two are joined by an
+/// unbounded channel and the append gate is released between them. A flush
+/// landing in that window used to write the later record first, and V1 derives
+/// ids from position, so that is every entry after it answering under the wrong
+/// id rather than one record out of place.
+#[tokio::test]
+async fn a_flush_never_runs_ahead_of_the_writer() {
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+    pool.set_drainer();
+    pool.arm_file_fill(1 << 20, HEADER);
+
+    let huge = vec![0x44; PAGE_SIZE * 2];
+    pool.place(0, &huge).await.unwrap(); // in flight to the writer
+    pool.place(1, &RECORD).await.unwrap(); // already in a page
+
+    assert!(
+        pool.take_pending(0).is_empty(),
+        "neither record has reached the writer, so neither may be written"
+    );
+
+    // The writer takes them in id order, which is what its ordered buffer is
+    // for. Entry 1 becomes writable only after entry 0.
+    pool.note_handed_over(0);
+    let first = pool.take_pending(0);
+    assert_eq!(
+        first
+            .iter()
+            .map(|(w, _)| w.last_entry_id)
+            .collect::<Vec<_>>(),
+        vec![0],
+        "only the record the writer has claimed"
+    );
+    for (w, _) in &first {
+        pool.commit_written(w);
+    }
+
+    pool.note_handed_over(1);
+    let second = pool.take_pending(0);
+    assert_eq!(
+        second
+            .iter()
+            .map(|(w, _)| w.first_entry_id)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+}
+
+/// A page is cut between entries, never inside one.
+///
+/// The handover bound falls wherever the writer has got to, which is generally
+/// part-way through a page. The page's own offset table is what says where the
+/// next entry begins, so the cut is exact.
+#[tokio::test]
+async fn a_page_is_handed_over_one_entry_at_a_time() {
+    let pool = Arc::new(PagePool::new(4, 4096, 0));
+    pool.set_drainer();
+    pool.arm_file_fill(1 << 20, HEADER);
+
+    for id in 0..5u64 {
+        pool.place(id, &RECORD).await.unwrap();
+    }
+
+    let charge = record_charge() as usize;
+    for claimed in 0..5u64 {
+        pool.note_handed_over(claimed);
+        let taken = pool.take_pending(0);
+        let bytes: usize = taken.iter().map(|(_, b)| b.len()).sum();
+        assert_eq!(
+            bytes,
+            charge * (claimed as usize + 1),
+            "a flush must stop at the end of entry {claimed}, not part-way into the next"
+        );
+        assert_eq!(
+            taken.iter().map(|(w, _)| w.last_entry_id).max(),
+            Some(claimed)
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -632,12 +908,12 @@ async fn every_pin_is_released_even_when_payloads_are_dropped_unread() {
         drop(batch);
     }
 
-    let pinned: u32 = pool.with_ring(|ring| {
-        (0..ring.page_count())
-            .map(|k| ring.page_pin_count(k))
-            .sum()
-    });
-    assert_eq!(pinned, 0, "a dropped payload leaks a pin, and a leaked pin holds the page for good");
+    let pinned: u32 =
+        pool.with_ring(|ring| (0..ring.page_count()).map(|k| ring.page_pin_count(k)).sum());
+    assert_eq!(
+        pinned, 0,
+        "a dropped payload leaks a pin, and a leaked pin holds the page for good"
+    );
 }
 
 #[tokio::test]
@@ -699,18 +975,32 @@ async fn an_append_makes_progress_while_a_reader_holds_everything() {
     fill(&pool);
     pool.set_drainer();
 
-    // The payloads stay alive for the whole of this test.
-    let _held = pool.pin_range(0, u64::MAX);
+    // Everything is on disk, so nothing but a pin could hold a page — which is
+    // the point: `PIN_RESERVE` keeps one page unpinned, and a page that is both
+    // unpinned and durable is one the ring may rotate into.
+    pool.mark_durable(pool.next_entry_id());
 
-    // Resyncing to an id the pool is not expecting must not wait on a pin.
+    // The payloads stay alive for the whole of this test.
+    let _held = Arc::clone(&pool).pin_range(0, u64::MAX);
+
+    // An ordinary append first.
     let next = pool.next_entry_id();
-    let placed = tokio::time::timeout(
-        Duration::from_secs(5),
-        pool.place(next.wrapping_add(500), &RECORD),
-    )
-    .await;
     assert!(
-        placed.is_ok(),
+        tokio::time::timeout(Duration::from_secs(5), pool.place(next, &RECORD))
+            .await
+            .is_ok(),
         "a reader holding payloads must not stall an append for ever"
     );
+
+    // And resyncing to an id the pool is not expecting, which has to step the
+    // sequence rather than append to it.
+    pool.mark_durable(pool.next_entry_id());
+    let ahead = pool.next_entry_id() + 3;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), pool.place(ahead, &RECORD))
+            .await
+            .is_ok(),
+        "stepping the sequence must not wait on a pin either"
+    );
+    assert_eq!(pool.next_entry_id(), ahead + 1);
 }

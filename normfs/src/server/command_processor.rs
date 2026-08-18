@@ -487,11 +487,16 @@ impl CommandProcessor {
                         );
                         // No need to send response, client is already gone
                     }
+                    // RecordTooLarge is a write-path refusal and cannot arrive
+                    // here, but it is spelled out rather than folded into a
+                    // wildcard: a wildcard is what lets the next variant added
+                    // to Error reach a client as a server error, silently.
                     Error::QueueEmpty
                     | Error::Wal(_)
                     | Error::Store(_)
                     | Error::Cloud(_)
-                    | Error::Io(_) => {
+                    | Error::Io(_)
+                    | Error::RecordTooLarge(_) => {
                         error!(
                             "Read stream failed (client_id: {}, read_id: {}, queue_id: {}, error: {:?})",
                             sender.client_id(), read_id, queue_id, err

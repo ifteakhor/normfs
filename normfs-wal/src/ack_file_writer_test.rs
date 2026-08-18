@@ -248,24 +248,20 @@ async fn pages_reach_the_file_before_the_watermark_moves() {
 
     let record = b"a paged record";
     for _ in 0..3 {
-        assert!(matches!(
-            pool.try_append(record),
-            AppendOutcome::Cached(_)
-        ));
+        assert!(matches!(pool.try_append(record), AppendOutcome::Cached(_)));
     }
     let appended_through = pool.next_entry_id();
 
-    // A flush takes no pages until this file has been handed a record, so the
-    // record that opens a file cannot be overtaken by the pages behind it.
-    // This is that handover, and it is the same call the WAL writer makes.
-    writer
-        .write_maybe_pooled(
-            QueueIdResolver::new("test_instance").resolve("paged"),
-            UintN::from(0u64),
-            Bytes::new(),
-            true,
-        )
-        .await;
+    // A flush writes nothing the writer has not taken responsibility for, in
+    // the id order the writer's ordered buffer restores, so a record already in
+    // its page cannot be written ahead of an earlier one still in flight. This
+    // is that handover, and it is the same call the WAL writer makes.
+    let queue = QueueIdResolver::new("test_instance").resolve("paged");
+    for id in 0..appended_through {
+        writer
+            .write_maybe_pooled(queue.clone(), UintN::from(id), Bytes::new(), true)
+            .await;
+    }
 
     // The flush is on a timer; wait for the watermark rather than for a
     // duration, so the test asserts the ordering instead of racing it.

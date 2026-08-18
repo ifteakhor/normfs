@@ -296,14 +296,21 @@ impl MemQueue {
             if pool.has_drainer() {
                 placement = match pool.place(id_to_u64(&id), &data).await {
                     Ok(placed) => placed,
-                    Err(_) => {
-                        // Too large for a page. It is charged as a buffered
-                        // record, which is the one path that can still rotate
-                        // before a record, and then the pool steps over this id
-                        // without dropping what it is still holding.
-                        let placed = pool.charge_buffered(data.len());
-                        pool.skip_to(id_to_u64(&id).wrapping_add(1)).await;
-                        placed
+                    Err(e) => {
+                        // The only error left is a record wider than the V1
+                        // frame, and `NormFS::enqueue` refuses one before it
+                        // takes an id. A record merely larger than a page is
+                        // not an error any more -- the pool holds it whole and
+                        // hands it over in its turn, which is what keeps it in
+                        // the sequence rather than beside it.
+                        log::error!(
+                            target: "normfs-mem",
+                            "entry {id} of {} bytes was accepted and cannot be written ({e:?}): \
+                             every later entry in its file will read back under the wrong id",
+                            data.len(),
+                        );
+                        debug_assert!(false, "an unframeable record reached the pool");
+                        Placement::legacy()
                     }
                 };
             } else {
@@ -321,7 +328,19 @@ impl MemQueue {
         (id, placement)
     }
 
+    /// Enqueues without awaiting, for a queue no writer is draining.
+    ///
+    /// It cannot take the append gate — the gate is held across an `await` and
+    /// this is not async — so it is not safe beside [`MemQueue::enqueue_awaiting`]:
+    /// the two would allocate ids from `last_id` independently, and the pool,
+    /// which follows the caller's sequence rather than owning it, would find
+    /// the next id it is handed is not the one it expected.
+    ///
+    /// That is survivable now rather than silent — the pool steps over a small
+    /// gap instead of re-seeding, so nothing it holds is discarded — but the
+    /// record this call takes an id for still reaches no file. So it says so.
     pub fn enqueue(&self, data: Bytes) -> UintN {
+        self.warn_if_drained("enqueue");
         let mut inner = self.inner.write().unwrap();
         let id = inner
             .last_id
@@ -348,8 +367,10 @@ impl MemQueue {
         id
     }
 
-    // Doesn't take append_gate, so this can race enqueue_awaiting's pool reinit. Known gap.
+    /// The batch form of [`MemQueue::enqueue`], and under the same rule: not for
+    /// a queue a writer is draining.
     pub fn enqueue_batch(&self, entries: Vec<Bytes>) -> Vec<UintN> {
+        self.warn_if_drained("enqueue_batch");
         if entries.is_empty() {
             return Vec::new();
         }
@@ -388,6 +409,24 @@ impl MemQueue {
         }
 
         ids
+    }
+
+    /// Says so, loudly, when a synchronous append is used on a queue whose pool
+    /// a writer is draining. See [`MemQueue::enqueue`].
+    fn warn_if_drained(&self, what: &str) {
+        let drained = {
+            let inner = self.inner.read().unwrap();
+            inner.pool.as_ref().is_some_and(|p| p.has_drainer())
+        };
+        if drained {
+            log::error!(
+                target: "normfs-mem",
+                "MemQueue::{what} used on a queue a WAL writer is draining: it does not hold \
+                 the append gate, so the id it takes is not one the pool will see and the \
+                 record reaches no file. Use enqueue_awaiting."
+            );
+            debug_assert!(false, "MemQueue::{what} on a drained queue");
+        }
     }
 
     pub fn get_last_id(&self) -> Option<UintN> {
