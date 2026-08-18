@@ -808,3 +808,46 @@ async fn a_cancelled_enqueue_leaves_no_gap_in_the_id_sequence() {
     assert_eq!(next.to_u64().unwrap(), expected, "ids must stay dense");
     assert!(next.to_u64().unwrap() > first.to_u64().unwrap());
 }
+
+/// A follow whose backlog memory cannot serve goes to the files, even when
+/// `min_cached_id` is `None`: since the cache floor, `None` can mean "nothing
+/// servable at all" rather than "no lower bound", and treating it as the
+/// latter subscribed the client while its backlog was silently skipped.
+#[tokio::test]
+async fn a_follow_with_an_unservable_backlog_fails_to_the_files() {
+    let mem = Arc::new(MemStore::new(1024 * 1024));
+    let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
+    let queue = resolver.resolve("floor_follow");
+    mem.start_queue(&queue, None, false);
+
+    let pool = mem.pool(&queue).unwrap();
+    pool.set_drainer();
+    pool.arm_file_fill(1 << 20, 16);
+
+    // Small records on pages, then an oversized one; releasing the oversize
+    // raises the cache floor past everything, so min_cached_id is None while
+    // the pages still hold records.
+    for i in 0..5u64 {
+        let (id, _) = mem
+            .enqueue_awaiting(&queue, Bytes::from(format!("small_{i}")))
+            .await;
+        assert_eq!(id.to_u64().unwrap(), i);
+    }
+    let big = Bytes::from(vec![0u8; 300 * 1024]);
+    let (big_id, _) = mem.enqueue_awaiting(&queue, big).await;
+    for (w, _) in pool.take_pending(0) {
+        pool.commit_written(&w);
+    }
+    pool.mark_durable(big_id.to_u64().unwrap() + 1);
+    assert_eq!(pool.min_cached_id(), None, "the floor should pass everything");
+
+    // The backlog (ids 0..=5) is on disk only; memory must decline the follow
+    // rather than subscribe with the backlog skipped.
+    let (tx, _rx) = mpsc::channel(16);
+    let from = UintN::zero();
+    let result = mem.follow_full(&queue, &from, UintN::zero(), 1, &tx).await;
+    assert!(
+        !result.success,
+        "memory served a follow whose backlog it cannot answer"
+    );
+}

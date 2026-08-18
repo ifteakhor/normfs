@@ -530,6 +530,14 @@ impl MemQueue {
                 }
             }
 
+            // The floor can rise between the min_cached check and the pin --
+            // an oversize release, a page leaving the ring -- and the run then
+            // starts above `start_id`. A truncated range must go to the files,
+            // not out as a success.
+            if ring.min_cached_id().is_none_or(|m| UintN::from(m) > start_id) {
+                return MemReadResult::fail();
+            }
+
             results
         };
 
@@ -632,6 +640,15 @@ impl MemQueue {
                 }
             }
 
+            // See read_full: the floor can rise between the check and the pin.
+            if ring.min_cached_id().is_none_or(|m| UintN::from(m) > start_id) {
+                return MemReadResult {
+                    success: false,
+                    start_id: Some(start_id),
+                    subscription_id: None,
+                };
+            }
+
             (entries, start_id)
         };
 
@@ -677,10 +694,19 @@ impl MemQueue {
 
             match &inner.pool {
                 Some(ring) if !ring.is_empty() => {
-                    if let Some(mem_start) = ring.min_cached_id() {
-                        if start_id < UintN::from(mem_start) {
-                            return MemReadResult::fail();
-                        }
+                    // A backlog exists when the start is at or below the last
+                    // id; serving it from memory needs the cached run to reach
+                    // down to the start. `None` is not "no lower bound": since
+                    // the cache floor it can mean "nothing servable at all",
+                    // and the backlog is then on disk.
+                    let backlog = inner
+                        .last_id
+                        .as_ref()
+                        .is_some_and(|last| start_id <= *last);
+                    let covered =
+                        |m: Option<u64>| m.is_some_and(|m| start_id >= UintN::from(m));
+                    if backlog && !covered(ring.min_cached_id()) {
+                        return MemReadResult::fail();
                     }
                     let last = inner.last_id.as_ref().map(id_to_u64).unwrap_or(u64::MAX);
                     let mut current_id = start_id.clone();
@@ -694,6 +720,14 @@ impl MemQueue {
                             entries.push((id.clone(), data));
                             current_id = current_id.step_by(step);
                         }
+                    }
+                    // The floor can rise between the check and the pin -- an
+                    // oversize release, a page leaving the ring -- and the run
+                    // above starts past the ids this follow owes. Re-checked
+                    // now that the survivors are pinned: a truncated backlog
+                    // must go to the files, not out as a success.
+                    if backlog && !covered(ring.min_cached_id()) {
+                        return MemReadResult::fail();
                     }
                     let last_id = entries.last().map(|(id, _)| id.clone());
                     (entries, last_id)
@@ -845,14 +879,20 @@ impl MemQueue {
                 }
             };
 
-            if let Some(mem_start) = ring.min_cached_id() {
-                if start_id < UintN::from(mem_start) {
-                    return MemReadResult {
-                        success: false,
-                        start_id: Some(start_id),
-                        subscription_id: None,
-                    };
-                }
+            // See follow_full: `None` can mean "nothing servable", and the
+            // floor can rise between this check and the pin below, so both are
+            // needed for a backlog the caller expects in full.
+            let backlog = inner
+                .last_id
+                .as_ref()
+                .is_some_and(|last| start_id <= *last);
+            let covered = |m: Option<u64>| m.is_some_and(|m| start_id >= UintN::from(m));
+            if backlog && !covered(ring.min_cached_id()) {
+                return MemReadResult {
+                    success: false,
+                    start_id: Some(start_id),
+                    subscription_id: None,
+                };
             }
 
             let last = inner.last_id.as_ref().map(id_to_u64).unwrap_or(u64::MAX);
@@ -870,6 +910,13 @@ impl MemQueue {
                 }
             }
 
+            if backlog && !covered(ring.min_cached_id()) {
+                return MemReadResult {
+                    success: false,
+                    start_id: Some(start_id),
+                    subscription_id: None,
+                };
+            }
             let last_sent = entries.last().map(|(id, _)| id.clone());
             (start_id, last_sent, entries)
         };
