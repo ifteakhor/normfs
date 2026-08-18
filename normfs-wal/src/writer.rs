@@ -150,6 +150,24 @@ impl WalWriter {
                     }
                     WriteRequest::Close(responder) => {
                         log::info!("WAL writer: closing writer for queue '{}'", state.queue_id);
+                        // Entries parked out of order never reached the file
+                        // writer, and the closing flush is bounded by what did.
+                        // They are lost; the least a close can do is say so.
+                        if !state.buffer.pending.is_empty() {
+                            let ids: Vec<String> = state
+                                .buffer
+                                .pending
+                                .iter()
+                                .map(|(id, _, _)| id.to_string())
+                                .collect();
+                            log::error!(
+                                "WAL writer: closing queue '{}' with {} entrie(s) still \
+                                 waiting for order ({}); they reach no file",
+                                state.queue_id,
+                                ids.len(),
+                                ids.join(", ")
+                            );
+                        }
                         if let Err(e) = state.file_writer.close().await {
                             log::error!(
                                 "WAL writer: error closing file writer for queue '{}': {}",
