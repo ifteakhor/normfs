@@ -14,7 +14,7 @@ fn create_test_data(count: usize) -> Vec<Bytes> {
 }
 
 async fn setup_queue_with_data(mem: &Arc<MemStore>, queue: &QueueId, count: usize) -> Vec<UintN> {
-    mem.start_queue(queue, None);
+    mem.start_queue(queue, None, false);
 
     let data = create_test_data(count);
     let mut ids = Vec::new();
@@ -465,7 +465,7 @@ async fn test_follow_full_empty_queue() {
     let queue = resolver.resolve("empty_queue");
 
     // Initialize empty queue
-    mem.start_queue(&queue, None);
+    mem.start_queue(&queue, None, false);
 
     // Test: Try to follow empty queue
     let (tx, mut rx) = mpsc::channel(100);
@@ -560,7 +560,7 @@ async fn test_bounded_cache_drops_old_unacked_and_falls_back() {
     let mem = Arc::new(MemStore::new(300));
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("bounded_queue");
-    mem.start_queue(&queue, None);
+    mem.start_queue(&queue, None, false);
 
     let big = Bytes::from(vec![7u8; 100 * 1024]);
     let id0 = mem.enqueue(&queue, big.clone());
@@ -582,7 +582,10 @@ async fn test_bounded_cache_drops_old_unacked_and_falls_back() {
     let miss = mem
         .read_full(&queue, id0.clone(), newest.clone(), 1, &tx2)
         .await;
-    assert!(!miss.success, "evicted entry should miss memory and fall back to file");
+    assert!(
+        !miss.success,
+        "evicted entry should miss memory and fall back to file"
+    );
 }
 
 #[tokio::test]
@@ -597,8 +600,8 @@ async fn every_queue_holds_a_disjoint_range_of_the_one_arena() {
 
     let a = resolver.resolve("qa");
     let b = resolver.resolve("qb");
-    mem.start_queue(&a, None);
-    mem.start_queue(&b, None);
+    mem.start_queue(&a, None, false);
+    mem.start_queue(&b, None, false);
 
     let ra = mem.pool(&a).unwrap().slot_range().expect("a pooled queue");
     let rb = mem.pool(&b).unwrap().slot_range().expect("a pooled queue");
@@ -634,7 +637,7 @@ async fn a_busy_queue_takes_a_page_rather_than_waiting_for_the_disk() {
     let mem = Arc::new(MemStore::with_page_size(16 * 1024, 1024));
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("busy");
-    mem.start_queue(&queue, None);
+    mem.start_queue(&queue, None, false);
 
     let pool = mem.pool(&queue).unwrap();
     let started_with = pool.page_count();
@@ -680,7 +683,7 @@ async fn the_page_budget_is_a_total_across_queues() {
     let mut total_pages = 0usize;
     for i in 0..queues {
         let queue = resolver.resolve(&format!("q{i}"));
-        mem.start_queue(&queue, None);
+        mem.start_queue(&queue, None, false);
         total_pages += mem
             .pool(&queue)
             .expect("a started queue has a pool")
@@ -699,3 +702,55 @@ async fn the_page_budget_is_a_total_across_queues() {
         "every queue must get at least its floor, got {total_pages} for {queues} queues"
     );
 }
+
+#[tokio::test]
+async fn a_read_only_queue_does_not_reserve_a_writers_share() {
+    // A queue is started read-only by any client that merely names a path, so
+    // a writer's share here is memory an unauthenticated caller can reserve and
+    // never release. Nothing appends to such a queue, so the share sits idle.
+    let mem = Arc::new(MemStore::with_page_size(64 * 1024, 1024));
+    let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
+
+    let reader = resolver.resolve("reader");
+    let writer = resolver.resolve("writer");
+    mem.start_queue(&reader, None, true);
+    mem.start_queue(&writer, None, false);
+
+    let read_pages = mem.pool(&reader).unwrap().page_count();
+    let write_pages = mem.pool(&writer).unwrap().page_count();
+
+    assert_eq!(read_pages, 2, "a reader should start at the floor");
+    assert!(
+        write_pages > read_pages,
+        "a writer should still get a share: {write_pages} against the reader's {read_pages}"
+    );
+}
+
+#[tokio::test]
+async fn a_promoted_reader_grows_rather_than_keeping_its_floor() {
+    // The other half of starting a reader small: being wrong about the mode has
+    // to be cheap. A queue that starts read-only and is then written to takes
+    // what it needs from the arena on its first busy moment.
+    let mem = Arc::new(MemStore::with_page_size(16 * 1024, 1024));
+    let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
+    let queue = resolver.resolve("promoted");
+    mem.start_queue(&queue, None, true);
+
+    let pool = mem.pool(&queue).unwrap();
+    let started_with = pool.page_count();
+    assert_eq!(started_with, 2);
+
+    // Waiting is only allowed once a writer is draining, and this test never
+    // starts one: if the pool chose to wait rather than grow it would hang.
+    pool.set_drainer();
+    let record = Bytes::from(vec![3u8; 400]);
+    for id in 0..12u64 {
+        pool.place(id, &record).await.expect("fits a page");
+    }
+
+    assert!(
+        pool.page_count() > started_with,
+        "a promoted reader should grow into the arena, still {started_with} pages"
+    );
+}
+

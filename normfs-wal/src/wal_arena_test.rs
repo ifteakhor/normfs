@@ -210,7 +210,11 @@ fn two_rings_trade_a_page_without_the_total_moving() {
     let held = ring_b.min_essential_id();
     drop(ring_b);
     arena.release(b, RING_B, held);
-    assert_eq!(arena.free_pages(), 3, "B's two pages plus the spare above it");
+    assert_eq!(
+        arena.free_pages(),
+        3,
+        "B's two pages plus the spare above it"
+    );
 
     // Now A can reach them, one slot at a time.
     assert!(ring_a.grow());
@@ -244,7 +248,10 @@ fn a_taken_slot_does_not_answer_with_its_last_holders_records() {
     );
 
     let mut ring_b = WalRing::in_arena(&arena, b, RING_B, 500);
-    assert!(matches!(ring_b.append(b"from-b"), AppendOutcome::Cached(500)));
+    assert!(matches!(
+        ring_b.append(b"from-b"),
+        AppendOutcome::Cached(500)
+    ));
     let held = ring_b.next_entry_id();
     ring_b.set_essential(held);
     drop(ring_b);

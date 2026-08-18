@@ -744,7 +744,7 @@ impl NormFS {
 
         // Started first: the writer is handed this queue's page pool, so the
         // pool has to exist before it.
-        self.mem.start_queue(queue, last_entry_id.clone());
+        self.mem.start_queue(queue, last_entry_id.clone(), mode.readonly);
 
         if !mode.readonly {
             let queue_config = self.get_config_for_queue(queue);

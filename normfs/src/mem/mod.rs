@@ -130,7 +130,9 @@ impl MemQueue {
         label: &QueueId,
     ) -> Self {
         let page_size = arena.page_size();
-        let first_entry_id = last_id.as_ref().map_or(0, |id| id_to_u64(id).wrapping_add(1));
+        let first_entry_id = last_id
+            .as_ref()
+            .map_or(0, |id| id_to_u64(id).wrapping_add(1));
         let want = pages.clamp(MEM_MIN_PAGES_PER_QUEUE, MEM_MAX_PAGES);
 
         let reserved = arena
@@ -957,15 +959,34 @@ impl MemStore {
         inner.pool.clone()
     }
 
-    pub fn start_queue(&self, queue: &QueueId, last_id: Option<UintN>) {
+    /// Starts a queue, taking its pages from the shared arena.
+    ///
+    /// A read-only queue starts at the floor rather than at a writer's share.
+    /// Nothing appends to it, so the share would sit idle for the life of the
+    /// process — and a queue is started read-only by any client that merely
+    /// *names* a path, which is what made the share an unauthenticated way to
+    /// reserve 16 MiB. Being wrong about it is cheap now: the range grows into
+    /// the arena on demand, so a queue promoted to writing takes what it needs
+    /// on its first busy moment instead of holding it in advance.
+    pub fn start_queue(&self, queue: &QueueId, last_id: Option<UintN>, readonly: bool) {
         let mut queues = self.queues.write().unwrap();
         if !queues.contains_key(queue) {
             // Pages come out of the one arena, so the total is bounded by the
             // setting however many queues start. It used to be the setting
             // divided by the queue count at this moment, which bounded nothing.
-            let want = pages_for_new_queue(self.arena.free_pages(), self.arena.page_count());
+            let want = if readonly {
+                MEM_MIN_PAGES_PER_QUEUE
+            } else {
+                pages_for_new_queue(self.arena.free_pages(), self.arena.page_count())
+            };
             let ring_id = self.next_ring_id.fetch_add(1, Ordering::Relaxed);
-            let new_queue = Arc::new(MemQueue::new(last_id.clone(), &self.arena, ring_id, want, queue));
+            let new_queue = Arc::new(MemQueue::new(
+                last_id.clone(),
+                &self.arena,
+                ring_id,
+                want,
+                queue,
+            ));
             log::debug!(target: "normfs-mem",
                 "Starting queue '{}' with last_id: {:?}, {} pages ({} KiB) from the shared arena \
                  ({} of {} still free)",
