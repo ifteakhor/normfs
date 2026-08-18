@@ -77,3 +77,7 @@ harness = false
 name = "normfs-server"
 path = "src/bin/normfs-server.rs"
 required-features = ["server-bin"]
+
+[[bench]]
+name = "slow_reader_benchmark"
+harness = false
