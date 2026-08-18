@@ -1009,13 +1009,10 @@ impl PagePool {
     /// a page ends, so this is a filter rather than a cut: nothing has to be
     /// split, and there is no straddling case left to detect.
     ///
-    /// Older epochs are taken too, and that is deliberate. A page of an earlier
-    /// file is normally written out long before its writer closes, so it is
-    /// already past its cursor and skipped here. One arrives only when that
-    /// file's last flush failed outright, and then the choice is between this
-    /// file and no file at all: nothing else will ever ask for that epoch
-    /// again, and the ring will reuse the page as soon as a later fsync moves
-    /// the watermark past it. Handing it to the open file keeps the bytes.
+    /// A run of a closed file is skipped and logged rather than taken.
+    /// Absorbing it into this file would put its records under this file's
+    /// `num_entries_before`, renumbering every record after them; a gap is at
+    /// least visible to a reader, where a silent renumbering is not.
     ///
     /// ## Why the handover bound
     ///
@@ -1072,13 +1069,17 @@ impl PagePool {
             }
 
             if inner.page_epoch[k] < epoch {
+                // Skipped, not absorbed: this file's header does not account
+                // for them, so writing them here renumbers every later entry.
+                // A gap is at least visible to a reader.
                 log::error!(
                     target: "normfs-wal",
                     "page {k} still holds unwritten entries ..={last_entry_id} for file {}, \
-                     which is already closed: its last flush did not complete, so they are \
-                     being written into file {epoch} instead of being lost",
+                     which is already closed: its last flush did not complete and these \
+                     records reach no file",
                     inner.page_epoch[k],
                 );
+                continue;
             }
             out.push((
                 PendingWrite {
@@ -1101,10 +1102,10 @@ impl PagePool {
                 log::error!(
                     target: "normfs-wal",
                     "record {entry_id} is still unwritten for file {}, which is already \
-                     closed: its last flush did not complete, so it is being written into \
-                     file {epoch} instead of being lost",
+                     closed: its last flush did not complete and the record reaches no file",
                     held.epoch,
                 );
+                continue;
             }
             out.push((
                 PendingWrite {

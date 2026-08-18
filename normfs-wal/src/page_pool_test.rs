@@ -503,14 +503,14 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     );
 }
 
-/// An unwritten page from a closed file goes to the next file, not nowhere.
+/// A run left unwritten by a closed file is never absorbed into the next one.
 ///
-/// `take_pending` filters on epoch, and filtering on exact equality loses these
-/// outright: no writer for a closed file is ever constructed again, so nothing
-/// asks for that epoch, while the ring reuses the page as soon as a later fsync
-/// moves the watermark past it. The records were acked and end up in no file.
+/// Taking it would put its records under the open file's `num_entries_before`,
+/// which renumbers every record after them. V1 stores no ids, so nothing would
+/// ever detect it. Leaving the gap loses the same records but leaves a hole a
+/// reader can see, and says so in the log.
 #[tokio::test]
-async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
+async fn a_closed_files_run_is_not_absorbed_by_the_next_file() {
     let pool = armed_pool();
 
     // File 0 takes a record and never writes it: no commit_written, standing in
@@ -539,9 +539,10 @@ async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
     let taken = pool.take_pending(epoch);
     let ids: Vec<u64> = taken.iter().map(|(w, _)| w.first_entry_id).collect();
     assert!(
-        ids.contains(&id0),
-        "the open file must pick up the run the closed file left unwritten on page \
-         {stranded_page}, or entry {id0} is in no file at all: took runs from {ids:?}"
+        !ids.contains(&id0),
+        "the open file must not absorb the run the closed file left unwritten on page \
+         {stranded_page}: its header does not account for those records, so taking them \
+         renumbers everything after them. Took runs from {ids:?}"
     );
 }
 
