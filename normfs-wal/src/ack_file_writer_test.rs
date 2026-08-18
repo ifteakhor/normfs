@@ -378,3 +378,42 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
         at(third)
     );
 }
+
+/// After a restore, the next write lands exactly at the known-good length:
+/// no torn prefix left behind, and no hole from a cursor past the truncation.
+#[tokio::test]
+async fn a_restore_cuts_back_to_the_known_good_length() {
+    use crate::ack_file_writer::FileTail;
+    use tokio::io::AsyncWriteExt;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tail.wal");
+    let file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&path)
+        .await
+        .unwrap();
+    let mut tail = FileTail {
+        file,
+        flushed_len: 0,
+    };
+
+    tail.file.write_all(b"GOOD").await.unwrap();
+    tail.file.flush().await.unwrap();
+    tail.flushed_len = 4;
+
+    // A torn attempt: bytes reach the file, but the batch fails part-way.
+    tail.file.write_all(b"TORN-PREFIX").await.unwrap();
+    tail.file.flush().await.unwrap();
+    tail.restore(&path).await;
+
+    tail.file.write_all(b"RETRY").await.unwrap();
+    tail.file.flush().await.unwrap();
+
+    let content = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(
+        content, b"GOODRETRY",
+        "the retry must start at the known-good length, with the torn prefix gone"
+    );
+}
