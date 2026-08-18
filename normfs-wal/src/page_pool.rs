@@ -229,6 +229,13 @@ struct Inner {
     unwritten: usize,
 }
 
+fn offset_after(ring: &WalRing, page_index: usize, index: u32) -> usize {
+    (0..=index)
+        .filter_map(|j| ring.record(page_index, j))
+        .filter_map(|r| encoded_len_of(r.len()))
+        .sum::<u64>() as usize
+}
+
 /// What a record of this length costs the file: framing and CRC, not payload.
 ///
 /// `None` for a record wider than the V1 frame, which is a record no file can
@@ -635,14 +642,9 @@ impl PagePool {
     /// a page ends, so this is a filter rather than a cut: nothing has to be
     /// split, and there is no straddling case left to detect.
     ///
-    /// Older epochs are taken too, and that is deliberate. A page of an earlier
-    /// file is normally written out long before its writer closes, so it is
-    /// already past its cursor and skipped here. One arrives only when that
-    /// file's last flush failed outright, and then the choice is between this
-    /// file and no file at all: nothing else will ever ask for that epoch
-    /// again, and the ring will reuse the page as soon as a later fsync moves
-    /// the watermark past it. Handing it to the open file keeps the bytes.
-    pub fn take_pending(&self, epoch: u64) -> Vec<(PendingWrite, Vec<u8>)> {
+    /// A page of a closed file is skipped and logged, not absorbed: taking it
+    /// would renumber every record after it, and a gap is at least visible.
+    pub fn take_pending(&self, epoch: u64, accepted_through: Option<u64>) -> Vec<(PendingWrite, Vec<u8>)> {
         let inner = self.inner.lock().unwrap();
         let count = inner.ring.page_count();
         let mut out: Vec<(PendingWrite, Vec<u8>)> = Vec::new();
@@ -653,27 +655,45 @@ impl PagePool {
             if from >= used || inner.ring.page_len(k) == 0 {
                 continue;
             }
-            let Some(last_entry_id) = inner.ring.page_last_entry_id(k) else {
+            let (Some(first_entry_id), Some(last_entry_id)) = (
+                inner.ring.page_first_entry_id(k),
+                inner.ring.page_last_entry_id(k),
+            ) else {
                 continue;
             };
-            if inner.page_epoch[k] > epoch {
+            if inner.page_epoch[k] != epoch {
+                if inner.page_epoch[k] < epoch {
+                    log::error!(
+                        target: "normfs-wal",
+                        "page {k} still holds unwritten entries ..={last_entry_id} for file {}, \
+                         which is already closed: its last flush did not complete and these \
+                         records reach no file",
+                        inner.page_epoch[k],
+                    );
+                }
                 continue;
             }
-            if inner.page_epoch[k] < epoch {
-                log::error!(
-                    target: "normfs-wal",
-                    "page {k} still holds unwritten entries ..={last_entry_id} for file {}, \
-                     which is already closed: its last flush did not complete, so they are \
-                     being written into file {epoch} instead of being lost",
-                    inner.page_epoch[k],
-                );
+
+            // Nothing past what the writer has accepted: a record it has not
+            // reached may be one it will buffer, and pages written first renumber it.
+            let (to, last_entry_id) = match accepted_through {
+                None => continue,
+                Some(ceiling) if ceiling < first_entry_id => continue,
+                Some(ceiling) if ceiling < last_entry_id => {
+                    let index = (ceiling - first_entry_id) as u32;
+                    (offset_after(&inner.ring, k, index), ceiling)
+                }
+                Some(_) => (used, last_entry_id),
+            };
+            if to <= from {
+                continue;
             }
-            let bytes = inner.ring.page_bytes(k)[from..used].to_vec();
+            let bytes = inner.ring.page_bytes(k)[from..to].to_vec();
             out.push((
                 PendingWrite {
                     page_index: k,
                     from,
-                    to: used,
+                    to,
                     last_entry_id,
                 },
                 bytes,

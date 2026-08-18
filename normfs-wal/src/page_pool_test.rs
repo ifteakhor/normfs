@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::page_pool::{PagePool, Placement, PoolError, RotateHint};
+use crate::page_pool::{PagePool, PendingWrite, Placement, PoolError, RotateHint};
 use crate::wal_ring_v1::AppendOutcome;
 
 // Two small pages, so the pool fills after a handful of records. A 16 B record
@@ -127,7 +127,7 @@ async fn pending_yields_each_byte_once_and_in_id_order() {
     let pool = pool();
     fill(&pool);
 
-    let first = pool.take_pending(0);
+    let first = take_all(&pool, 0);
     assert!(!first.is_empty(), "appended records should be pending a write");
     let total: usize = first.iter().map(|(_, b)| b.len()).sum();
     assert!(total > 0);
@@ -140,7 +140,7 @@ async fn pending_yields_each_byte_once_and_in_id_order() {
 
     // Not written yet, so it must come back: an untried write must not lose
     // the run.
-    assert_eq!(pool.take_pending(0), first, "an uncommitted run must stay pending");
+    assert_eq!(take_all(&pool, 0), first, "an uncommitted run must stay pending");
 
     // The writer commits each run once it is actually on disk.
     for (w, _) in &first {
@@ -149,12 +149,12 @@ async fn pending_yields_each_byte_once_and_in_id_order() {
 
     // Committed once: a second call has nothing to give, so the writer cannot
     // append the same bytes to the file twice.
-    assert!(pool.take_pending(0).is_empty());
+    assert!(take_all(&pool, 0).is_empty());
 
     // A further record produces only the new bytes, not the whole page again.
     pool.mark_durable(pool.next_entry_id());
     assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
-    let second = pool.take_pending(0);
+    let second = take_all(&pool, 0);
     let second_total: usize = second.iter().map(|(_, b)| b.len()).sum();
     assert!(
         second_total < total,
@@ -202,6 +202,10 @@ fn armed_pool() -> Arc<PagePool> {
     let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
     pool.arm_file_fill(HEADER + record_charge(), HEADER);
     pool
+}
+
+fn take_all(pool: &PagePool, epoch: u64) -> Vec<(PendingWrite, Vec<u8>)> {
+    pool.take_pending(epoch, Some(u64::MAX))
 }
 
 /// Places the next record and frees its page, so the pool never blocks.
@@ -290,7 +294,7 @@ async fn a_flush_takes_only_its_own_files_pages() {
     }
 
     for epoch in 0..=pool.epoch() {
-        let taken = pool.take_pending(epoch);
+        let taken = take_all(&pool, epoch);
         let mut ids: Vec<u64> = taken.iter().map(|(w, _)| w.last_entry_id).collect();
         ids.sort_unstable();
         for id in &ids {
@@ -306,7 +310,7 @@ async fn a_flush_takes_only_its_own_files_pages() {
             pool.commit_written(w.page_index, w.to);
         }
         assert!(
-            pool.take_pending(epoch).is_empty(),
+            take_all(&pool, epoch).is_empty(),
             "nothing may be handed out twice"
         );
     }
@@ -386,7 +390,7 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     let pool = pool();
     fill(&pool);
     assert!(
-        !pool.take_pending(0).is_empty() || pool.next_entry_id() > 0,
+        !take_all(&pool, 0).is_empty() || pool.next_entry_id() > 0,
         "the pool should be holding records before the writer arms"
     );
 
@@ -394,7 +398,7 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     pool.mark_durable(pool.next_entry_id());
     assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
     assert!(
-        !pool.take_pending(0).is_empty(),
+        !take_all(&pool, 0).is_empty(),
         "that run is pending a write"
     );
     assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
@@ -402,7 +406,7 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     // A writer starts now. Whatever is already there is not its to write.
     pool.arm_file_fill(1 << 20, 16);
     assert!(
-        pool.take_pending(0).is_empty(),
+        take_all(&pool, 0).is_empty(),
         "a newly armed writer must not adopt records it has no header entry for"
     );
 
@@ -410,7 +414,7 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     let id = pool.next_entry_id();
     pool.mark_durable(id);
     pool.place(id, &RECORD).await.unwrap();
-    let pending = pool.take_pending(0);
+    let pending = take_all(&pool, 0);
     assert_eq!(
         pending.iter().map(|(w, _)| w.last_entry_id).max(),
         Some(id),
@@ -418,14 +422,8 @@ async fn arming_a_writer_does_not_adopt_what_the_pool_already_held() {
     );
 }
 
-/// An unwritten page from a closed file goes to the next file, not nowhere.
-///
-/// `take_pending` filters on epoch, and filtering on exact equality loses these
-/// outright: no writer for a closed file is ever constructed again, so nothing
-/// asks for that epoch, while the ring reuses the page as soon as a later fsync
-/// moves the watermark past it. The records were acked and end up in no file.
 #[tokio::test]
-async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
+async fn a_closed_files_page_is_not_absorbed_by_the_next_file() {
     let pool = armed_pool();
 
     // File 0 takes a record and never writes it: no commit_written, standing in
@@ -434,14 +432,13 @@ async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
     pool.place(id0, &RECORD).await.unwrap();
     let stranded_page = pool.with_ring(|r| r.active_page());
     assert!(
-        pool.take_pending(0)
+        take_all(&pool, 0)
             .iter()
             .any(|(w, _)| w.page_index == stranded_page),
-        "file 0 has a run pending on page {stranded_page}, and this test is about it \
-         never being written"
+        "file 0 has a run pending on page {stranded_page}, and this test is about what \
+         happens to it once file 0 closes"
     );
 
-    // Enough records to rotate, so file 0 is closed and file 1 is open.
     pool.mark_durable(id0);
     let mut rotated = false;
     while !rotated {
@@ -450,12 +447,44 @@ async fn a_page_left_unwritten_by_a_closed_file_still_reaches_one() {
     let epoch = pool.epoch();
     assert!(epoch > 0);
 
-    let taken = pool.take_pending(epoch);
-    let pages: Vec<usize> = taken.iter().map(|(w, _)| w.page_index).collect();
+    let pages: Vec<usize> = take_all(&pool, epoch)
+        .iter()
+        .map(|(w, _)| w.page_index)
+        .collect();
     assert!(
-        pages.contains(&stranded_page),
-        "the open file must pick up page {stranded_page}, which the closed file left \
-         unwritten, or entry {id0} is in no file at all: took pages {pages:?}"
+        !pages.contains(&stranded_page),
+        "page {stranded_page} belongs to a closed file; writing it into file {epoch} would \
+         renumber every record after it: took pages {pages:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_flush_stops_at_what_the_writer_has_accepted() {
+    let pool = Arc::new(PagePool::new(4, PAGE_SIZE, 0));
+    pool.arm_file_fill(1 << 20, HEADER);
+
+    for _ in 0..3 {
+        let id = pool.next_entry_id();
+        pool.place(id, &RECORD).await.unwrap();
+    }
+
+    assert!(
+        pool.take_pending(0, None).is_empty(),
+        "a file that has been handed nothing may write nothing"
+    );
+
+    let taken = pool.take_pending(0, Some(1));
+    let highest = taken.iter().map(|(w, _)| w.last_entry_id).max();
+    assert_eq!(
+        highest,
+        Some(1),
+        "a flush must stop at entry 1, the last one the writer has accepted"
+    );
+    let bytes: usize = taken.iter().map(|(_, b)| b.len()).sum();
+    assert_eq!(
+        bytes,
+        (record_charge() * 2) as usize,
+        "and take exactly the two accepted entries, not the whole page"
     );
 }
 

@@ -255,17 +255,14 @@ async fn pages_reach_the_file_before_the_watermark_moves() {
     }
     let appended_through = pool.next_entry_id();
 
-    // A flush takes no pages until this file has been handed a record, so the
-    // record that opens a file cannot be overtaken by the pages behind it.
-    // This is that handover, and it is the same call the WAL writer makes.
-    writer
-        .write_maybe_pooled(
-            QueueIdResolver::new("test_instance").resolve("paged"),
-            UintN::from(0u64),
-            Bytes::new(),
-            true,
-        )
-        .await;
+    // A flush writes nothing past the last id handed over, so these are the
+    // handovers the WAL writer makes.
+    let queue_id = QueueIdResolver::new("test_instance").resolve("paged");
+    for id in 0..appended_through {
+        writer
+            .write_maybe_pooled(queue_id.clone(), UintN::from(id), Bytes::new(), true)
+            .await;
+    }
 
     // The flush is on a timer; wait for the watermark rather than for a
     // duration, so the test asserts the ordering instead of racing it.
@@ -291,5 +288,92 @@ async fn pages_reach_the_file_before_the_watermark_moves() {
     assert_eq!(
         occurrences, 3,
         "every appended record should appear exactly once in the file"
+    );
+}
+
+#[tokio::test]
+async fn a_buffered_record_is_not_overtaken_by_the_pages_behind_it() {
+    use crate::page_pool::PagePool;
+    use crate::wal_ring_v1::AppendOutcome;
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("order.wal");
+    let (ack_sender, _ack_receiver) = mpsc::unbounded_channel();
+
+    let pool = Arc::new(PagePool::new(4, 4096, 0));
+    let settings = AckFileWriterSettings {
+        max_buffer_size: 1024 * 1024,
+        max_file_size: 10 * 1024 * 1024,
+        write_interval: Duration::from_millis(10),
+        fsync: true,
+    };
+
+    let header = Bytes::from_static(b"HDR!");
+    let mut writer = AckFileWriter::new(
+        &file_path,
+        settings,
+        ack_sender,
+        header.clone(),
+        Some(Arc::clone(&pool)),
+        0,
+    )
+    .await
+    .unwrap();
+
+    let queue_id = QueueIdResolver::new("test_instance").resolve("order");
+    let first = b"AAAA-entry-zero";
+    let oversized = b"BBBB-entry-one-too-large-for-a-page";
+    let third = b"CCCC-entry-two";
+
+    assert!(matches!(pool.try_append(first), AppendOutcome::Cached(_)));
+    writer
+        .write_maybe_pooled(queue_id.clone(), UintN::from(0u64), Bytes::new(), true)
+        .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while pool.durable_before() < 1 {
+        assert!(tokio::time::Instant::now() < deadline, "entry 0 never reached the file");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Entry 1 is too large for a page, so the pool steps over it and the writer
+    // will buffer it. Entry 2 lands in a page while entry 1 is still on its way.
+    pool.skip_to(2).await;
+    assert!(matches!(pool.try_append(third), AppendOutcome::Cached(_)));
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    writer
+        .write_maybe_pooled(
+            queue_id.clone(),
+            UintN::from(1u64),
+            Bytes::copy_from_slice(oversized),
+            false,
+        )
+        .await;
+    writer
+        .write_maybe_pooled(queue_id.clone(), UintN::from(2u64), Bytes::new(), true)
+        .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while pool.durable_before() < 3 {
+        assert!(tokio::time::Instant::now() < deadline, "entry 2 never reached the file");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    writer.close().await.unwrap();
+
+    let content = read_file_content(&file_path).await;
+    let at = |needle: &[u8]| {
+        content
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .unwrap_or_else(|| panic!("{} missing from the file", String::from_utf8_lossy(needle)))
+    };
+    assert!(
+        at(first) < at(oversized) && at(oversized) < at(third),
+        "records must reach the file in id order, got 0 at {}, 1 at {}, 2 at {}",
+        at(first),
+        at(oversized),
+        at(third)
     );
 }
