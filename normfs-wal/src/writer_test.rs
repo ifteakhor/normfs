@@ -43,6 +43,7 @@ async fn test_enqueue_and_read() {
     let settings = WalSettings {
         max_file_size: 1024,
         write_buffer_size: 128,
+        write_interval: std::time::Duration::from_millis(50),
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
@@ -113,6 +114,7 @@ async fn test_enqueue_batch_and_read() {
     let settings = WalSettings {
         max_file_size: 1024,
         write_buffer_size: 128,
+        write_interval: std::time::Duration::from_millis(50),
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
@@ -181,6 +183,7 @@ async fn test_size_based_rotation() {
     let settings = WalSettings {
         max_file_size: 128,
         write_buffer_size: 64,
+        write_interval: std::time::Duration::from_millis(50),
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
@@ -235,6 +238,7 @@ async fn test_v1_enqueue_read_and_scan() {
     let settings = WalSettings {
         max_file_size: 4096,
         write_buffer_size: 128,
+        write_interval: std::time::Duration::from_millis(50),
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
@@ -343,6 +347,7 @@ async fn test_v1_truncated_tail_is_dropped() {
     let settings = WalSettings {
         max_file_size: 4096,
         write_buffer_size: 128,
+        write_interval: std::time::Duration::from_millis(50),
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
@@ -490,6 +495,7 @@ async fn test_mixed_v0_and_v1_files_in_one_queue() {
     let settings = WalSettings {
         max_file_size: 4096,
         write_buffer_size: 128,
+        write_interval: std::time::Duration::from_millis(50),
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
@@ -609,6 +615,7 @@ async fn test_v1_rotates_on_file_size_not_field_width() {
     let settings = WalSettings {
         max_file_size: 4096, // far above the total written below
         write_buffer_size: 128,
+        write_interval: std::time::Duration::from_millis(50),
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,

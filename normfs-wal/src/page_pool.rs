@@ -418,6 +418,14 @@ fn append_locked(inner: &mut Inner, record: &[u8]) -> (AppendOutcome, bool) {
         let active = inner.ring.active_page();
         inner.written[active] = 0;
     }
+    // Counted here rather than at the caller, because this is the one place
+    // bytes enter a page: `try_append` reaches it too, and a count kept only on
+    // the `place` path would tell an idle writer there was nothing to flush.
+    if matches!(outcome, AppendOutcome::Cached(_))
+        && let Some(entry_len) = encoded_len_of(record.len())
+    {
+        inner.unwritten = inner.unwritten.saturating_add(entry_len as usize);
+    }
     (outcome, rotated)
 }
 
@@ -790,7 +798,6 @@ impl PagePool {
             let (outcome, opened_page) = append_locked(&mut inner, record);
             match outcome {
                 AppendOutcome::Cached(_) => {
-                    inner.unwritten = inner.unwritten.saturating_add(entry_len as usize);
                     over_watermark = inner.unwritten >= self.flush_watermark;
                     charge_paged(&mut inner, entry_len, opened_page)
                 }
@@ -1178,6 +1185,17 @@ impl PagePool {
             }
         }
         self.space.notify_waiters();
+    }
+
+    /// Whether anything is waiting to be written.
+    ///
+    /// The writer's timer asks this before taking the pool lock and walking
+    /// every page: a queue written to once a week is idle for the whole of that
+    /// week, and the tick is what puts its one record on disk, so the tick has
+    /// to stay cheap rather than rare.
+    pub fn has_pending(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.unwritten > 0 || inner.oversize.values().any(|o| !o.written)
     }
 
     /// The id the next appended record will get.

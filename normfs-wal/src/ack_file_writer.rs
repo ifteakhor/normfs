@@ -335,11 +335,29 @@ async fn writer_task(
             _ = buffer_full_notify.notified() => {
                 flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
             }
+            // The timer is what a queue nobody writes to often depends on:
+            // nothing else on this path can start a flush, so one record on an
+            // otherwise silent queue reaches disk a write_interval later rather
+            // than when the buffer or the pool fills. It is therefore left
+            // free-running rather than armed by a write -- and kept cheap
+            // instead, by asking whether there is anything to do before taking
+            // the pool lock and walking every page.
             _ = interval.tick() => {
-                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
+                if has_pending(&state, &pool).await {
+                    flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
+                }
             }
         }
     }
+}
+
+/// Whether either store owes the file bytes. Both are cheap: a length and a
+/// counter.
+async fn has_pending(state: &Arc<Mutex<WriterState>>, pool: &Option<Arc<PagePool>>) -> bool {
+    if !state.lock().await.buffer.is_empty() {
+        return true;
+    }
+    pool.as_ref().is_some_and(|p| p.has_pending())
 }
 
 /// Sends the flush to whichever holds the unwritten bytes: the pool if this
