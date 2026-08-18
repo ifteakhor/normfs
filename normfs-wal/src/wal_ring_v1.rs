@@ -158,6 +158,10 @@ pub struct WalRing {
     /// This ring's id in the shared arena's owner array. Meaningless — and
     /// never used — when the ring owns its pages.
     ring_id: u64,
+    /// The highest id whose bytes left the ring since [`WalRing::take_evicted`]
+    /// last ran. Rotation and shrink discard a page's contents; when lower ids
+    /// stay cached, memory must stop answering below the gap that leaves.
+    evicted_below: Option<u64>,
 }
 
 impl WalRing {
@@ -218,6 +222,7 @@ impl WalRing {
         }
 
         WalRing {
+            evicted_below: None,
             backing: Backing::Owned {
                 _arena: arena,
                 _pages: pages,
@@ -273,6 +278,7 @@ impl WalRing {
         ring.first_slot = range.first_slot;
 
         WalRing {
+            evicted_below: None,
             backing: Backing::Shared(Arc::clone(arena)),
             ring,
             page_size,
@@ -354,6 +360,11 @@ impl WalRing {
             return false;
         }
 
+        let page = self.page_ref(top);
+        if page.count > 0 {
+            let last = page.last_entry_id;
+            self.evicted_below = Some(self.evicted_below.map_or(last, |e| e.max(last)));
+        }
         unsafe { normfs_wal_ring_shrink(self.ring.as_mut(), self.ring_id) };
         true
     }
@@ -434,6 +445,11 @@ impl WalRing {
     /// as a raw pointer.
     fn rotate_into(&mut self, index: usize) {
         debug_assert!(index < self.ring.page_count, "rotate target out of range");
+        let page = self.page_ref(index);
+        if page.count > 0 {
+            let last = page.last_entry_id;
+            self.evicted_below = Some(self.evicted_below.map_or(last, |e| e.max(last)));
+        }
         debug_assert!(
             unsafe { normfs_wal_page_reusable(self.page(index), self.ring.min_essential_id) != 0 },
             "rotating into page {index}, which is pinned or holds records that are not yet durable"
@@ -493,6 +509,11 @@ impl WalRing {
         }
         unsafe { normfs_wal_ring_skip_entry(self.ring.as_mut()) };
         true
+    }
+
+    /// The highest id evicted by rotation or shrink since the last call.
+    pub fn take_evicted(&mut self) -> Option<u64> {
+        self.evicted_below.take()
     }
 
     /// Where entry `index` of page `page_index` begins, in that page's bytes.

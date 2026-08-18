@@ -1067,3 +1067,79 @@ async fn an_append_makes_progress_while_a_reader_holds_everything() {
     );
     assert_eq!(pool.next_entry_id(), ahead + 1);
 }
+
+/// Rotating past a pinned page must not leave memory claiming ids across the
+/// gap: the evicted page's ids sat above the pinned page's, and a read served
+/// around them would have a silent hole.
+#[tokio::test]
+async fn eviction_above_a_pinned_page_raises_the_cache_floor() {
+    let pool = Arc::new(PagePool::new(3, PAGE_SIZE, 0));
+
+    // Fill page 0 and pin it, so rotation can never take it.
+    let mut last_on_p0 = 0;
+    while pool.with_ring(|r| r.active_page()) == 0 {
+        last_on_p0 = pool.next_entry_id();
+        assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
+    }
+    let pinned = pool.pin_range(0, last_on_p0);
+    assert!(!pinned.is_empty());
+
+    // Everything durable, then keep appending until a non-empty page above the
+    // pinned one is rotated into.
+    let mut evicted_last = None;
+    loop {
+        pool.mark_durable(pool.next_entry_id());
+        let before: Vec<Option<(u64, u64)>> = pool.with_ring(|r| {
+            (0..r.page_count())
+                .map(|k| r.page_first_entry_id(k).zip(r.page_last_entry_id(k)))
+                .collect()
+        });
+        let active_before = pool.with_ring(|r| r.active_page());
+        assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Cached(_)));
+        let active_after = pool.with_ring(|r| r.active_page());
+        if active_after != active_before
+            && let Some((_, last)) = before[active_after]
+        {
+            evicted_last = Some(last);
+            break;
+        }
+    }
+    let evicted_last = evicted_last.expect("a rotation reused a non-empty page");
+
+    // The pinned page's ids are below the evicted range; serving them would
+    // serve a run with a hole where the evicted page was.
+    let floor = pool.min_cached_id();
+    assert!(
+        floor.is_none_or(|m| m > evicted_last),
+        "memory still answers from id {floor:?}, across the gap left by evicting \
+         ids ..={evicted_last} while the pinned page kept lower ones"
+    );
+    let served = pool.pin_range(0, evicted_last);
+    assert!(
+        served.is_empty(),
+        "a read below the eviction gap must go to the file, got ids {:?}",
+        served.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+    );
+}
+
+/// A request entirely below the cache floor returns empty rather than
+/// panicking on an inverted range.
+#[tokio::test]
+async fn a_read_below_the_cache_floor_returns_empty() {
+    let pool = Arc::new(PagePool::new(2, PAGE_SIZE, 0));
+    pool.arm_file_fill(1 << 20, HEADER);
+
+    // An oversized record raises the floor past itself once released.
+    let big = vec![0u8; PAGE_SIZE + 1];
+    let id = pool.next_entry_id();
+    pool.place(id, &big).await.unwrap();
+    pool.note_handed_over(id);
+    let pending = pool.take_pending(0);
+    for (w, _) in &pending {
+        pool.commit_written(w);
+    }
+    pool.mark_durable(id + 1);
+
+    assert!(pool.pin_range(0, id).is_empty());
+    assert!(pool.collect_range(0, id).is_empty());
+}

@@ -352,6 +352,14 @@ impl Inner {
         self.oversize_bytes = 0;
     }
 
+    /// Folds what rotation or shrink just evicted into the cache floor, so a
+    /// read can never be served across the gap an eviction leaves.
+    fn absorb_eviction(&mut self) {
+        if let Some(last) = self.ring.take_evicted() {
+            self.cache_floor = self.cache_floor.max(last.saturating_add(1));
+        }
+    }
+
     /// The lowest id memory can answer for, or `None` when it can answer for
     /// nothing.
     ///
@@ -439,6 +447,12 @@ fn charge_paged(inner: &mut Inner, entry_len: u64, opened_page: bool) -> Placeme
 /// Returns whether this append started a fresh page, which is where a file is
 /// allowed to end.
 fn append_locked(inner: &mut Inner, record: &[u8]) -> (AppendOutcome, bool) {
+    let out = append_locked_inner(inner, record);
+    inner.absorb_eviction();
+    out
+}
+
+fn append_locked_inner(inner: &mut Inner, record: &[u8]) -> (AppendOutcome, bool) {
     let before_page_id = inner.ring.next_page_id();
     let outcome = inner.ring.append(record);
     let rotated = inner.ring.next_page_id() != before_page_id;
@@ -804,6 +818,7 @@ impl PagePool {
                             if !inner.ring.skip_entry() {
                                 return Ok(None);
                             }
+                            inner.absorb_eviction();
                             let active = inner.ring.active_page();
                             inner.written[active] = 0;
                         }
@@ -886,6 +901,7 @@ impl PagePool {
         if !inner.ring.skip_entry() {
             return Ok(None);
         }
+        inner.absorb_eviction();
         let active = inner.ring.active_page();
         inner.written[active] = 0;
 
@@ -1203,6 +1219,9 @@ impl PagePool {
             while inner.ring.shrink(self.floor) {
                 released += 1;
             }
+            // A shrunk page can hold ids from the middle of the cached run;
+            // the floor rises past them so memory never serves across the gap.
+            inner.absorb_eviction();
             if released > 0 {
                 let pages = inner.ring.page_count();
                 inner.written.resize(pages, 0);
@@ -1269,6 +1288,10 @@ impl PagePool {
     pub fn collect_range(&self, start: u64, end: u64) -> Vec<(u64, Vec<u8>)> {
         let inner = self.inner.lock().unwrap();
         let start = start.max(inner.cache_floor);
+        // The floor can pass the whole request; an inverted BTreeMap range panics.
+        if start > end {
+            return Vec::new();
+        }
         let mut out = inner.ring.collect_range(start, end);
         for (&id, held) in inner.oversize.range(start..=end) {
             out.push((id, held.record().to_vec()));
@@ -1289,6 +1312,10 @@ impl PagePool {
         {
             let inner = self.inner.lock().unwrap();
             let start = start.max(inner.cache_floor);
+            // The floor can pass the whole request; an inverted BTreeMap range panics.
+            if start > end {
+                return Vec::new();
+            }
             let count = inner.ring.page_count();
 
             // An oversized record needs no pin: its bytes are a `Bytes` of the
