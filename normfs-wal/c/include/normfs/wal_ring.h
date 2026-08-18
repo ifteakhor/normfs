@@ -292,6 +292,15 @@ void normfs_wal_ring_init(struct normfs_wal_ring *ring,
  * clause -- a free page belongs to nobody and holds nothing anyone is owed.
  */
 
+/* This contract is the intended specification, but grow (like try_append) is
+ * verified by the WalRing Rust tests rather than WP. Three of its clauses --
+ * ring_layout, ring_pages_wf and ring_in_pool -- sit either side of a context
+ * cliff: asserting the case split the last two need proves both in
+ * milliseconds and puts layout out of reach, and leaving it out proves layout
+ * and loses them. Unlike shrink it carries no durability clause -- a free page
+ * belongs to nobody and holds nothing anyone is owed -- so what is unproved
+ * here is well-formedness, not the theorem. Its callee pool_take is proven,
+ * and so is shrink, which is the direction that can lose a record. */
 /*@ requires normfs_wal_ring_wf(ring);
     requires normfs_wal_ring_in_pool(ring, ring_id);
     requires ring_id != NORMFS_WAL_POOL_FREE;

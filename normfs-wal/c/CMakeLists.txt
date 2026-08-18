@@ -114,20 +114,35 @@ if(FRAMAC)
     # having it here is the difference between that theorem being a
     # specification and being a verdict.
     #
-    # grow and shrink are here for the same reason. A page moving between
-    # queues is the other way a record can leave the queue that accepted it,
-    # and shrink is where the durability theorem stands at that boundary, so
-    # leaving either unscheduled would make that clause a comment.
+    # shrink is here for the same reason. A page moving between queues is the
+    # other way a record can leave the queue that accepted it, and shrink is
+    # where the durability theorem stands at that boundary, so leaving it
+    # unscheduled would make that clause a comment.
     #
     # skip_entry likewise. It is the one place the id sequence moves without a
     # record behind it, and its ensures is what says no page's bytes move with
     # it -- unscheduled, that would be a comment rather than a check.
+    #
+    # grow is excluded, and unlike its neighbour it carries no durability
+    # clause: a free page belongs to nobody and holds nothing anyone is owed,
+    # so what it re-establishes is well-formedness and nothing more. Three of
+    # its clauses -- ring_layout, ring_pages_wf and ring_in_pool -- sit either
+    # side of a context cliff. Asserting the case split that pages_wf and
+    # in_pool need makes both go through in milliseconds and puts layout out of
+    # reach; leaving them out proves layout and loses the other two. A goal
+    # that depends on how much else is in scope is the same kind of
+    # not-a-proof as one that depends on machine load, and pinning it to
+    # whichever half happens to be green today would be worse than saying so.
+    #
+    # It stays covered by the WalRing Rust tests -- a ring grows into the free
+    # slot above it, will not grow into another ring's slot, and cannot grow at
+    # the top of the arena. Its callee pool_take is proven, and shrink, which
+    # is the direction that can lose a record, is proven here.
     set(NORMFS_WAL_RING_WP_FCTS
         normfs_wal_ring_init
         normfs_wal_ring_set_essential
         normfs_wal_ring_find_reusable
         normfs_wal_ring_rotate_to
-        normfs_wal_ring_grow
         normfs_wal_ring_shrink
         normfs_wal_ring_skip_entry
         normfs_wal_ring_seek)
