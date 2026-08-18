@@ -1215,15 +1215,22 @@ impl PagePool {
         self.space.notify_waiters();
     }
 
-    /// Whether anything is waiting to be written.
+    /// Whether the writer still owes the file work.
     ///
-    /// The writer's timer asks this before taking the pool lock and walking
-    /// every page: a queue written to once a week is idle for the whole of that
-    /// week, and the tick is what puts its one record on disk, so the tick has
-    /// to stay cheap rather than rare.
+    /// The timer asks this before taking the pool lock and walking every page:
+    /// a queue written to once a week is idle for the whole of that week, and
+    /// the tick is what puts its one record on disk, so the tick has to be
+    /// cheap rather than rare.
+    ///
+    /// "Not yet durable" rather than "not yet written", which is two scalars
+    /// and covers a case the narrower question does not: bytes that reached the
+    /// file but whose fsync failed are written, so a not-yet-written test would
+    /// report nothing to do and no later tick would ever retry the sync. The
+    /// watermark is what actually says the work is finished, because it is what
+    /// only moves once a sync has returned.
     pub fn has_pending(&self) -> bool {
         let inner = self.inner.lock().unwrap();
-        inner.unwritten > 0 || inner.oversize.values().any(|o| !o.written)
+        inner.ring.min_essential_id() < inner.ring.next_entry_id()
     }
 
     /// The id the next appended record will get.
