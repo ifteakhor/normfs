@@ -81,3 +81,7 @@ required-features = ["server-bin"]
 [[bench]]
 name = "slow_reader_benchmark"
 harness = false
+
+[[bench]]
+name = "multi_queue_benchmark"
+harness = false
