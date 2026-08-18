@@ -271,19 +271,18 @@ impl MemQueue {
 
     /// The body of an enqueue, with the append gate already held.
     async fn enqueue_gated(&self, data: Bytes) -> (UintN, Placement) {
-        let (id, pool, subscribers_data) = {
-            let mut inner = self.inner.write().unwrap();
+        // The id is not committed until the record is placed. This future can
+        // be dropped at the await below, and a cancelled enqueue must consume
+        // nothing: an id taken with no record behind it is a gap the pool
+        // would eventually re-seed over, discarding records it still holds.
+        // The append gate is held, so no other enqueue takes the id first.
+        let (id, pool) = {
+            let inner = self.inner.read().unwrap();
             let id = inner
                 .last_id
                 .as_ref()
                 .map_or(UintN::zero(), |id| id.increment());
-            let subscribers_data = if self.subscribers.lock().unwrap().is_empty() {
-                None
-            } else {
-                Some(data.clone())
-            };
-            inner.last_id = Some(id.clone());
-            (id, inner.pool.clone(), subscribers_data)
+            (id, inner.pool.clone())
         };
 
         // Waiting is only safe once the WAL writer drains this pool: the wait
@@ -292,6 +291,7 @@ impl MemQueue {
         // non-blocking cache behaviour, or a full pool would hang the caller
         // forever with nothing able to free it.
         let mut placement = Placement::legacy();
+        let mut cache = false;
         if let Some(pool) = pool {
             if pool.has_drainer() {
                 placement = match pool.place(id_to_u64(&id), &data).await {
@@ -314,10 +314,22 @@ impl MemQueue {
                     }
                 };
             } else {
-                let mut inner = self.inner.write().unwrap();
-                self.cache_append(&mut inner, id_to_u64(&id), &data);
+                cache = true;
             }
         }
+
+        let subscribers_data = {
+            let mut inner = self.inner.write().unwrap();
+            inner.last_id = Some(id.clone());
+            if cache {
+                self.cache_append(&mut inner, id_to_u64(&id), &data);
+            }
+            if self.subscribers.lock().unwrap().is_empty() {
+                None
+            } else {
+                Some(data.clone())
+            }
+        };
 
         log::debug!(target: "normfs-mem", "Enqueued entry - ID: {}, Data size: {} bytes", id, data.len());
 

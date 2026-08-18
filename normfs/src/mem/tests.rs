@@ -754,3 +754,57 @@ async fn a_promoted_reader_grows_rather_than_keeping_its_floor() {
     );
 }
 
+
+/// A cancelled enqueue consumes nothing: the id it would have taken goes to
+/// the next caller, so the pool never has to step over or renumber a gap.
+#[tokio::test]
+async fn a_cancelled_enqueue_leaves_no_gap_in_the_id_sequence() {
+    // Four pages in the whole arena, so growing runs out and the pool fills.
+    let mem = Arc::new(MemStore::new(1024 * 1024));
+    let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
+    let queue = resolver.resolve("cancel_queue");
+    mem.start_queue(&queue, None, false);
+
+    let pool = mem.pool(&queue).unwrap();
+    pool.set_drainer();
+    pool.arm_file_fill(1 << 20, 16);
+
+    let (first, _) = mem.enqueue_awaiting(&queue, Bytes::from_static(b"first")).await;
+
+    // Fill every page, so the next enqueue must wait -- and is then cancelled.
+    let block = Bytes::from(vec![0u8; 200 * 1024]);
+    for _ in 0..8 {
+        let placed = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            mem.enqueue_awaiting(&queue, block.clone()),
+        )
+        .await;
+        if placed.is_err() {
+            break;
+        }
+    }
+    let last_before = mem.get_last_id(&queue).flatten();
+    let cancelled = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        mem.enqueue_awaiting(&queue, block.clone()),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the pool should have been full");
+    assert_eq!(
+        mem.get_last_id(&queue).flatten(),
+        last_before,
+        "a cancelled enqueue must not consume an id"
+    );
+
+    // Free the pool; the next enqueue takes the id the cancelled one did not.
+    for (w, _) in pool.take_pending(0) {
+        pool.commit_written(&w);
+    }
+    pool.mark_durable(pool.next_entry_id());
+    let (next, _) = mem
+        .enqueue_awaiting(&queue, Bytes::from_static(b"after"))
+        .await;
+    let expected = last_before.map_or(0, |id| id.to_u64().unwrap() + 1);
+    assert_eq!(next.to_u64().unwrap(), expected, "ids must stay dense");
+    assert!(next.to_u64().unwrap() > first.to_u64().unwrap());
+}

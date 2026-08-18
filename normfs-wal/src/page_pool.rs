@@ -829,9 +829,15 @@ impl PagePool {
                         );
                     }
                     None => {
-                        // Every page pinned: nothing to append into either, so
-                        // wait.
-                        if !inner.ring.reinit(expected_id) {
+                        // Renumbering discards everything held, so it is only
+                        // for a pool with nothing to lose: everything durable
+                        // and every held record written. Anything less waits
+                        // for the disk instead -- a record accepted and not yet
+                        // written must never be discarded to catch up.
+                        let nothing_to_lose = (inner.ring.is_empty()
+                            || inner.ring.min_essential_id() >= inner.ring.next_entry_id())
+                            && inner.oversize.values().all(|o| o.written);
+                        if !nothing_to_lose || !inner.ring.reinit(expected_id) {
                             return Ok(None);
                         }
                         inner.forget_pages_and_oversize();

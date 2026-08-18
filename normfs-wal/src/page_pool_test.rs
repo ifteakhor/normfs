@@ -1143,3 +1143,44 @@ async fn a_read_below_the_cache_floor_returns_empty() {
     assert!(pool.pin_range(0, id).is_empty());
     assert!(pool.collect_range(0, id).is_empty());
 }
+
+/// A pool asked to jump past MAX_STEPPABLE_GAP waits for its records to reach
+/// disk instead of discarding them to catch up.
+#[tokio::test]
+async fn a_resync_waits_rather_than_discarding_unwritten_records() {
+    let pool = Arc::new(PagePool::new(2, PAGE_SIZE, 0));
+    pool.set_drainer();
+    pool.arm_file_fill(1 << 20, HEADER);
+
+    let id = pool.next_entry_id();
+    pool.place(id, &RECORD).await.unwrap();
+    pool.note_handed_over(id);
+
+    // Far past any steppable gap, with the record above not yet durable: the
+    // pool must wait, not renumber.
+    let far = id + 5_000;
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        pool.place(far, &RECORD),
+    )
+    .await;
+    assert!(waited.is_err(), "the pool renumbered past an unwritten record");
+    assert!(
+        pool.take_pending(0).iter().any(|(w, _)| w.first_entry_id == id),
+        "the unwritten record must still be held"
+    );
+
+    // Once everything is written and durable there is nothing to lose, and the
+    // same jump goes through.
+    for (w, _) in pool.take_pending(0) {
+        pool.commit_written(&w);
+    }
+    pool.mark_durable(id + 1);
+    let placed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        pool.place(far, &RECORD),
+    )
+    .await;
+    assert!(placed.is_ok_and(|r| r.is_ok()), "a drained pool must resync");
+    assert_eq!(pool.next_entry_id(), far + 1);
+}
