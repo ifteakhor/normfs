@@ -183,7 +183,17 @@ impl WalArena {
     }
 
     /// Who holds slot `k`, or [`POOL_FREE`].
+    ///
+    /// Takes the slot lock: every write to the owner array happens under it,
+    /// and an unlocked read beside those writes is a data race, not a stale
+    /// answer. Callers already holding the lock use [`WalArena::owner_at`].
     pub fn owner_of(&self, slot: usize) -> u64 {
+        let _slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        self.owner_at(slot)
+    }
+
+    /// As [`WalArena::owner_of`], for callers already under the slot lock.
+    pub(crate) fn owner_at(&self, slot: usize) -> u64 {
         assert!(slot < self.page_count, "slot {slot} is outside the arena");
         unsafe { *self.pool.owner.add(slot) }
     }
@@ -228,7 +238,7 @@ impl WalArena {
         }
 
         // Only leave headroom below if there is a range there to use it.
-        let has_neighbour_below = gap_start > 0 && self.owner_of(gap_start - 1) != POOL_FREE;
+        let has_neighbour_below = gap_start > 0 && self.owner_at(gap_start - 1) != POOL_FREE;
         let spare = gap_len - pages;
         let below = if has_neighbour_below { spare / 2 } else { 0 };
         let first_slot = gap_start + below;
@@ -279,14 +289,16 @@ impl WalArena {
     /// Any free slot, by the proven C scan. Used only for diagnostics — a ring
     /// can grow into the slot above it and nowhere else.
     pub fn any_free_slot(&self) -> Option<usize> {
+        let _slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let r = unsafe { normfs_wal_pool_find_free(self.pool_ptr(), 1) };
         (r.found != 0).then_some(r.index)
     }
 
     /// How many slots no ring holds.
     pub fn free_pages(&self) -> usize {
+        let _slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         (0..self.page_count)
-            .filter(|&k| self.owner_of(k) == POOL_FREE)
+            .filter(|&k| self.owner_at(k) == POOL_FREE)
             .count()
     }
 
@@ -309,7 +321,7 @@ impl WalArena {
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let mut held: HashMap<u64, usize> = HashMap::new();
         for k in 0..self.page_count {
-            let owner = self.owner_of(k);
+            let owner = self.owner_at(k);
             if owner != POOL_FREE {
                 *held.entry(owner).or_default() += 1;
             }
@@ -334,7 +346,7 @@ impl WalArena {
         let mut best: Option<(usize, usize)> = None;
         let mut k = 0usize;
         while k < self.page_count {
-            if self.owner_of(k) != POOL_FREE {
+            if self.owner_at(k) != POOL_FREE {
                 k += 1;
                 continue;
             }
@@ -351,7 +363,7 @@ impl WalArena {
     /// free.
     fn gap_at(&self, slot: usize) -> (usize, usize) {
         let mut end = slot;
-        while end < self.page_count && self.owner_of(end) == POOL_FREE {
+        while end < self.page_count && self.owner_at(end) == POOL_FREE {
             end += 1;
         }
         (slot, end - slot)

@@ -314,7 +314,7 @@ impl WalRing {
         let _slots = arena.lock_slots();
 
         let slot = self.ring.first_slot + self.ring.page_count;
-        if slot >= arena.page_count() || arena.owner_of(slot) != POOL_FREE {
+        if slot >= arena.page_count() || arena.owner_at(slot) != POOL_FREE {
             return false;
         }
 
