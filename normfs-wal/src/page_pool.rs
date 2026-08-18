@@ -107,8 +107,36 @@ impl std::fmt::Debug for PageGuard {
 /// indefinite wait with no explanation is not debuggable.
 const STALL_WARN_AFTER: Duration = Duration::from_secs(5);
 
-/// Pages a read may never pin, so the writer always has one to append into.
+/// The share of the pool reads may hold pinned at once, as a divisor: pages
+/// beyond `page_count / PIN_SHARE_DIVISOR` are copied out rather than borrowed.
+///
+/// A pin lasts as long as the payload, and a payload lives until the client has
+/// been sent it — through a 2048-deep read channel and a bounded response
+/// channel, and released only when the response is encoded onto the wire. So a
+/// client that stops reading its socket holds pages for as long as it likes.
+///
+/// The reserve used to be a single page. That is enough to prove the pool never
+/// deadlocks, and it was proved: an append always has somewhere to go. It is
+/// not enough to keep it *working*. With one page to append into, a queue
+/// advances one page per flush — 256 KiB per interval against otherwise
+/// unbounded throughput — and the cache degrades to nothing but the stalled
+/// reader's pages, so every other reader starts missing memory too. Half the
+/// pool is the smallest share that leaves the writer a working set rather than
+/// a single page.
+const PIN_SHARE_DIVISOR: usize = 2;
+
+/// Pages a read may never pin, whatever the share works out to, so the writer
+/// always has one to append into.
 const PIN_RESERVE: usize = 1;
+
+/// Payloads one `pin_range` may hand out borrowed rather than copied.
+///
+/// The page share bounds how much of the *pool* one reader can hold; this
+/// bounds how much of it a single call can claim in one go. `read_full`
+/// materialises the whole requested range before sending any of it, so without
+/// this one large read takes its share of the pool in a single step and holds
+/// it for the length of the send.
+const PIN_PAYLOADS_PER_READ: usize = 4096;
 
 /// How far ahead of the pool the caller's id may run before re-seeding.
 ///
@@ -1266,7 +1294,9 @@ impl PagePool {
                 .count();
             // Past this budget records are copied, not borrowed: a pin lasts as
             // long as the payload, and a pinned page is one no append can use.
-            let mut budget = count.saturating_sub(PIN_RESERVE).saturating_sub(pinned_now);
+            let share = (count / PIN_SHARE_DIVISOR).min(count.saturating_sub(PIN_RESERVE));
+            let mut budget = share.saturating_sub(pinned_now);
+            let active = inner.ring.active_page();
             let mut taking: Vec<bool> = vec![false; count];
 
             for k in 0..count {
@@ -1280,7 +1310,10 @@ impl PagePool {
                     continue;
                 }
                 if !taking[k] && inner.ring.page_pin_count(k) == 0 {
-                    if budget == 0 {
+                    // Never the page being appended into. Pinning it stops the
+                    // rotation that would free it, and it is the one page the
+                    // writer cannot do without.
+                    if budget == 0 || k == active {
                         for i in 0..n {
                             let id = first + u64::from(i);
                             if id < start || id > end {
@@ -1300,7 +1333,12 @@ impl PagePool {
                     if id < start || id > end {
                         continue;
                     }
-                    if let Some(rec) = inner.ring.record(k, i) {
+                    let Some(rec) = inner.ring.record(k, i) else {
+                        continue;
+                    };
+                    if found.len() >= PIN_PAYLOADS_PER_READ {
+                        copied.push((id, Bytes::copy_from_slice(rec)));
+                    } else {
                         found.push((id, k, rec.as_ptr(), rec.len()));
                     }
                 }

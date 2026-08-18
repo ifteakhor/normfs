@@ -969,6 +969,68 @@ async fn a_read_never_pins_the_last_page() {
     );
 }
 
+/// A reader may hold at most its share of the pool, and never the active page.
+///
+/// One reserved page is enough to prove the pool cannot deadlock, and it was
+/// proved. It is not enough to keep it working: with a single page to append
+/// into, a queue advances one page per flush however much memory it was given,
+/// and the cache degrades to nothing but the stalled reader's pages so every
+/// other reader starts missing memory too.
+#[tokio::test]
+async fn a_reader_may_hold_only_its_share_of_the_pool() {
+    let pool = Arc::new(PagePool::new(8, PAGE_SIZE, 0));
+    fill(&pool);
+
+    // Everything the pool holds, borrowed at once, by two readers rather than
+    // one -- the share is a property of the pool, not of a single call.
+    let _first = Arc::clone(&pool).pin_range(0, u64::MAX);
+    let _second = Arc::clone(&pool).pin_range(0, u64::MAX);
+
+    let (pinned, active_pinned) = pool.with_ring(|ring| {
+        let active = ring.active_page();
+        (
+            (0..ring.page_count())
+                .filter(|&k| ring.page_pin_count(k) > 0)
+                .count(),
+            ring.page_pin_count(active) > 0,
+        )
+    });
+
+    assert!(
+        pinned <= 4,
+        "reads hold {pinned} of 8 pages; half is the share that leaves the writer a \
+         working set rather than a single page"
+    );
+    assert!(
+        !active_pinned,
+        "the page being appended into must never be pinned: pinning it stops the rotation \
+         that would free it"
+    );
+}
+
+/// A single read cannot claim its whole share in one step.
+///
+/// `read_full` materialises the entire requested range before sending any of
+/// it, so one large read would otherwise take the share and hold it for the
+/// length of the send.
+#[tokio::test]
+async fn one_read_hands_out_a_bounded_number_of_borrowed_payloads() {
+    let pool = Arc::new(PagePool::new(8, 4096, 0));
+    for id in 0..2000u64 {
+        pool.place(id, &RECORD).await.unwrap();
+        pool.mark_durable(id);
+    }
+
+    let got = Arc::clone(&pool).pin_range(0, u64::MAX);
+    assert!(!got.is_empty());
+    let pinned: u32 =
+        pool.with_ring(|ring| (0..ring.page_count()).map(|k| ring.page_pin_count(k)).sum());
+    assert!(
+        (pinned as usize) <= 4096,
+        "one read borrowed {pinned} payloads; past the bound they must be copied"
+    );
+}
+
 #[tokio::test]
 async fn an_append_makes_progress_while_a_reader_holds_everything() {
     let pool = pool();
