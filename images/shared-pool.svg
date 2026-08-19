@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="660" viewBox="0 0 1200 660" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+<rect width="1200" height="660" fill="#FFFFFF"/>
+<text x="88" y="62" font-size="34" font-weight="700" fill="#1f2328">One arena for every queue: the shared pool measured</text>
+<text x="88" y="92" font-size="14.5" fill="#3A424F">80 B records; panels 1, 2 and 4: a hot queue of 8M beside 4 idle queues under an 8 MiB cap - panel 3: 10M records, 1 MiB cap</text>
+<text x="88" y="113" font-size="14.5" fill="#626B7A">fixed shares = each queue keeps the allotment it started with | shared arena = this branch - x86-64, medians of rotated rounds</text>
+<path d="M 92 172 L 118 172 L 105 146 Z" fill="#1f2328"/>
+<text x="132" y="170" font-size="27" font-weight="700" letter-spacing="1.5" fill="#1f2328">MORE IS BETTER</text>
+<text x="420" y="169" font-size="16" fill="#626B7A">the taller bar wins, in every panel</text>
+<rect x="790" y="155" width="15" height="15" rx="2" fill="#D0453B"/>
+<text x="812" y="168" font-size="15" font-weight="600" fill="#3A424F">fixed shares</text>
+<rect x="954" y="155" width="15" height="15" rx="2" fill="#1F5FBF"/>
+<text x="976" y="168" font-size="15" font-weight="600" fill="#3A424F">shared arena</text>
+<text x="88" y="252" font-size="15.5" font-weight="700" fill="#1f2328">Hot queue arrives 5th</text>
+<text x="88" y="271" font-size="11.5" fill="#626B7A">MB/s - 4 idle queues took their shares first</text>
+<rect x="114" y="445.3" width="66" height="74.7" rx="3" fill="#D0453B"/>
+<text x="147.0" y="436.3" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">48.7</text>
+<text x="147.0" y="539" font-size="12.5" text-anchor="middle" fill="#626B7A">fixed</text>
+<rect x="222" y="307.4" width="66" height="212.6" rx="3" fill="#1F5FBF"/>
+<text x="255.0" y="298.4" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">138.6</text>
+<text x="255.0" y="539" font-size="12.5" text-anchor="middle" fill="#626B7A">shared</text>
+<line x1="88" y1="520" x2="314" y2="520" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="88" y="562" font-size="12" fill="#626B7A" font-style="italic">the arrival-order cliff</text>
+<text x="360" y="252" font-size="15.5" font-weight="700" fill="#1f2328">Same queue arrives 1st</text>
+<text x="360" y="271" font-size="11.5" fill="#626B7A">MB/s</text>
+<rect x="386" y="301.1" width="66" height="218.9" rx="3" fill="#D0453B"/>
+<text x="419.0" y="292.1" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">142.7</text>
+<text x="419.0" y="539" font-size="12.5" text-anchor="middle" fill="#626B7A">fixed</text>
+<rect x="494" y="300.0" width="66" height="220.0" rx="3" fill="#1F5FBF"/>
+<text x="527.0" y="291.0" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">143.4</text>
+<text x="527.0" y="539" font-size="12.5" text-anchor="middle" fill="#626B7A">shared</text>
+<line x1="360" y1="520" x2="586" y2="520" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="360" y="562" font-size="12" fill="#626B7A" font-style="italic">no contention: equal, as it should be</text>
+<text x="632" y="252" font-size="15.5" font-weight="700" fill="#1f2328">4 stalled readers, 1 MiB arena</text>
+<text x="632" y="271" font-size="11.5" fill="#626B7A">MB/s - readers hold tail entries pinned</text>
+<rect x="658" y="508.8" width="66" height="11.2" rx="3" fill="#D0453B"/>
+<text x="691.0" y="499.8" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">7.3</text>
+<text x="691.0" y="539" font-size="12.5" text-anchor="middle" fill="#626B7A">fixed</text>
+<rect x="766" y="313.7" width="66" height="206.3" rx="3" fill="#1F5FBF"/>
+<text x="799.0" y="304.7" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">134.5</text>
+<text x="799.0" y="539" font-size="12.5" text-anchor="middle" fill="#626B7A">shared</text>
+<line x1="632" y1="520" x2="858" y2="520" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="632" y="562" font-size="12" fill="#626B7A" font-style="italic">18.5x: pin cap + growth</text>
+<text x="904" y="252" font-size="15.5" font-weight="700" fill="#1f2328">Throttled disk (2 ms fsync)</text>
+<text x="904" y="271" font-size="11.5" fill="#626B7A">MB/s - hot queue 5th</text>
+<rect x="930" y="462.2" width="66" height="57.8" rx="3" fill="#D0453B"/>
+<text x="963.0" y="453.2" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">37.7</text>
+<text x="963.0" y="539" font-size="12.5" text-anchor="middle" fill="#626B7A">fixed</text>
+<rect x="1038" y="461.7" width="66" height="58.3" rx="3" fill="#1F5FBF"/>
+<text x="1071.0" y="452.7" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">38.0</text>
+<text x="1071.0" y="539" font-size="12.5" text-anchor="middle" fill="#626B7A">shared</text>
+<line x1="904" y1="520" x2="1130" y2="520" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="904" y="562" font-size="12" fill="#626B7A" font-style="italic">disk-bound: memory cannot help</text>
+<line x1="88" y1="598" x2="1112" y2="598" stroke="#DFE3E9" stroke-width="1"/>
+<text x="88" y="620" font-size="12.5" fill="#626B7A">A queue used to keep the share it got at startup for ever; the 5th queue got the 2-page floor and stayed there. On this branch idle queues give their pages</text>
+<text x="88" y="638" font-size="12.5" fill="#626B7A">back once durable and a busy queue grows into them, so throughput no longer depends on arrival order. On a disk-bound workload the designs are equal.</text>
+</svg>
