@@ -334,16 +334,10 @@ impl AckFileWriter {
     /// step with the pool's would be a source of drift and no source of truth,
     /// so there is exactly one fill accounting per path and they never meet.
     ///
-    /// ## Why the pool is told
-    ///
-    /// This is the point at which the writer takes responsibility for an entry,
-    /// and it runs in id order — `OrderedBuffer` is what makes that true. The
-    /// pool may not write anything above the highest id that has reached here,
-    /// because a record's bytes are in its page from the moment `place`
-    /// returned, which is before the entry reaches the writer at all. Without
-    /// the mark, a flush landing in that window writes a later record ahead of
-    /// an earlier one, and V1's positional ids turn that into every entry after
-    /// it answering under the wrong id.
+    /// Taking responsibility is `PagePool::note_handed_over`, which the WAL
+    /// writer calls once per batch after handing every entry here: the pool
+    /// writes nothing above that mark, so a record still on its way cannot be
+    /// overtaken by the pages behind it.
     pub async fn write_maybe_pooled(
         &self,
         queue_id: QueueId,
@@ -356,13 +350,6 @@ impl AckFileWriter {
         if !(self.pooled && in_pool) {
             state.buffer.extend_from_slice(&entry);
             state.current_size += entry.len() as u64;
-        }
-        // Under the state lock, which a flush also takes: the mark and the
-        // buffered bytes move together, so a flush sees either both or neither.
-        if let Some(pool) = self.pool.as_ref()
-            && let Ok(id) = entry_id.to_u64()
-        {
-            pool.note_handed_over(id);
         }
         state.acks.push((queue_id, entry_id));
 

@@ -261,6 +261,7 @@ impl WriterState {
                 .wait_for_order((entry_id.clone(), data, placement))
         };
 
+        let mut handed_through: Option<u64> = None;
         if entries.is_empty() {
             log::debug!(
                 "WAL writer: no entries ready to write for queue '{}'",
@@ -359,6 +360,10 @@ impl WriterState {
                 )
                 .await;
 
+            if let Ok(id) = entry_id.to_u64() {
+                handed_through = Some(handed_through.map_or(id, |h: u64| h.max(id)));
+            }
+
             // Update last written entry ID
             self.has_written = true;
             self.entry_index += 1;
@@ -368,6 +373,14 @@ impl WriterState {
                 entry_id,
                 self.queue_id
             );
+        }
+
+        // One mark for the whole batch, not one per record: the pool lock is
+        // the producer's hot lock, and `note_handed_over` only ever needs the
+        // highest id. A flush landing mid-batch sees the previous mark and
+        // writes less, which is the safe direction.
+        if let (Some(pool), Some(id)) = (self.pool.as_ref(), handed_through) {
+            pool.note_handed_over(id);
         }
 
         Ok(())

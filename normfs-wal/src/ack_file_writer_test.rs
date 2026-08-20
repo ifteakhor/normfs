@@ -262,6 +262,9 @@ async fn pages_reach_the_file_before_the_watermark_moves() {
             .write_maybe_pooled(queue.clone(), UintN::from(id), Bytes::new(), true)
             .await;
     }
+    // The WAL writer marks the handover once per batch; these tests stand in
+    // for it, so they mark what they handed.
+    pool.note_handed_over(appended_through.saturating_sub(1));
 
     // The flush is on a timer; wait for the watermark rather than for a
     // duration, so the test asserts the ordering instead of racing it.
@@ -332,6 +335,7 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
     writer
         .write_maybe_pooled(queue.clone(), UintN::from(0u64), Bytes::new(), true)
         .await;
+    pool.note_handed_over(0);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while pool.durable_before() < 1 {
         assert!(tokio::time::Instant::now() < deadline, "entry 0 never reached the file");
@@ -356,6 +360,7 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
     writer
         .write_maybe_pooled(queue.clone(), UintN::from(2u64), Bytes::new(), true)
         .await;
+    pool.note_handed_over(2);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while pool.durable_before() < 3 {
         assert!(tokio::time::Instant::now() < deadline, "entries 1-2 never reached the file");
