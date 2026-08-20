@@ -85,3 +85,7 @@ harness = false
 [[bench]]
 name = "multi_queue_benchmark"
 harness = false
+
+[[bench]]
+name = "idle_cpu"
+harness = false
