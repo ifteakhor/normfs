@@ -32,15 +32,17 @@ fn payload(i: usize, size: usize) -> Bytes {
     Bytes::from(v)
 }
 
-/// Sizes chosen to cross every boundary the write path has: inside a page,
-/// larger than a page (so the pool holds it whole rather than paging it), and
-/// larger than the file it has to go in.
+/// Sizes chosen to cross every boundary the write path has: well inside a page,
+/// most of the way across one, and larger than the file it has to go in.
+///
+/// Nothing here exceeds a page: a record that does is refused before it is
+/// given an id, and `a_record_larger_than_a_page_is_refused` covers that.
 fn size_for(i: usize) -> usize {
     match i % 7 {
         0..=3 => 512,
         4 => 8 * 1024,
-        5 => 300 * 1024,  // larger than the 256 KiB page
-        _ => 1100 * 1024, // larger than max_file_size below
+        5 => 200 * 1024,  // most of a 256 KiB page
+        _ => 160 * 1024,  // larger than max_file_size below
     }
 }
 
@@ -99,9 +101,15 @@ async fn entries_on_disk(dir: &std::path::Path) -> Vec<ReadEntry> {
 
 fn settings() -> NormFsSettings {
     let mut settings = NormFsSettings::default();
+    // Pinned rather than inherited. The page size is the record cap and the
+    // granularity a file ends at, so a test about size classes and file
+    // boundaries has to fix it: the default is chosen for production and moves
+    // when the benchmarks say it should.
+    settings.mem_page_size = 256 * 1024;
     // Small enough that the queue rotates files several times over the run, so
-    // the boundary between files is exercised rather than assumed away.
-    settings.wal_settings.max_file_size = 1024 * 1024;
+    // the boundary between files is exercised rather than assumed away -- and
+    // below the page size, so a record can be larger than its whole file.
+    settings.wal_settings.max_file_size = 128 * 1024;
     settings.wal_settings.write_interval = Duration::from_millis(20);
     settings.max_memory_usage = 8 * 1024 * 1024;
     settings
@@ -260,14 +268,14 @@ async fn what_was_accepted_is_on_disk_in_the_order_it_was_accepted() {
     fs.close().await.unwrap();
 }
 
-/// A record too large for a page keeps its place among the ones that fit.
+/// A record that fills most of a page keeps its place among small ones.
 ///
-/// This is the interleaving nothing tested before: every existing end-to-end
-/// order test uses records of one size class, so a record that takes a
-/// different road to the file could overtake its neighbours without any of them
-/// noticing.
+/// Every other end-to-end order test uses records of one size class. A record
+/// wide enough to open a page of its own moves the file boundary around it, and
+/// V1 numbers entries by position, so one landing out of place is not one
+/// record misfiled but every record after it answering to the wrong id.
 #[tokio::test]
-async fn an_oversized_record_keeps_its_place_among_ordinary_ones() {
+async fn a_wide_record_keeps_its_place_among_ordinary_ones() {
     const COUNT: usize = 60;
 
     let temp = tempfile::TempDir::new().unwrap();
@@ -282,8 +290,8 @@ async fn an_oversized_record_keeps_its_place_among_ordinary_ones() {
         fs.ensure_queue_exists_for_write(&queue).await.unwrap();
 
         for i in 0..COUNT {
-            // Every third record is larger than a page.
-            let size = if i % 3 == 2 { 300 * 1024 } else { 256 };
+            // Every third record takes most of a page.
+            let size = if i % 3 == 2 { 200 * 1024 } else { 256 };
             let id = fs.enqueue(&queue, payload(i, size)).await.unwrap();
             assert_eq!(id, UintN::from(i as u64));
         }
@@ -298,28 +306,65 @@ async fn an_oversized_record_keeps_its_place_among_ordinary_ones() {
 
     assert_eq!(on_disk.len(), COUNT);
     for (n, entry) in on_disk.iter().enumerate() {
-        let size = if n % 3 == 2 { 300 * 1024 } else { 256 };
+        let size = if n % 3 == 2 { 200 * 1024 } else { 256 };
         assert_eq!(entry.id, UintN::from(n as u64));
         assert_eq!(
             entry.data,
             payload(n, size),
-            "position {n} on disk holds another record: a record too large for a page \
-             overtook, or was overtaken by, the ones that fit"
+            "position {n} on disk holds another record: a wide record overtook, or was \
+             overtaken by, the small ones around it"
         );
     }
 }
 
-/// A record wider than the configured memory total is refused before it takes
-/// an id: nothing could ever hold it, and accepting it would put the process
-/// arbitrarily far over `max_memory_usage` on a single call.
+/// A record too large for a page is refused before it takes an id.
+///
+/// The refusal has to happen here, before the id. Once an id is taken there is
+/// no good answer left: the record reaches no file while every id after it
+/// keeps counting, and V1 derives entry ids from position, so the result is not
+/// one missing record but every later record answering to the wrong id.
 #[tokio::test]
-async fn a_record_wider_than_the_memory_bound_is_refused() {
+async fn a_record_larger_than_a_page_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
-    let fs = NormFS::new(temp.path().to_path_buf(), settings()).await.unwrap();
+    let settings = settings();
+    let page = settings.mem_page_size;
+    let fs = NormFS::new(temp.path().to_path_buf(), settings).await.unwrap();
     let queue = fs.resolve("bounded");
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
 
-    let too_wide = Bytes::from(vec![0u8; settings().max_memory_usage + 1]);
+    for size in [page, page + 1, page * 2] {
+        let refused = fs.enqueue(&queue, Bytes::from(vec![0u8; size])).await;
+        assert!(
+            matches!(refused, Err(normfs::Error::RecordTooLarge(_))),
+            "a record of {size} bytes against a {page} byte page: got {refused:?}"
+        );
+    }
+
+    // The widest record that does fit is accepted, and takes the first id --
+    // so none of the refusals above consumed one.
+    let cap = normfs_wal::max_record_len(page);
+    let id = fs.enqueue(&queue, Bytes::from(vec![1u8; cap])).await.unwrap();
+    assert_eq!(id, UintN::zero(), "a refused record must consume no id");
+    fs.close().await.unwrap();
+}
+
+/// A record wider than the configured memory total is refused too, whatever the
+/// page size says: accepting it would put the process arbitrarily far over
+/// `max_memory_usage` on a single call.
+#[tokio::test]
+async fn a_record_wider_than_the_memory_bound_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let mut settings = settings();
+    // A page larger than the whole budget, so the memory bound is the narrower
+    // of the two and this tests it rather than the page cap.
+    settings.max_memory_usage = 4 * 1024 * 1024;
+    settings.mem_page_size = 2 * 1024 * 1024;
+    let bound = settings.max_memory_usage;
+    let fs = NormFS::new(temp.path().to_path_buf(), settings).await.unwrap();
+    let queue = fs.resolve("bounded");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+
+    let too_wide = Bytes::from(vec![0u8; bound + 1]);
     let refused = fs.enqueue(&queue, too_wide).await;
     assert!(
         matches!(refused, Err(normfs::Error::RecordTooLarge(_))),

@@ -2706,6 +2706,9 @@ async fn pooled_rotation_reads_back_in_id_order() {
     let path = temp_dir.path().to_path_buf();
 
     let mut settings = NormFsSettings::default();
+    // Pinned: this test counts on records spanning several pages, so it fixes
+    // the page size rather than inheriting a default chosen for production.
+    settings.mem_page_size = 256 * 1024;
     // Below one page, so every page that opens rotates the file.
     settings.wal_settings.max_file_size = 1024;
 

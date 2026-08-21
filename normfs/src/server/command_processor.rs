@@ -487,8 +487,9 @@ impl CommandProcessor {
                         );
                         // No need to send response, client is already gone
                     }
-                    // RecordTooLarge is a write-path refusal and cannot arrive
-                    // here, but it is spelled out rather than folded into a
+                    // RecordTooLarge is a write-path refusal and MemoryBelowFloor
+                    // is raised before the instance exists, so neither can arrive
+                    // here. They are spelled out rather than folded into a
                     // wildcard: a wildcard is what lets the next variant added
                     // to Error reach a client as a server error, silently.
                     Error::QueueEmpty
@@ -496,7 +497,8 @@ impl CommandProcessor {
                     | Error::Store(_)
                     | Error::Cloud(_)
                     | Error::Io(_)
-                    | Error::RecordTooLarge(_) => {
+                    | Error::RecordTooLarge(_)
+                    | Error::MemoryBelowFloor { .. } => {
                         error!(
                             "Read stream failed (client_id: {}, read_id: {}, queue_id: {}, error: {:?})",
                             sender.client_id(), read_id, queue_id, err

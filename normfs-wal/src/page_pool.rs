@@ -37,11 +37,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use tokio::sync::Notify;
 
 use crate::wal_arena::{SlotRange, WalArena};
-use crate::wal_entry_v1::WalEntryV1;
 use crate::wal_ring_v1::{AppendOutcome, WalRing};
 
 /// Keeps a page alive for as long as a reader is looking at bytes on it.
@@ -149,13 +148,15 @@ const MAX_STEPPABLE_GAP: u64 = 1024;
 /// Why an append could not be satisfied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolError {
-    /// The record is wider than the V1 frame, so no *file* can hold it either.
-    /// Waiting would never help and nor would a bigger page.
+    /// The record does not fit a page, framing included. Waiting would never
+    /// help; only a larger `mem_page_size` would.
     ///
-    /// A record merely larger than a page is not an error: the pool holds it
-    /// whole and hands it over in its turn, which is what keeps it in the id
-    /// sequence rather than beside it.
-    Unframeable,
+    /// Reaching this is a bug rather than a condition to handle: `check_framable`
+    /// refuses such a record *before* it is given an id. Once an id has been
+    /// taken there is no good answer left — V1 derives entry ids from position,
+    /// so a record that takes an id and then reaches no file does not go
+    /// missing on its own, it renumbers every record after it.
+    TooLarge,
 }
 
 /// What the enqueue side decided about a record, for the writer to carry out.
@@ -230,55 +231,23 @@ struct FileFill {
     epoch: u64,
 }
 
-/// Where a run of unwritten bytes lives.
+/// A run of bytes the file writer has not written yet: bytes `from..to` of
+/// page `page`.
 ///
-/// Two places, and the reason there are two is that a record wider than a page
-/// cannot be on one. It is still the pool's to hand over, though, and handing
-/// it over *here* rather than through a buffer of the writer's own is what puts
-/// it in the same id order as everything else — see [`PagePool::take_pending`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PendingSource {
-    /// Bytes `from..to` of page `index`.
-    Page {
-        index: usize,
-        from: usize,
-        to: usize,
-    },
-    /// A record too large for any page, framed once and held whole.
-    Oversize { entry_id: u64 },
-}
-
-/// A run of bytes the file writer has not written yet.
+/// One kind, because there is one place a record can be. A record wider than a
+/// page is refused before it is given an id — see `check_framable` — so the
+/// pool never holds bytes off-page, and there is no second road to the file to
+/// order this one against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingWrite {
-    pub source: PendingSource,
+    pub page: usize,
+    pub from: usize,
+    pub to: usize,
     /// The first entry id covered. Runs are handed out in this order.
     pub first_entry_id: u64,
     /// The last entry id covered, so the caller knows what its `fsync` makes
     /// durable.
     pub last_entry_id: u64,
-}
-
-/// A record no page can hold, waiting its turn in the id sequence.
-struct Oversize {
-    /// The framed V1 entry, ready for the file. Framed once, at enqueue time,
-    /// rather than at every flush: the record is by definition larger than a
-    /// page, so a second pass over it is the one copy worth not repeating.
-    framed: Bytes,
-    /// Where the payload sits inside `framed`, so a read can be handed the
-    /// record itself without a second copy of it — `Bytes::slice` is a refcount
-    /// bump over the same allocation.
-    record: std::ops::Range<usize>,
-    epoch: u64,
-    /// Set once the run has been written but before it is known durable, so a
-    /// second flush in the same window does not write it twice.
-    written: bool,
-}
-
-impl Oversize {
-    fn record(&self) -> Bytes {
-        self.framed.slice(self.record.clone())
-    }
 }
 
 struct Inner {
@@ -301,27 +270,13 @@ struct Inner {
     /// Bytes appended and not yet reported written. An estimate: it drives the
     /// flush hint, not a decision.
     unwritten: usize,
-    /// Records too large for a page, by id.
-    ///
-    /// They are held here rather than pushed into the writer's own buffer, and
-    /// that is the whole of what keeps them in order. A buffer of the writer's
-    /// own is a second road to the same file, and two roads cannot be ordered
-    /// against each other: the pages are filled at enqueue time while the
-    /// buffer is filled when the writer gets round to the entry, so a later
-    /// pooled record could reach the file ahead of an earlier buffered one.
-    /// V1 derives ids from position, so that is not a lost record but every
-    /// record after it answering to the wrong id.
-    oversize: std::collections::BTreeMap<u64, Oversize>,
-    /// Bytes held in `oversize`, so an appender can be made to wait for the
-    /// disk instead of letting them accumulate without bound.
-    oversize_bytes: usize,
     /// Ids below this are no longer served from memory even if a page still
     /// holds them.
     ///
-    /// Raised when an oversized record's bytes are released, which is the one
-    /// event that can put a gap in what memory can answer. Reads are a
-    /// contiguous run or they are wrong -- a range that silently omits the id
-    /// in the middle is worse than one that says "read it from the file".
+    /// Raised when a page is evicted by rotation or shrink, which is what can
+    /// put a gap in what memory can answer. Reads are a contiguous run or they
+    /// are wrong -- a range that silently omits the id in the middle is worse
+    /// than one that says "read it from the file".
     cache_floor: u64,
     /// The highest id the file writer has taken responsibility for, in order.
     /// `None` until it has taken any. Nothing above it may be written.
@@ -329,31 +284,16 @@ struct Inner {
 }
 
 impl Inner {
-    /// Drops everything held, for a pool that has fallen out of step with the
-    /// id sequence.
+    /// Drops the per-page cursors, for a pool that has fallen out of step with
+    /// the id sequence.
     ///
     /// Only `reinit` gets here, and only after it has already renumbered the
-    /// pages, so the pages are gone whatever this does. What this adds is that
-    /// the oversized records go with them rather than being written under ids
-    /// that no longer mean anything -- and that memory stops claiming to hold
-    /// the ids it just dropped.
-    fn forget_pages_and_oversize(&mut self) {
+    /// pages, so the bytes are gone whatever this does. What this adds is that
+    /// the cursors go with them, rather than pointing into a page whose
+    /// contents now answer to different ids.
+    fn forget_pages(&mut self) {
         self.written.iter_mut().for_each(|w| *w = 0);
         self.unwritten = 0;
-        if let Some(&highest) = self.oversize.keys().next_back() {
-            let unwritten = self.oversize.values().filter(|o| !o.written).count();
-            if unwritten > 0 {
-                log::error!(
-                    target: "normfs-wal",
-                    "pool re-seeded with {unwritten} oversized record(s) not yet on disk: \
-                     they are lost. The id sequence and the pool disagreed, which means \
-                     something appended without holding the queue's append gate."
-                );
-            }
-            self.cache_floor = self.cache_floor.max(highest.saturating_add(1));
-        }
-        self.oversize.clear();
-        self.oversize_bytes = 0;
     }
 
     /// Folds what rotation or shrink just evicted into the cache floor, so a
@@ -366,20 +306,43 @@ impl Inner {
 
     /// The lowest id memory can answer for, or `None` when it can answer for
     /// nothing.
-    ///
-    /// Both stores have to agree on this: an oversized record sitting between
-    /// two pages is part of the run, and once it is released the run starts
-    /// above it however much the pages still hold.
     fn min_cached(&self) -> Option<u64> {
-        let paged = self.ring.min_cached_id();
-        let held = self.oversize.keys().next().copied();
-        let lowest = match (paged, held) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }?;
+        let lowest = self.ring.min_cached_id()?;
         let floor = lowest.max(self.cache_floor);
         (floor < self.ring.next_entry_id()).then_some(floor)
     }
+}
+
+/// The offset-table slot every entry on a page costs beside its own bytes.
+///
+/// `normfs_wal_page_append` proves NO_SPACE holds exactly when
+/// `used_bytes + 4 * count + entry_size + 4 > cap`, so on an empty page an
+/// entry fits iff `entry_size + 4 <= cap`.
+const PAGE_ENTRY_SLOT: usize = 4;
+
+/// The largest record a page of `page_size` bytes will accept.
+///
+/// The one place this arithmetic lives. The enqueue guard refuses a record
+/// before it is given an id and the pool refuses it after, and if those two
+/// disagreed by so much as a byte the guard would pass records the pool then
+/// has to turn away -- which is the one case with no good answer left, because
+/// the id has already been taken and V1 numbers entries by position.
+pub fn max_record_len(page_size: usize) -> usize {
+    // Down from the largest record that could conceivably fit. The frame costs
+    // between 5 and 9 bytes, so this settles within a handful of steps.
+    let mut n = page_size.saturating_sub(PAGE_ENTRY_SLOT);
+    while n > 0 && !fits_page(n, page_size) {
+        n -= 1;
+    }
+    n
+}
+
+/// Whether a record of `record_len` bytes fits an empty page of `page_size`.
+fn fits_page(record_len: usize, page_size: usize) -> bool {
+    encoded_len_of(record_len)
+        .and_then(|e| usize::try_from(e).ok())
+        .and_then(|e| e.checked_add(PAGE_ENTRY_SLOT))
+        .is_some_and(|need| need <= page_size)
 }
 
 /// What a record of this length costs the file: framing and CRC, not payload.
@@ -500,15 +463,6 @@ pub struct PagePool {
     /// reach disk, which serialises the queue against the disk rather than
     /// merely bounding it.
     floor: usize,
-    /// How many bytes of records too large for a page this pool will hold
-    /// before an appender waits.
-    ///
-    /// The queue's own page allowance, so a record that cannot go in a page
-    /// costs the same memory it would have cost in one. Measured against what
-    /// the queue started with rather than what it has grown to, because growing
-    /// is for pages. The first record is always taken however large it is:
-    /// refusing it would be the discarding this pool exists to avoid.
-    oversize_budget: usize,
 }
 
 impl PagePool {
@@ -530,8 +484,6 @@ impl PagePool {
                 fill: None,
                 page_epoch: vec![0; page_count],
                 unwritten: 0,
-                oversize: std::collections::BTreeMap::new(),
-                oversize_bytes: 0,
                 cache_floor: 0,
                 handed_through: None,
             }),
@@ -541,7 +493,6 @@ impl PagePool {
             flush_watermark: (page_count * page_size / 2).max(page_size),
             arena: None,
             floor: page_count,
-            oversize_budget: page_count * page_size,
         }
     }
 
@@ -580,8 +531,6 @@ impl PagePool {
                 ring,
                 fill: None,
                 unwritten: 0,
-                oversize: std::collections::BTreeMap::new(),
-                oversize_bytes: 0,
                 cache_floor: 0,
                 handed_through: None,
             }),
@@ -591,7 +540,6 @@ impl PagePool {
             flush_watermark: (page_count * page_size / 2).max(page_size),
             arena: Some(Arc::clone(arena)),
             floor: floor.max(1),
-            oversize_budget: page_count * page_size,
         }
     }
 
@@ -722,10 +670,6 @@ impl PagePool {
             inner.written[k] = inner.ring.page_bytes(k).len();
             inner.page_epoch[k] = 0;
         }
-        for held in inner.oversize.values_mut() {
-            held.written = true;
-            held.epoch = 0;
-        }
         inner.handed_through = None;
     }
 
@@ -849,13 +793,12 @@ impl PagePool {
                         // and every held record written. Anything less waits
                         // for the disk instead -- a record accepted and not yet
                         // written must never be discarded to catch up.
-                        let nothing_to_lose = (inner.ring.is_empty()
-                            || inner.ring.min_essential_id() >= inner.ring.next_entry_id())
-                            && inner.oversize.values().all(|o| o.written);
+                        let nothing_to_lose = inner.ring.is_empty()
+                            || inner.ring.min_essential_id() >= inner.ring.next_entry_id();
                         if !nothing_to_lose || !inner.ring.reinit(expected_id) {
                             return Ok(None);
                         }
-                        inner.forget_pages_and_oversize();
+                        inner.forget_pages();
                     }
                 }
             }
@@ -865,95 +808,16 @@ impl PagePool {
                     over_watermark = inner.unwritten >= self.flush_watermark;
                     charge_paged(&mut inner, entry_len, record.len(), opened_page)
                 }
-                AppendOutcome::TooLarge => {
-                    match self.hold_oversize(&mut inner, expected_id, record, entry_len)? {
-                        Some(placed) => {
-                            over_watermark = true;
-                            placed
-                        }
-                        None => return Ok(None),
-                    }
-                }
+                // The pre-id guard let a record through that no page can
+                // hold. There is no id-preserving way to take it now, and
+                // taking it any other way renumbers everything after it.
+                AppendOutcome::TooLarge => return Err(PoolError::TooLarge),
                 AppendOutcome::Full => return Ok(None),
             }
         };
         if over_watermark {
             self.signal_flush();
         }
-        Ok(Some(placed))
-    }
-
-    /// Takes a record no page can hold, keeping it in the id sequence.
-    ///
-    /// `Ok(None)` means the caller must wait: either the held records are
-    /// already at their budget, or the active page has records on it and no
-    /// page can be rotated into so the sequence cannot be stepped. Both end the
-    /// same way, when a flush reports something durable.
-    ///
-    /// The record is framed here, once. It is by definition larger than a page,
-    /// so this is the copy worth not repeating at every flush — and holding the
-    /// framed bytes is what lets a flush write them with no pass over them at
-    /// all.
-    fn hold_oversize(
-        &self,
-        inner: &mut Inner,
-        entry_id: u64,
-        record: &[u8],
-        entry_len: u64,
-    ) -> Result<Option<Placement>, PoolError> {
-        // Wider than the V1 frame: no page and no file can hold it, and there
-        // is no id to give it. `NormFS::enqueue` refuses such a record before it
-        // takes one; reaching here means that guard was bypassed, and taking it
-        // now would leave a gap in the file that the reader turns into every
-        // later entry answering to the wrong id.
-        if encoded_len_of(record.len()).is_none() {
-            return Err(PoolError::Unframeable);
-        }
-
-        // Back-pressure, and the reason an oversized record no longer drains
-        // the whole queue: it waits for room exactly as a pooled one does,
-        // rather than for every page to reach disk first.
-        if inner.oversize_bytes >= self.oversize_budget && !inner.oversize.is_empty() {
-            return Ok(None);
-        }
-
-        // Empties the active page, so the skipped id falls between two pages
-        // rather than inside one. False means no page could be rotated into.
-        if !inner.ring.skip_entry() {
-            return Ok(None);
-        }
-        inner.absorb_eviction();
-        let active = inner.ring.active_page();
-        inner.written[active] = 0;
-
-        let mut framed = BytesMut::with_capacity(entry_len as usize);
-        // Infallible here: the length was checked against the V1 frame above,
-        // and the buffer grows as needed.
-        if WalEntryV1::new(record).write_to_bytes(&mut framed).is_err() {
-            return Err(PoolError::Unframeable);
-        }
-        let framed = framed.freeze();
-        // The frame is [record_size varint32][record][crc32c u32 LE], so the
-        // payload starts where the varint ends and stops four bytes short.
-        let record_span = (framed.len() - crate::wal_entry_v1::WAL_ENTRY_V1_CRC_SIZE - record.len())
-            ..(framed.len() - crate::wal_entry_v1::WAL_ENTRY_V1_CRC_SIZE);
-
-        // A record that never entered a page opens no page, but it does end a
-        // file: it is the first thing in whatever comes after it, so the
-        // boundary has somewhere to land. That is what `true` says here, and it
-        // is why a queue whose every record is oversized still rotates files.
-        let placed = charge_paged(inner, entry_len, record.len(), true);
-
-        inner.oversize_bytes = inner.oversize_bytes.saturating_add(framed.len());
-        inner.oversize.insert(
-            entry_id,
-            Oversize {
-                framed,
-                record: record_span,
-                epoch: placed.epoch,
-                written: false,
-            },
-        );
         Ok(Some(placed))
     }
 
@@ -1016,16 +880,17 @@ impl PagePool {
     /// **in id order** — and never past the end of the file that is open, nor
     /// past the last entry the writer has actually taken responsibility for.
     ///
-    /// This is the only road to the file. Pages and oversized records come out
-    /// of the same call, interleaved by id, because two roads to one file
-    /// cannot be ordered against each other and V1 turns a swapped pair into
-    /// every later entry answering to the wrong id.
+    /// This is the only road to the file, which is what keeps one id order over
+    /// everything on it: two roads cannot be ordered against each other, and V1
+    /// turns a swapped pair into every later entry answering to the wrong id.
+    ///
+    /// The runs come out sorted by id, not by page index. A ring rotates into
+    /// whichever page is reusable, so index order is not id order and the walk
+    /// below cannot stand in for the sort.
     ///
     /// The bytes are copied out under the lock rather than borrowed: the writer
     /// awaits I/O, and holding the pool locked across that would block every
-    /// appender for the duration of a disk write. An oversized record is the
-    /// exception — it is already a `Bytes`, framed once when it arrived, so it
-    /// is cloned rather than copied however large it is.
+    /// appender for the duration of a disk write.
     ///
     /// This does not mark the runs as taken — call
     /// [`PagePool::commit_written`] once a run is actually on disk, or an
@@ -1120,7 +985,9 @@ impl PagePool {
             }
             out.push((
                 PendingWrite {
-                    source: PendingSource::Page { index: k, from, to },
+                    page: k,
+                    from,
+                    to,
                     first_entry_id,
                     last_entry_id,
                 },
@@ -1128,36 +995,9 @@ impl PagePool {
             ));
         }
 
-        for (&entry_id, held) in inner.oversize.iter() {
-            if held.written || held.epoch > epoch {
-                continue;
-            }
-            if bound.is_none_or(|b| entry_id > b) {
-                continue;
-            }
-            if held.epoch < epoch {
-                log::error!(
-                    target: "normfs-wal",
-                    "record {entry_id} is still unwritten for file {}, which is already \
-                     closed: its last flush did not complete and the record reaches no file",
-                    held.epoch,
-                );
-                continue;
-            }
-            out.push((
-                PendingWrite {
-                    source: PendingSource::Oversize { entry_id },
-                    first_entry_id: entry_id,
-                    last_entry_id: entry_id,
-                },
-                held.framed.clone(),
-            ));
-        }
-
-        // One order over both kinds. A skipped id falls strictly between two
-        // pages -- `skip_entry` empties the active page first -- so no page's id
-        // span contains an oversized record's id, and comparing first ids is a
-        // total order rather than an approximation of one.
+        // By id, not by the index the walk visited. The ids on any one page are
+        // a dense run and no two pages' runs overlap, so comparing first ids is
+        // a total order rather than an approximation of one.
         out.sort_by_key(|(w, _)| w.first_entry_id);
         out
     }
@@ -1166,19 +1006,11 @@ impl PagePool {
     /// cursor forward.
     pub fn commit_written(&self, write: &PendingWrite) {
         let mut inner = self.inner.lock().unwrap();
-        match write.source {
-            PendingSource::Page { index, to, .. } => {
-                if to > inner.written[index] {
-                    let taken = to - inner.written[index];
-                    inner.written[index] = to;
-                    inner.unwritten = inner.unwritten.saturating_sub(taken);
-                }
-            }
-            PendingSource::Oversize { entry_id } => {
-                if let Some(held) = inner.oversize.get_mut(&entry_id) {
-                    held.written = true;
-                }
-            }
+        let PendingWrite { page, to, .. } = *write;
+        if to > inner.written[page] {
+            let taken = to - inner.written[page];
+            inner.written[page] = to;
+            inner.unwritten = inner.unwritten.saturating_sub(taken);
         }
     }
 
@@ -1207,24 +1039,6 @@ impl PagePool {
                 return;
             }
             inner.ring.set_essential(first_non_durable_id);
-
-            // An oversized record is durable on the same terms as a page: the
-            // flush that covered it has returned from fsync. Its bytes are the
-            // pool's largest single holding, so they go back as soon as that is
-            // true -- and the floor rises with them, because memory that can
-            // answer for the ids either side of a released record but not for
-            // the record itself would hand a reader a run with a hole in it.
-            let released: Vec<u64> = inner
-                .oversize
-                .range(..first_non_durable_id)
-                .map(|(&id, _)| id)
-                .collect();
-            for id in released {
-                if let Some(held) = inner.oversize.remove(&id) {
-                    inner.oversize_bytes = inner.oversize_bytes.saturating_sub(held.framed.len());
-                    inner.cache_floor = inner.cache_floor.max(id.saturating_add(1));
-                }
-            }
 
             // Advancing the watermark is the only event that can make a page
             // reusable, so it is also the only moment a queue can discover it
@@ -1297,7 +1111,7 @@ impl PagePool {
     /// Whether the pool holds no records.
     pub fn is_empty(&self) -> bool {
         let inner = self.inner.lock().unwrap();
-        inner.ring.is_empty() && inner.oversize.is_empty()
+        inner.ring.is_empty()
     }
 
     /// The lowest id still held in memory, or `None` when nothing is.
@@ -1309,16 +1123,11 @@ impl PagePool {
     pub fn collect_range(&self, start: u64, end: u64) -> Vec<(u64, Vec<u8>)> {
         let inner = self.inner.lock().unwrap();
         let start = start.max(inner.cache_floor);
-        // The floor can pass the whole request; an inverted BTreeMap range panics.
+        // The floor can pass the whole request.
         if start > end {
             return Vec::new();
         }
-        let mut out = inner.ring.collect_range(start, end);
-        for (&id, held) in inner.oversize.range(start..=end) {
-            out.push((id, held.record().to_vec()));
-        }
-        out.sort_by_key(|(id, _)| *id);
-        out
+        inner.ring.collect_range(start, end)
     }
 
     /// Every held record with id in `[start, end]`, in id order, **borrowed
@@ -1333,18 +1142,12 @@ impl PagePool {
         {
             let inner = self.inner.lock().unwrap();
             let start = start.max(inner.cache_floor);
-            // The floor can pass the whole request; an inverted BTreeMap range panics.
+            // The floor can pass the whole request.
             if start > end {
                 return Vec::new();
             }
             let count = inner.ring.page_count();
 
-            // An oversized record needs no pin: its bytes are a `Bytes` of the
-            // pool's own, not a slice of a page an append could reuse, so a
-            // slice of it keeps itself alive.
-            for (&id, held) in inner.oversize.range(start..=end) {
-                copied.push((id, held.record()));
-            }
             let pinned_now = (0..count)
                 .filter(|&k| inner.ring.page_pin_count(k) > 0)
                 .count();

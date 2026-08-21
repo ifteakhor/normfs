@@ -54,9 +54,17 @@ pub enum Error {
     QueueEmpty,
     NotFound,
     ClientDisconnected,
-    /// The record is wider than a V1 WAL entry can frame, so no file can hold
+    /// The record does not fit a page, framing included, so no page can hold
     /// it. Refused before an id is taken — see [`NormFS::enqueue`].
     RecordTooLarge(usize),
+    /// `max_memory_usage` cannot hold the two pages a single queue needs to
+    /// work. Refused at construction rather than rounded up: rounding up would
+    /// mean the process quietly using more memory than it was configured for.
+    MemoryBelowFloor {
+        max_memory_usage: usize,
+        page_size: usize,
+        needed: usize,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -72,8 +80,17 @@ impl std::fmt::Display for Error {
             Error::ClientDisconnected => write!(f, "Client disconnected"),
             Error::RecordTooLarge(n) => write!(
                 f,
-                "Record of {n} bytes exceeds the {} bytes a WAL entry can frame",
-                u32::MAX
+                "Record of {n} bytes does not fit a memory page once framed"
+            ),
+            Error::MemoryBelowFloor {
+                max_memory_usage,
+                page_size,
+                needed,
+            } => write!(
+                f,
+                "max_memory_usage of {max_memory_usage} bytes is below the {needed} bytes a \
+                 single queue needs at a page size of {page_size}; raise max_memory_usage or \
+                 lower mem_page_size"
             ),
         }
     }
@@ -91,14 +108,15 @@ impl std::error::Error for Error {
             Error::NotFound => None,
             Error::ClientDisconnected => None,
             Error::RecordTooLarge(_) => None,
+            Error::MemoryBelowFloor { .. } => None,
         }
     }
 }
 
-/// Refuses a record no WAL entry can frame, **before** it is given an id.
+/// Refuses a record no page can hold, **before** it is given an id.
 ///
-/// The frame carries the record's size as a varint32, so a wider record has no
-/// encoding at all. The writer used to discover that after the fact
+/// This is the only place the size limit is enforced, and the timing is the
+/// whole point. The writer used to discover the problem after the fact
 /// (`WriterState::write`) and could only log it: the id had already been
 /// returned to the caller, the writer's ordered buffer had already counted it,
 /// and the pool had already stepped past it. The record was then simply absent
@@ -108,12 +126,21 @@ impl std::error::Error for Error {
 ///
 /// Refusing it here costs the caller an error and costs the sequence nothing.
 ///
-/// The memory bound is a cap too: a record larger than a page is held whole in
-/// memory until it reaches disk, and one wider than the configured total could
-/// never be held at all — accepting it would put the process arbitrarily far
-/// over `max_memory_usage` on a single call.
-fn check_framable(record: &Bytes, max_memory_usage: usize) -> Result<(), Error> {
-    if u32::try_from(record.len()).is_err() || record.len() > max_memory_usage {
+/// Three bounds, narrowest first:
+///
+/// * A page. A record is written into one page and never straddles two, so a
+///   page is the ceiling — and it is the *encoded* entry that has to fit, not
+///   the record: the frame is `[record_size varint32][record][crc32c u32 LE]`,
+///   so a record of exactly `mem_page_size` is nine bytes too wide.
+/// * `max_memory_usage`. Below two pages there is no arena to speak of; the
+///   page bound is tighter than this in every sane configuration, but the two
+///   are set independently so both are checked.
+/// * The V1 frame itself, whose length prefix is a varint32.
+fn check_framable(record: &Bytes, page_size: usize, max_memory_usage: usize) -> Result<(), Error> {
+    // `max_record_len` is the pool's own arithmetic, not a copy of it: the two
+    // sides of this limit must not be able to drift apart.
+    let cap = normfs_wal::max_record_len(page_size).min(max_memory_usage);
+    if record.len() > cap || u32::try_from(record.len()).is_err() {
         return Err(Error::RecordTooLarge(record.len()));
     }
     Ok(())
@@ -147,6 +174,15 @@ impl From<std::io::Error> for Error {
 pub struct NormFsSettings {
     pub store_cfg: StoreWriteConfig,
     pub max_memory_usage: usize,
+    /// Size of one memory page, and with it the largest record this instance
+    /// accepts: a record is written into one page and never straddles two, so
+    /// the cap is this minus the V1 framing.
+    ///
+    /// It is also the unit the arena shares between queues. Large pages cost
+    /// fewer rotations and fewer flush runs; small ones divide the same
+    /// `max_memory_usage` into more chunks, so more queues get a working
+    /// allowance and the two-page floor each one holds while idle is smaller.
+    pub mem_page_size: usize,
     /// WAL settings (used for disk monitor validation, etc.)
     pub wal_settings: WalSettings,
     pub max_disk_usage_per_queue: Option<u64>,
@@ -159,6 +195,10 @@ impl Default for NormFsSettings {
         Self {
             store_cfg: Default::default(),
             max_memory_usage: 256 * 1024 * 1024, // 256MB
+            // Provisional. Set from the page-size sweep once the numbers are
+            // in: it is both the record cap and the arena's sharing unit, and
+            // those two pull in opposite directions.
+            mem_page_size: 4 * 1024 * 1024, // 4MiB
             max_disk_usage_per_queue: None,
             wal_settings: Default::default(),
             cloud_settings: None,
@@ -208,7 +248,10 @@ impl NormFS {
 
         let store_done_rx = store.start_writers(wal_complete_recv).await;
 
-        let mem = Arc::new(mem::MemStore::new(settings.max_memory_usage));
+        let mem = Arc::new(mem::MemStore::with_page_size(
+            settings.max_memory_usage,
+            settings.mem_page_size,
+        )?);
 
         let mem_clone = mem.clone();
         tokio::spawn(async move {
@@ -851,7 +894,7 @@ impl NormFS {
     /// not yet on disk. That wait is the back-pressure: the queue declines to
     /// run ahead of the disk rather than dropping what it already took.
     pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
-        check_framable(&data, self.settings.max_memory_usage)?;
+        check_framable(&data, self.settings.mem_page_size, self.settings.max_memory_usage)?;
         let (entry_id, placement) = self.mem.enqueue_awaiting(queue, data.clone()).await;
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
@@ -871,7 +914,7 @@ impl NormFS {
         }
 
         for record in &data {
-            check_framable(record, self.settings.max_memory_usage)?;
+            check_framable(record, self.settings.mem_page_size, self.settings.max_memory_usage)?;
         }
 
         log::debug!(target: "normfs", "Enqueuing batch - Queue: '{}', Batch size: {} entries", queue, data.len());

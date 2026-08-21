@@ -1,9 +1,9 @@
 //! A pooled record must not be held twice while it waits for the writer.
 //!
-//! The pool copies the record's bytes at `enqueue` (into a page, or framed
-//! whole when it is wider than one), so the `Bytes` sent to the WAL writer's
-//! channel would be a second hold of every record in flight. The writer only
-//! ever needs the record's length, which rides in the `Placement` instead.
+//! The pool copies the record's bytes into a page at `enqueue`, so the `Bytes`
+//! sent to the WAL writer's channel would be a second hold of every record in
+//! flight. The writer only ever needs the record's length, which rides in the
+//! `Placement` instead.
 //!
 //! These tests run on tokio's single-threaded scheduler and `enqueue` sends to
 //! the channel after its last await, so when it returns the writer task cannot
@@ -30,13 +30,15 @@ async fn an_enqueued_record_is_not_held_by_the_writer_channel() {
          record at enqueue, so a clone in the writer channel is a double hold"
     );
 
-    // Wider than a page: held whole by the pool, framed once. Same rule.
-    let oversize = Bytes::from(vec![9u8; 300 * 1024]);
-    fs.enqueue(&queue, oversize.clone()).await.unwrap();
+    // The widest record a page takes. The copy is larger but the rule is the
+    // same, and this is the size at which a second hold costs the most.
+    let cap = normfs_wal::max_record_len(NormFsSettings::default().mem_page_size);
+    let wide = Bytes::from(vec![9u8; cap]);
+    fs.enqueue(&queue, wide.clone()).await.unwrap();
     assert!(
-        oversize.is_unique(),
-        "an oversized record is framed into the pool's own buffer, so nothing \
-         but the caller may still hold the original"
+        wide.is_unique(),
+        "the caller's Bytes must be the last reference for a page-filling \
+         record too, where a double hold is at its most expensive"
     );
 
     fs.close().await.unwrap();

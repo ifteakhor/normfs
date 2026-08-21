@@ -22,9 +22,13 @@ const PAYLOAD: usize = 1024;
 
 fn settings() -> NormFsSettings {
     let mut settings = NormFsSettings::default();
-    // A small arena, so a handful of records is enough to make the pool turn
-    // over rather than never filling in the first place.
+    // A small arena of many small pages, so a handful of records is enough to
+    // make the pool turn over rather than never filling in the first place --
+    // and so there are pages to spare either side of the reader's pin share.
+    // Both are geometry this test depends on, so it fixes them rather than
+    // inheriting a default chosen for production.
     settings.max_memory_usage = 4 * 1024 * 1024;
+    settings.mem_page_size = 64 * 1024;
     settings.wal_settings.write_interval = Duration::from_millis(20);
     settings
 }

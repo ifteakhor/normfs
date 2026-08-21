@@ -7,6 +7,18 @@ use uintn::UintN;
 
 const TEST_INSTANCE_ID: &str = "test-instance";
 
+/// Page size for the tests that do not care what it is.
+///
+/// Named rather than inherited: `NormFsSettings`'s default is chosen for
+/// production and moves when the benchmarks say it should, and a test asserting
+/// on page counts should not move with it.
+const TEST_PAGE_SIZE: usize = 256 * 1024;
+
+fn mem_store(max_memory_usage: usize) -> MemStore {
+    MemStore::with_page_size(max_memory_usage, TEST_PAGE_SIZE)
+        .expect("test budget holds a queue's floor")
+}
+
 fn create_test_data(count: usize) -> Vec<Bytes> {
     (0..count)
         .map(|i| Bytes::from(format!("data_{}", i)))
@@ -29,7 +41,7 @@ async fn setup_queue_with_data(mem: &Arc<MemStore>, queue: &QueueId, count: usiz
 
 #[tokio::test]
 async fn test_read_full_positive_basic() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -60,7 +72,7 @@ async fn test_read_full_positive_basic() {
 
 #[tokio::test]
 async fn test_read_full_positive_with_step() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -92,7 +104,7 @@ async fn test_read_full_positive_with_step() {
 
 #[tokio::test]
 async fn test_read_full_positive_out_of_range() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -125,7 +137,7 @@ async fn test_read_full_positive_out_of_range() {
 
 #[tokio::test]
 async fn test_read_full_negative_basic() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -159,7 +171,7 @@ async fn test_read_full_negative_basic() {
 
 #[tokio::test]
 async fn test_read_full_negative_with_step() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -193,7 +205,7 @@ async fn test_read_full_negative_with_step() {
 
 #[tokio::test]
 async fn test_read_full_negative_offset_too_large() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -220,7 +232,7 @@ async fn test_read_full_negative_offset_too_large() {
 
 #[tokio::test]
 async fn test_read_full_negative_not_all_in_memory() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -248,7 +260,7 @@ async fn test_read_full_negative_not_all_in_memory() {
 
 #[tokio::test]
 async fn test_follow_full_positive_subscribe() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -305,7 +317,7 @@ async fn test_follow_full_positive_subscribe() {
 
 #[tokio::test]
 async fn test_follow_full_negative_subscribe() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -364,7 +376,7 @@ async fn test_follow_full_negative_subscribe() {
 
 #[tokio::test]
 async fn test_follow_full_with_step() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -422,7 +434,7 @@ async fn test_follow_full_with_step() {
 
 #[tokio::test]
 async fn test_read_full_empty_queue() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("empty_queue");
 
@@ -438,7 +450,7 @@ async fn test_read_full_empty_queue() {
 
 #[tokio::test]
 async fn test_read_full_negative_empty_queue() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("empty_queue");
 
@@ -460,7 +472,7 @@ async fn test_read_full_negative_empty_queue() {
 
 #[tokio::test]
 async fn test_follow_full_empty_queue() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("empty_queue");
 
@@ -515,7 +527,7 @@ async fn test_follow_full_empty_queue() {
 
 #[tokio::test]
 async fn test_channel_closed_unsubscribes() {
-    let mem = Arc::new(MemStore::new(1024 * 1024 * 1024)); // 1GB for tests
+    let mem = Arc::new(mem_store(1024 * 1024 * 1024)); // 1GB for tests
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("test_queue");
 
@@ -557,7 +569,7 @@ async fn test_bounded_cache_drops_old_unacked_and_falls_back() {
     // 512 KiB. Enough ~100 KiB records to overflow that force the oldest out
     // while nothing is acked, so the newest is held and older ids fall back to
     // file.
-    let mem = Arc::new(MemStore::new(300));
+    let mem = Arc::new(mem_store(2 * TEST_PAGE_SIZE));
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("bounded_queue");
     mem.start_queue(&queue, None, false);
@@ -593,7 +605,9 @@ async fn every_queue_holds_a_disjoint_range_of_the_one_arena() {
     // 16 pages of 1 KiB. Every queue's pages are slots in this one allocation,
     // which is what makes `max_memory_usage` a total rather than a per-queue
     // allowance.
-    let mem = Arc::new(MemStore::with_page_size(16 * 1024, 1024));
+    let mem = Arc::new(
+        MemStore::with_page_size(16 * 1024, 1024).expect("test budget holds a queue's floor"),
+    );
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let arena = mem.arena().clone();
     assert_eq!(arena.page_count(), 16);
@@ -634,7 +648,9 @@ async fn a_busy_queue_takes_a_page_rather_than_waiting_for_the_disk() {
     // The gap this closes. Before pages could move, a queue that ran out
     // waited for its own records to reach disk however much of the arena was
     // sitting idle next to it.
-    let mem = Arc::new(MemStore::with_page_size(16 * 1024, 1024));
+    let mem = Arc::new(
+        MemStore::with_page_size(16 * 1024, 1024).expect("test budget holds a queue's floor"),
+    );
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("busy");
     mem.start_queue(&queue, None, false);
@@ -676,7 +692,7 @@ async fn the_page_budget_is_a_total_across_queues() {
     // allocated again on top: the setting bounded nothing, and total memory
     // grew with the queue count. Pages now come out of one pot.
     let budget_bytes = 64 * 256 * 1024; // 64 pages
-    let mem = Arc::new(MemStore::new(budget_bytes));
+    let mem = Arc::new(mem_store(budget_bytes));
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
 
     let queues = 12usize;
@@ -708,7 +724,9 @@ async fn a_read_only_queue_does_not_reserve_a_writers_share() {
     // A queue is started read-only by any client that merely names a path, so
     // a writer's share here is memory an unauthenticated caller can reserve and
     // never release. Nothing appends to such a queue, so the share sits idle.
-    let mem = Arc::new(MemStore::with_page_size(64 * 1024, 1024));
+    let mem = Arc::new(
+        MemStore::with_page_size(64 * 1024, 1024).expect("test budget holds a queue's floor"),
+    );
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
 
     let reader = resolver.resolve("reader");
@@ -731,7 +749,9 @@ async fn a_promoted_reader_grows_rather_than_keeping_its_floor() {
     // The other half of starting a reader small: being wrong about the mode has
     // to be cheap. A queue that starts read-only and is then written to takes
     // what it needs from the arena on its first busy moment.
-    let mem = Arc::new(MemStore::with_page_size(16 * 1024, 1024));
+    let mem = Arc::new(
+        MemStore::with_page_size(16 * 1024, 1024).expect("test budget holds a queue's floor"),
+    );
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("promoted");
     mem.start_queue(&queue, None, true);
@@ -760,7 +780,7 @@ async fn a_promoted_reader_grows_rather_than_keeping_its_floor() {
 #[tokio::test]
 async fn a_cancelled_enqueue_leaves_no_gap_in_the_id_sequence() {
     // Four pages in the whole arena, so growing runs out and the pool fills.
-    let mem = Arc::new(MemStore::new(1024 * 1024));
+    let mem = Arc::new(mem_store(1024 * 1024));
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("cancel_queue");
     mem.start_queue(&queue, None, false);
@@ -809,13 +829,15 @@ async fn a_cancelled_enqueue_leaves_no_gap_in_the_id_sequence() {
     assert!(next.to_u64().unwrap() > first.to_u64().unwrap());
 }
 
-/// A follow whose backlog memory cannot serve goes to the files, even when
-/// `min_cached_id` is `None`: since the cache floor, `None` can mean "nothing
-/// servable at all" rather than "no lower bound", and treating it as the
-/// latter subscribed the client while its backlog was silently skipped.
+/// A follow whose backlog memory cannot serve goes to the files.
+///
+/// The pages hold records, so memory looks able to answer -- but the run they
+/// hold starts above the id the follow asks from, because a rotation evicted
+/// the ids below it. Serving that as a success subscribes the client and
+/// silently skips its backlog, which the client cannot see.
 #[tokio::test]
 async fn a_follow_with_an_unservable_backlog_fails_to_the_files() {
-    let mem = Arc::new(MemStore::new(1024 * 1024));
+    let mem = Arc::new(mem_store(1024 * 1024));
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("floor_follow");
     mem.start_queue(&queue, None, false);
@@ -824,24 +846,26 @@ async fn a_follow_with_an_unservable_backlog_fails_to_the_files() {
     pool.set_drainer();
     pool.arm_file_fill(1 << 20, 16);
 
-    // Small records on pages, then an oversized one; releasing the oversize
-    // raises the cache floor past everything, so min_cached_id is None while
-    // the pages still hold records.
-    for i in 0..5u64 {
-        let (id, _) = mem
-            .enqueue_awaiting(&queue, Bytes::from(format!("small_{i}")))
-            .await;
-        assert_eq!(id.to_u64().unwrap(), i);
+    // One record per page. Once they are durable the next one rotates into the
+    // page holding id 0, and the cached run then starts above it.
+    let wide = Bytes::from(vec![7u8; normfs_wal::max_record_len(TEST_PAGE_SIZE)]);
+    let pages = pool.page_count();
+    for _ in 0..pages {
+        mem.enqueue_awaiting(&queue, wide.clone()).await;
     }
-    let big = Bytes::from(vec![0u8; 300 * 1024]);
-    let (big_id, _) = mem.enqueue_awaiting(&queue, big).await;
     for (w, _) in pool.take_pending(0) {
         pool.commit_written(&w);
     }
-    pool.mark_durable(big_id.to_u64().unwrap() + 1);
-    assert_eq!(pool.min_cached_id(), None, "the floor should pass everything");
+    pool.mark_durable(pages as u64);
+    mem.enqueue_awaiting(&queue, wide.clone()).await;
 
-    // The backlog (ids 0..=5) is on disk only; memory must decline the follow
+    assert!(
+        pool.min_cached_id().is_some_and(|m| m > 0),
+        "id 0 must have been evicted for this to test anything"
+    );
+    assert!(!pool.is_empty(), "and the pages must still hold records");
+
+    // The backlog from id 0 is on disk only; memory must decline the follow
     // rather than subscribe with the backlog skipped.
     let (tx, _rx) = mpsc::channel(16);
     let from = UintN::zero();

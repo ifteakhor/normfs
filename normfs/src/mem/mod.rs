@@ -8,10 +8,9 @@ use normfs_types::{DataSource, QueueId, ReadEntry, SubscriberCallback};
 use normfs_wal::{AppendOutcome, PagePool, Placement, WalArena};
 use uintn::UintN;
 
-// Geometry of the in-memory paged store. A record larger than a page is not
-// cached and is served from file; the ring caps a queue's cache at
-// MEM_MAX_PAGES pages.
-const MEM_PAGE_SIZE: usize = 256 * 1024;
+// Geometry of the in-memory paged store. Every record fits a page -- one that
+// does not is refused before it is given an id -- and the ring caps a queue's
+// cache at MEM_MAX_PAGES pages.
 const MEM_MAX_PAGES: usize = 64;
 
 /// The fewest pages a queue can work with: one to append into, and one the
@@ -1021,25 +1020,34 @@ impl MemQueue {
 }
 
 impl MemStore {
-    pub fn new(max_memory_usage: usize) -> Self {
-        Self::with_page_size(max_memory_usage, MEM_PAGE_SIZE)
-    }
-
-    /// As [`MemStore::new`], with the memory page size chosen rather than
-    /// fixed.
+    /// Allocates the arena: `max_memory_usage / page_size` pages, shared by
+    /// every queue.
     ///
-    /// A WAL file ends on a page boundary, so this is also the granularity at
-    /// which a file tracks `max_file_size`: crossing the threshold seals the
-    /// active page, and the tail of that page goes unused. A test that wants
-    /// many small files wants a small page here.
-    pub fn with_page_size(max_memory_usage: usize, page_size: usize) -> Self {
-        let pages = (max_memory_usage / page_size).max(MEM_MIN_PAGES_PER_QUEUE);
-        MemStore {
+    /// A WAL file ends on a page boundary, so `page_size` is also the
+    /// granularity at which a file tracks `max_file_size`: crossing the
+    /// threshold seals the active page, and the tail of that page goes unused.
+    /// A test that wants many small files wants a small page here.
+    ///
+    /// A budget too small for [`MEM_MIN_PAGES_PER_QUEUE`] pages is an error
+    /// rather than a floor. Rounding it up is how `max_memory_usage` stops
+    /// meaning what it says -- at a 4 MiB page a 1 MiB budget would silently
+    /// allocate 8 MiB -- and the pool exists to make that number true.
+    pub fn with_page_size(max_memory_usage: usize, page_size: usize) -> Result<Self, crate::Error> {
+        let needed = MEM_MIN_PAGES_PER_QUEUE.saturating_mul(page_size);
+        let pages = max_memory_usage / page_size.max(1);
+        if pages < MEM_MIN_PAGES_PER_QUEUE {
+            return Err(crate::Error::MemoryBelowFloor {
+                max_memory_usage,
+                page_size,
+                needed,
+            });
+        }
+        Ok(MemStore {
             queues: RwLock::new(HashMap::new()),
             arena: Arc::new(WalArena::new(pages, page_size)),
             page_size,
             next_ring_id: AtomicU64::new(0),
-        }
+        })
     }
 
     /// The shared page arena, for tests that assert on who holds what.

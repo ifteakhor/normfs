@@ -328,7 +328,9 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
 
     let queue = QueueIdResolver::new("test_instance").resolve("order");
     let first = b"AAAA-entry-zero".as_slice();
-    let oversized = vec![b'B'; 5000];
+    // Wide enough to fill its page on its own, so entries 1 and 2 land on
+    // different pages and reach the file as two separate runs.
+    let second = vec![b'B'; crate::page_pool::max_record_len(4096)];
     let third = b"CCCC-entry-two".as_slice();
 
     pool.place(0, first).await.unwrap();
@@ -342,10 +344,10 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    // Entry 1 is larger than a page, so the pool holds it whole; entry 2 lands
-    // in a page. Neither is handed to the writer yet, and several flush ticks
-    // pass while they wait: nothing may reach the file in that window.
-    pool.place(1, &oversized).await.unwrap();
+    // Entry 1 fills a page and entry 2 opens the next one. Neither is handed to
+    // the writer yet, and several flush ticks pass while they wait: nothing may
+    // reach the file in that window.
+    pool.place(1, &second).await.unwrap();
     pool.place(2, third).await.unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert_eq!(
@@ -376,10 +378,10 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
             .unwrap_or_else(|| panic!("a record is missing from the file"))
     };
     assert!(
-        at(first) < at(&oversized) && at(&oversized) < at(third),
+        at(first) < at(&second) && at(&second) < at(third),
         "records reached the file out of id order: 0 at {}, 1 at {}, 2 at {}",
         at(first),
-        at(&oversized),
+        at(&second),
         at(third)
     );
 }
