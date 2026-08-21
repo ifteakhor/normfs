@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="940" viewBox="0 0 1280 940">
+<rect width="1280" height="940" fill="#ffffff"/>
+<text x="44" y="46" font-family="Helvetica, Arial, sans-serif" font-size="24" fill="#161616" text-anchor="start" font-weight="700">Banning oversize records: what it costs the rover's camera</text>
+<text x="44" y="72" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#6b6b6b" text-anchor="start" font-weight="normal">Raspberry Pi 5, disk-bound. Peak process memory, mean of two rounds with the run order rotated. Lower is better.</text>
+<rect x="60" y="150" width="570" height="300" fill="#fbfbfb" stroke="#e6e6e6"/>
+<text x="60" y="122" font-family="Helvetica, Arial, sans-serif" font-size="16" fill="#161616" text-anchor="start" font-weight="600">Camera at 20 frames/s — peak memory (MiB)</text>
+<text x="60" y="140" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#6b6b6b" text-anchor="start" font-weight="normal">the rate the rover's camera actually writes</text>
+<line x1="116" y1="396.0" x2="614" y2="396.0" stroke="#e6e6e6"/>
+<text x="108" y="400.0" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">0</text>
+<line x1="116" y1="350.4" x2="614" y2="350.4" stroke="#e6e6e6"/>
+<text x="108" y="354.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">140</text>
+<line x1="116" y1="304.8" x2="614" y2="304.8" stroke="#e6e6e6"/>
+<text x="108" y="308.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">280</text>
+<line x1="116" y1="259.2" x2="614" y2="259.2" stroke="#e6e6e6"/>
+<text x="108" y="263.20000000000005" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">420</text>
+<line x1="116" y1="213.6" x2="614" y2="213.6" stroke="#e6e6e6"/>
+<text x="108" y="217.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">560</text>
+<line x1="116" y1="168.0" x2="614" y2="168.0" stroke="#e6e6e6"/>
+<text x="108" y="172.0" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">700</text>
+<rect x="160.8" y="344.5" width="76.4" height="51.5" fill="#2f6f4f"/>
+<text x="199.0" y="336.5" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#161616" text-anchor="middle">158</text>
+<text x="199.0" y="416" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="middle" font-weight="600">keep oversize</text>
+<text x="199.0" y="432" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="middle" font-weight="normal">256 KB pages</text>
+<rect x="326.8" y="204.8" width="76.4" height="191.2" fill="#b4472f"/>
+<text x="365.0" y="196.8" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#161616" text-anchor="middle">587</text>
+<text x="365.0" y="416" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="middle" font-weight="600">ban</text>
+<text x="365.0" y="432" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="middle" font-weight="normal">4 MB pages</text>
+<rect x="492.8" y="197.3" width="76.4" height="198.7" fill="#8c3620"/>
+<text x="531.0" y="189.3" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#161616" text-anchor="middle">610</text>
+<text x="531.0" y="416" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="middle" font-weight="600">ban</text>
+<text x="531.0" y="432" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="middle" font-weight="normal">16 MB pages</text>
+<line x1="116" y1="396" x2="614" y2="396" stroke="#161616"/>
+<text x="345.0" y="452" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#6b6b6b" text-anchor="middle" font-weight="normal">only these three can run: a 1 MiB frame needs a 4 MB page once oversize is banned</text>
+<rect x="670" y="150" width="570" height="300" fill="#fbfbfb" stroke="#e6e6e6"/>
+<text x="670" y="122" font-family="Helvetica, Arial, sans-serif" font-size="16" fill="#161616" text-anchor="start" font-weight="600">Camera burst, 2000 x 1 MiB — peak memory (MiB)</text>
+<text x="670" y="140" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#6b6b6b" text-anchor="start" font-weight="normal">as fast as the queue accepts</text>
+<line x1="726" y1="396.0" x2="1224" y2="396.0" stroke="#e6e6e6"/>
+<text x="718" y="400.0" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">0</text>
+<line x1="726" y1="350.4" x2="1224" y2="350.4" stroke="#e6e6e6"/>
+<text x="718" y="354.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">200</text>
+<line x1="726" y1="304.8" x2="1224" y2="304.8" stroke="#e6e6e6"/>
+<text x="718" y="308.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">400</text>
+<line x1="726" y1="259.2" x2="1224" y2="259.2" stroke="#e6e6e6"/>
+<text x="718" y="263.20000000000005" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">600</text>
+<line x1="726" y1="213.6" x2="1224" y2="213.6" stroke="#e6e6e6"/>
+<text x="718" y="217.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">800</text>
+<line x1="726" y1="168.0" x2="1224" y2="168.0" stroke="#e6e6e6"/>
+<text x="718" y="172.0" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">1000</text>
+<rect x="770.8" y="301.6" width="76.4" height="94.4" fill="#2f6f4f"/>
+<text x="809.0" y="293.6" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#161616" text-anchor="middle">414</text>
+<text x="809.0" y="416" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="middle" font-weight="600">keep oversize</text>
+<text x="809.0" y="432" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="middle" font-weight="normal">256 KB pages</text>
+<rect x="936.8" y="217.7" width="76.4" height="178.3" fill="#b4472f"/>
+<text x="975.0" y="209.7" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#161616" text-anchor="middle">782</text>
+<text x="975.0" y="416" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="middle" font-weight="600">ban</text>
+<text x="975.0" y="432" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="middle" font-weight="normal">4 MB pages</text>
+<rect x="1102.8" y="179.2" width="76.4" height="216.8" fill="#8c3620"/>
+<text x="1141.0" y="171.2" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#161616" text-anchor="middle">951</text>
+<text x="1141.0" y="416" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="middle" font-weight="600">ban</text>
+<text x="1141.0" y="432" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="middle" font-weight="normal">16 MB pages</text>
+<line x1="726" y1="396" x2="1224" y2="396" stroke="#161616"/>
+<text x="955.0" y="452" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#6b6b6b" text-anchor="middle" font-weight="normal">16 MB is worse than 4 MB: a 1 MiB frame still occupies one whole page</text>
+<rect x="60" y="548" width="570" height="250" fill="#fbfbfb" stroke="#e6e6e6"/>
+<text x="60" y="520" font-family="Helvetica, Arial, sans-serif" font-size="16" fill="#161616" text-anchor="start" font-weight="600">Control: at the same page size, the two designs match</text>
+<text x="60" y="538" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#6b6b6b" text-anchor="start" font-weight="normal">burst peak memory (MiB) — deleting the path changed nothing about the path that remains</text>
+<line x1="116" y1="744.0" x2="614" y2="744.0" stroke="#e6e6e6"/>
+<text x="108" y="748.0" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">0</text>
+<line x1="116" y1="708.4" x2="614" y2="708.4" stroke="#e6e6e6"/>
+<text x="108" y="712.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">200</text>
+<line x1="116" y1="672.8" x2="614" y2="672.8" stroke="#e6e6e6"/>
+<text x="108" y="676.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">400</text>
+<line x1="116" y1="637.2" x2="614" y2="637.2" stroke="#e6e6e6"/>
+<text x="108" y="641.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">600</text>
+<line x1="116" y1="601.6" x2="614" y2="601.6" stroke="#e6e6e6"/>
+<text x="108" y="605.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">800</text>
+<line x1="116" y1="566.0" x2="614" y2="566.0" stroke="#e6e6e6"/>
+<text x="108" y="570.0" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">1000</text>
+<rect x="186.7" y="594.8" width="49.8" height="149.2" fill="#7fa892"/>
+<text x="211.6" y="587.8" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#161616" text-anchor="middle">838</text>
+<rect x="244.5" y="604.8" width="49.8" height="139.2" fill="#b4472f"/>
+<text x="269.4" y="597.8" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#161616" text-anchor="middle">782</text>
+<text x="240.5" y="764" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="middle" font-weight="600">4m</text>
+<rect x="435.7" y="579.2" width="49.8" height="164.8" fill="#7fa892"/>
+<text x="460.6" y="572.2" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#161616" text-anchor="middle">926</text>
+<rect x="493.5" y="574.7" width="49.8" height="169.3" fill="#b4472f"/>
+<text x="518.4" y="567.7" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#161616" text-anchor="middle">951</text>
+<text x="489.5" y="764" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="middle" font-weight="600">16m</text>
+<line x1="116" y1="744" x2="614" y2="744" stroke="#161616"/>
+<rect x="670" y="548" width="570" height="250" fill="#fbfbfb" stroke="#e6e6e6"/>
+<text x="670" y="520" font-family="Helvetica, Arial, sans-serif" font-size="16" fill="#161616" text-anchor="start" font-weight="600">Speed is unaffected — CPU seconds, burst</text>
+<text x="670" y="538" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#6b6b6b" text-anchor="start" font-weight="normal">page size and the ban make no measurable difference</text>
+<line x1="726" y1="744.0" x2="1224" y2="744.0" stroke="#e6e6e6"/>
+<text x="718" y="748.0" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">0</text>
+<line x1="726" y1="708.4" x2="1224" y2="708.4" stroke="#e6e6e6"/>
+<text x="718" y="712.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">5</text>
+<line x1="726" y1="672.8" x2="1224" y2="672.8" stroke="#e6e6e6"/>
+<text x="718" y="676.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">10</text>
+<line x1="726" y1="637.2" x2="1224" y2="637.2" stroke="#e6e6e6"/>
+<text x="718" y="641.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">14</text>
+<line x1="726" y1="601.6" x2="1224" y2="601.6" stroke="#e6e6e6"/>
+<text x="718" y="605.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">19</text>
+<line x1="726" y1="566.0" x2="1224" y2="566.0" stroke="#e6e6e6"/>
+<text x="718" y="570.0" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b6b6b" text-anchor="end" font-weight="normal">24</text>
+<rect x="796.7" y="603.1" width="49.8" height="140.9" fill="#7fa892"/>
+<text x="821.6" y="596.1" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#161616" text-anchor="middle">19</text>
+<rect x="854.5" y="601.6" width="49.8" height="142.4" fill="#b4472f"/>
+<text x="879.4" y="594.6" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#161616" text-anchor="middle">19</text>
+<text x="850.5" y="764" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="middle" font-weight="600">4m</text>
+<rect x="1045.7" y="602.3" width="49.8" height="141.7" fill="#7fa892"/>
+<text x="1070.6" y="595.3" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#161616" text-anchor="middle">19</text>
+<rect x="1103.5" y="601.6" width="49.8" height="142.4" fill="#b4472f"/>
+<text x="1128.4" y="594.6" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#161616" text-anchor="middle">19</text>
+<text x="1099.5" y="764" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="middle" font-weight="600">16m</text>
+<line x1="726" y1="744" x2="1224" y2="744" stroke="#161616"/>
+<rect x="60" y="828" width="14" height="14" fill="#7fa892"/>
+<text x="80" y="840" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="start" font-weight="normal">pre-ban PR 25</text>
+<rect x="230" y="828" width="14" height="14" fill="#b4472f"/>
+<text x="250" y="840" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="start" font-weight="normal">oversize banned</text>
+<text x="44" y="880" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="start" font-weight="normal">At the rover's real frame rate the deleted path held the workload in 158 MiB; the smallest page that accepts a 1 MiB frame costs ~590 MiB — 3.7x, for no gain in speed.</text>
+<text x="44" y="900" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#161616" text-anchor="start" font-weight="normal">A 1 MiB frame misses a 1 MiB page by 11 bytes (varint length + CRC + offset slot), so 4 MB is the floor. The 50 B CAN workload is unaffected either way.</text>
+<text x="44" y="920" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#6b6b6b" text-anchor="start" font-weight="normal">What the ban buys in exchange: ~410 fewer lines of unproven Rust in the flush and read paths.</text>
+</svg>
