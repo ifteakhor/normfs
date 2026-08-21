@@ -421,7 +421,12 @@ impl WalRing {
             Some(k) => k,
             None => return AppendOutcome::Full,
         };
-        self.rotate_into(idx);
+        if !self.rotate_into(idx) {
+            // The page the selector chose is not one the predicate allows.
+            // Full is what the caller already waits on, and waiting is the
+            // right answer to a page that is not safe to discard.
+            return AppendOutcome::Full;
+        }
 
         let second = unsafe { normfs_wal_ring_try_append(self.ring.as_mut(), ptr, size) };
         match second.status {
@@ -431,7 +436,8 @@ impl WalRing {
         }
     }
 
-    /// Discards page `index` and makes it active.
+    /// Discards page `index` and makes it active. False when the page may not
+    /// be discarded, in which case nothing happened.
     ///
     /// `normfs_wal_ring_rotate_to` requires the page to be reusable — nothing
     /// pinning it, and nothing on it below the durable watermark. That
@@ -443,38 +449,76 @@ impl WalRing {
     /// proven — the check is the proven predicate itself, not a restatement of
     /// it. `assigns \nothing`, so the shared page reference may be handed over
     /// as a raw pointer.
-    fn rotate_into(&mut self, index: usize) {
-        debug_assert!(index < self.ring.page_count, "rotate target out of range");
+    ///
+    /// The check runs in every build. It used to be a `debug_assert!`, which is
+    /// compiled out of release — so the one guard standing between an unproven
+    /// selector and a record being overwritten before it reached the disk was
+    /// absent from every build that matters. Refusing costs a caller a wait,
+    /// which is what it does when no page is reclaimable anyway; the assertion
+    /// stays beside it so a selector that produces this is a test failure
+    /// rather than only a slow queue.
+    fn rotate_into(&mut self, index: usize) -> bool {
+        if index >= self.ring.page_count {
+            debug_assert!(false, "rotate target {index} is outside this ring");
+            return false;
+        }
+        if unsafe { normfs_wal_page_reusable(self.page(index), self.ring.min_essential_id) } == 0 {
+            log::error!(
+                target: "normfs-wal",
+                "refusing to rotate into page {index}: it is pinned or holds records that are \
+                 not yet on disk. The page selector and the durability predicate disagree, \
+                 which is a bug; waiting instead of discarding is the safe answer to it."
+            );
+            debug_assert!(
+                false,
+                "rotating into page {index}, which is pinned or holds records that are not yet durable"
+            );
+            return false;
+        }
         let page = self.page_ref(index);
         if page.count > 0 {
             let last = page.last_entry_id;
             self.evicted_below = Some(self.evicted_below.map_or(last, |e| e.max(last)));
         }
-        debug_assert!(
-            unsafe { normfs_wal_page_reusable(self.page(index), self.ring.min_essential_id) != 0 },
-            "rotating into page {index}, which is pinned or holds records that are not yet durable"
-        );
         unsafe { normfs_wal_ring_rotate_to(self.ring.as_mut(), index) };
+        true
     }
 
     /// Picks the page to rotate into: an empty page if any, otherwise the
     /// oldest page whose entries are all below the essential id.
+    ///
+    /// Whether a page *may* be taken is asked of `normfs_wal_page_reusable`,
+    /// the proven predicate, rather than restated here. Restating it is how the
+    /// two drift apart, and this one is the durability theorem: the whole of
+    /// what stops a record being overwritten before it reached the disk.
+    ///
+    /// Which of the permitted pages to take is this function's own, and it is
+    /// policy rather than safety — every candidate it chooses between is one
+    /// the predicate has already allowed. Empty first, then oldest, so the
+    /// entries left cached stay a contiguous run ending at the newest: a
+    /// reader asking for the tail is the common case, and evicting from the
+    /// middle would leave memory answering either side of a hole.
+    ///
+    /// `normfs_wal_ring_find_reusable` is the C selector, and it is proven and
+    /// scheduled, but it is deliberately not bound here: it returns the first
+    /// reusable page by index, which is unrelated to age, so taking it would
+    /// scatter the cached run for no gain the reader can see. What Rust borrows
+    /// from C is the predicate that makes a choice legal, which is the half
+    /// that carries the theorem.
     fn oldest_reclaimable_page(&self) -> Option<usize> {
         let min_essential = self.ring.min_essential_id;
         let mut empty: Option<usize> = None;
         let mut oldest: Option<(usize, u64)> = None;
         for k in 0..self.ring.page_count {
-            let p = self.page_ref(k);
-            if p.pin_count != 0 {
+            if unsafe { normfs_wal_page_reusable(self.page(k), min_essential) } == 0 {
                 continue;
             }
+            let p = self.page_ref(k);
             if p.count == 0 {
                 empty.get_or_insert(k);
                 continue;
             }
-            if p.last_entry_id < min_essential
-                && oldest.is_none_or(|(_, fid)| p.first_entry_id < fid)
-            {
+            if oldest.is_none_or(|(_, fid)| p.first_entry_id < fid) {
                 oldest = Some((k, p.first_entry_id));
             }
         }
@@ -505,7 +549,9 @@ impl WalRing {
             let Some(idx) = self.oldest_reclaimable_page() else {
                 return false;
             };
-            self.rotate_into(idx);
+            if !self.rotate_into(idx) {
+                return false;
+            }
         }
         unsafe { normfs_wal_ring_skip_entry(self.ring.as_mut()) };
         true
@@ -579,7 +625,11 @@ impl WalRing {
         self.ring.pool = pool;
         self.ring.first_slot = first_slot;
         if self.page_ref(self.ring.active).pin_count != 0 {
-            self.rotate_into(free);
+            // `free` is unpinned and the init above emptied every page, so
+            // `normfs_wal_page_is_reusable` holds of it by construction and
+            // this cannot refuse.
+            let moved = self.rotate_into(free);
+            debug_assert!(moved, "an unpinned, empty page must be reusable");
         }
         true
     }
