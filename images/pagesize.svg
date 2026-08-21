@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="660" viewBox="0 0 1200 660" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+<rect width="1200" height="660" fill="#FFFFFF"/>
+<text x="88" y="62" font-size="34" font-weight="700" fill="#1f2328">Page size: what it changes, what it does not</text>
+<text x="88" y="92" font-size="14.5" fill="#3A424F">One knob, five values (64 KiB to 16 MiB), the rover&#8217;s two record sizes: CAN (~50 B) and camera frames (1 MiB) - medians of 2 rounds, order rotated</text>
+<text x="88" y="113" font-size="14.5" fill="#626B7A">branch feat/v1-page-pool dfe0f41 | throughput moved with run order and disk state, not with page size, so it is not charted - CPU and RSS repeated</text>
+<path d="M 92 146 L 118 146 L 105 172 Z" fill="#1f2328"/>
+<text x="132" y="170" font-size="27" font-weight="700" letter-spacing="1.5" fill="#1f2328">LESS IS BETTER</text>
+<text x="410" y="169" font-size="16" fill="#626B7A">the shorter bar wins, in every panel</text>
+<rect x="850" y="155" width="15" height="15" rx="2" fill="#D0453B"/>
+<text x="872" y="168" font-size="15" font-weight="600" fill="#3A424F">256k, today's default</text>
+<rect x="1070" y="155" width="15" height="15" rx="2" fill="#1F5FBF"/>
+<text x="1092" y="168" font-size="15" font-weight="600" fill="#3A424F">other sizes</text>
+<text x="88" y="242" font-size="15.5" font-weight="700" fill="#1f2328">CAN load: CPU, x86</text>
+<text x="88" y="261" font-size="11.5" fill="#626B7A">cpu-seconds - 5M x 50 B to settled</text>
+<rect x="92" y="290.0" width="38" height="210.0" rx="3" fill="#1F5FBF"/>
+<text x="111.0" y="283.0" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">8.9</text>
+<text x="111.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">64k</text>
+<rect x="138" y="290.0" width="38" height="210.0" rx="3" fill="#D0453B"/>
+<text x="157.0" y="283.0" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">8.9</text>
+<text x="157.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">256k</text>
+<rect x="184" y="327.8" width="38" height="172.2" rx="3" fill="#1F5FBF"/>
+<text x="203.0" y="320.8" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">7.3</text>
+<text x="203.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">1m</text>
+<rect x="230" y="318.3" width="38" height="181.7" rx="3" fill="#1F5FBF"/>
+<text x="249.0" y="311.3" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">7.7</text>
+<text x="249.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">4m</text>
+<rect x="276" y="320.7" width="38" height="179.3" rx="3" fill="#1F5FBF"/>
+<text x="295.0" y="313.7" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">7.6</text>
+<text x="295.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">16m</text>
+<line x1="88" y1="500" x2="314" y2="500" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="88" y="540" font-size="12" fill="#626B7A" font-style="italic">flat within run noise</text>
+<text x="360" y="242" font-size="15.5" font-weight="700" fill="#1f2328">CAN load: CPU, Pi 5</text>
+<text x="360" y="261" font-size="11.5" fill="#626B7A">cpu-seconds</text>
+<rect x="364" y="293.4" width="38" height="206.6" rx="3" fill="#1F5FBF"/>
+<text x="383.0" y="286.4" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">12.3</text>
+<text x="383.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">64k</text>
+<rect x="410" y="293.4" width="38" height="206.6" rx="3" fill="#D0453B"/>
+<text x="429.0" y="286.4" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">12.3</text>
+<text x="429.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">256k</text>
+<rect x="456" y="310.2" width="38" height="189.8" rx="3" fill="#1F5FBF"/>
+<text x="475.0" y="303.2" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">11.3</text>
+<text x="475.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">1m</text>
+<rect x="502" y="303.4" width="38" height="196.6" rx="3" fill="#1F5FBF"/>
+<text x="521.0" y="296.4" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">11.7</text>
+<text x="521.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">4m</text>
+<rect x="548" y="290.0" width="38" height="210.0" rx="3" fill="#1F5FBF"/>
+<text x="567.0" y="283.0" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">12.5</text>
+<text x="567.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">16m</text>
+<line x1="360" y1="500" x2="586" y2="500" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="360" y="540" font-size="12" fill="#626B7A" font-style="italic">flat: page size buys no CPU</text>
+<text x="632" y="242" font-size="15.5" font-weight="700" fill="#1f2328">Camera burst: peak RSS, x86</text>
+<text x="632" y="261" font-size="11.5" fill="#626B7A">MiB - 2000 x 1 MiB as fast as accepted</text>
+<rect x="636" y="411.9" width="38" height="88.1" rx="3" fill="#1F5FBF"/>
+<text x="655.0" y="404.9" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">540</text>
+<text x="655.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">64k</text>
+<rect x="682" y="409.6" width="38" height="90.4" rx="3" fill="#D0453B"/>
+<text x="701.0" y="402.6" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">554</text>
+<text x="701.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">256k</text>
+<rect x="728" y="402.4" width="38" height="97.6" rx="3" fill="#1F5FBF"/>
+<text x="747.0" y="395.4" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">598</text>
+<text x="747.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">1m</text>
+<rect x="774" y="319.5" width="38" height="180.5" rx="3" fill="#1F5FBF"/>
+<text x="793.0" y="312.5" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">1106</text>
+<text x="793.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">4m</text>
+<rect x="820" y="290.0" width="38" height="210.0" rx="3" fill="#1F5FBF"/>
+<text x="839.0" y="283.0" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">1287</text>
+<text x="839.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">16m</text>
+<line x1="632" y1="500" x2="858" y2="500" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="632" y="540" font-size="12" fill="#626B7A" font-style="italic">doubles past 1m, both rounds agree</text>
+<text x="904" y="242" font-size="15.5" font-weight="700" fill="#1f2328">Camera burst: peak RSS, Pi 5</text>
+<text x="904" y="261" font-size="11.5" fill="#626B7A">MiB</text>
+<rect x="908" y="437.2" width="38" height="62.8" rx="3" fill="#1F5FBF"/>
+<text x="927.0" y="430.2" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">277</text>
+<text x="927.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">64k</text>
+<rect x="954" y="406.1" width="38" height="93.9" rx="3" fill="#D0453B"/>
+<text x="973.0" y="399.1" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">414</text>
+<text x="973.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">256k</text>
+<rect x="1000" y="394.8" width="38" height="105.2" rx="3" fill="#1F5FBF"/>
+<text x="1019.0" y="387.8" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">464</text>
+<text x="1019.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">1m</text>
+<rect x="1046" y="310.0" width="38" height="190.0" rx="3" fill="#1F5FBF"/>
+<text x="1065.0" y="303.0" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">838</text>
+<text x="1065.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">4m</text>
+<rect x="1092" y="290.0" width="38" height="210.0" rx="3" fill="#1F5FBF"/>
+<text x="1111.0" y="283.0" font-size="12" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">926</text>
+<text x="1111.0" y="517" font-size="11.5" text-anchor="middle" fill="#626B7A">16m</text>
+<line x1="904" y1="500" x2="1130" y2="500" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="904" y="540" font-size="12" fill="#626B7A" font-style="italic">same shape on the rover-like box</text>
+<line x1="88" y1="578" x2="1112" y2="578" stroke="#DFE3E9" stroke-width="1"/>
+<text x="88" y="600" font-size="12.5" fill="#626B7A">The camera&#8217;s real load (1 MiB at 20/s, paced) is cheap at every page size: 5-9% of one core on the Pi, 10-13% on x86, so the knob does not matter there either.</text>
+<text x="88" y="620" font-size="12.5" fill="#626B7A">What page size does decide: the per-record cap if oversize records are banned, RAM per idle queue (2 pages), and how many chunks the budget divides into.</text>
+<text x="88" y="640" font-size="12.5" fill="#626B7A">A burst of 1 MiB records peaks at ~2x the RSS on 4m/16m pages: paged placement keeps a full arena in flight where the oversize path throttles earlier.</text>
+</svg>
