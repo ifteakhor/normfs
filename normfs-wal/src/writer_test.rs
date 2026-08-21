@@ -671,3 +671,121 @@ async fn test_v1_rotates_on_file_size_not_field_width() {
     assert_eq!(entry.id, UintN::from(1u64));
     assert_eq!(entry.data, Bytes::from(vec![b'x'; 512]));
 }
+
+/// A rotation that cannot open its next file waits for one that can, and the
+/// queue drains once it does.
+///
+/// The two sides count files independently, and the enqueue side counts first:
+/// it stamps a record's page with the new file before the writer has closed the
+/// old one. A rotation that gave up half-way used to leave them apart for good,
+/// and `take_pending` skips pages stamped above the writer's epoch -- so those
+/// pages never reached a file, never became durable, never became reusable, and
+/// the queue stopped on a pool nothing could drain.
+///
+/// The failure is injected with a directory standing where the next file has to
+/// go, which `open` refuses; removing it is what lets the rotation through.
+#[tokio::test]
+async fn a_rotation_that_cannot_open_its_file_waits_rather_than_desyncing() {
+    use crate::page_pool::PagePool;
+    use std::sync::Arc;
+
+    init_logger();
+    let tmp_dir = tempdir().unwrap();
+    let (written_sender, _written) = mpsc::unbounded_channel();
+    let (wal_complete_sender, _complete) = mpsc::unbounded_channel();
+    let store = WalStore::new(tmp_dir.path(), written_sender, wal_complete_sender);
+
+    let resolver = QueueIdResolver::new("test_instance");
+    let queue_id = resolver.resolve("rotate_fault");
+    let first_file = UintN::from(1u64);
+
+    const PAGE_SIZE: usize = 1024;
+    let record = Bytes::from(vec![b'r'; 200]);
+
+    let pool = Arc::new(PagePool::new(8, PAGE_SIZE, 0));
+    let settings = WalSettings {
+        // Below a page, so every page that opens rotates the file.
+        max_file_size: 256,
+        write_buffer_size: 128,
+        write_interval: Duration::from_millis(10),
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::None,
+        compression_type: normfs_types::CompressionType::None,
+    };
+
+    let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
+    tokio::fs::create_dir_all(&wal_dir).await.unwrap();
+
+    // A directory where file 2 has to be created. `open` cannot write to it, so
+    // the first rotation fails and has to retry.
+    let blocked = UintN::from(2u64).to_file_path(wal_dir.to_str().unwrap(), "wal");
+    tokio::fs::create_dir_all(&blocked).await.unwrap();
+
+    store
+        .start_writer_with_pool(
+            &queue_id,
+            &first_file,
+            WalHeader::default(),
+            settings,
+            None,
+            Some(Arc::clone(&pool)),
+        )
+        .await
+        .unwrap();
+
+    // Enough records to cross the file threshold several times over, so the
+    // blocked rotation is reached and later ones queue up behind it.
+    const COUNT: u64 = 24;
+    for id in 0..COUNT {
+        let placement = pool.place(id, &record).await.expect("a record fits a page");
+        store
+            .enqueue_pooled(&queue_id, UintN::from(id), Bytes::new(), placement)
+            .unwrap();
+    }
+
+    // Blocked: the writer is retrying, so nothing past the first file can be
+    // durable. If the rotation had given up instead, this would stay true for
+    // ever -- which is the bug.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let stuck = pool.durable_before();
+    assert!(
+        stuck < COUNT,
+        "the whole queue drained with file 2 blocked, so this test proves nothing"
+    );
+
+    // Clear the way. The rotation must then complete on its own.
+    tokio::fs::remove_dir(&blocked).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while pool.durable_before() < COUNT {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the queue never drained after the rotation was unblocked: durable up to {} of \
+             {COUNT}, which is the writer and the pool left on different files",
+            pool.durable_before()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    store.close().await.unwrap();
+
+    // Every record on disk, once, in order -- the epochs reconverged rather
+    // than the pages behind the failure being skipped.
+    let mut seen = 0u64;
+    for file in 1..=16u64 {
+        let file_id = UintN::from(file);
+        let Ok(content) = get_wal_content(&wal_dir, &file_id).await else {
+            continue;
+        };
+        assert_eq!(
+            content.entries_before,
+            UintN::from(seen),
+            "file {file} claims a different starting id than the files before it hold"
+        );
+        seen += content.num_entries.to_u64().unwrap();
+    }
+    assert_eq!(
+        seen, COUNT,
+        "records reached no file at all: the writer and the pool never agreed again"
+    );
+}

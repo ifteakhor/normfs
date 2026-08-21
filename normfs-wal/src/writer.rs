@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use std::sync::Arc;
 
@@ -271,6 +272,13 @@ impl WriterState {
         };
 
         let mut handed_through: Option<u64> = None;
+        // Held rather than returned, so the handover mark below runs whatever
+        // happens in the loop. An entry the file writer has already been given
+        // that the pool is never told about is a page the pool will not hand
+        // over -- `take_pending` stops at the handover bound -- so it never
+        // drains, never becomes reusable, and the queue stops on a full pool.
+        // Failing to write one record must not cost the records behind it.
+        let mut outcome: Result<(), WalError> = Ok(());
         if entries.is_empty() {
             log::debug!(
                 "WAL writer: no entries ready to write for queue '{}'",
@@ -291,8 +299,15 @@ impl WriterState {
             // Rotation is decided on the encoded length, not the record length:
             // the varint prefix and CRC also have to fit. A record wider than a
             // u32 has no frame at all, so it is an error rather than a rotation.
-            let record_size = u32::try_from(data_len)
-                .map_err(|_| WalError::WalEntryV1Error(WalEntryV1Error::RecordTooLarge(data_len)))?;
+            let record_size = match u32::try_from(data_len) {
+                Ok(size) => size,
+                Err(_) => {
+                    outcome = Err(WalError::WalEntryV1Error(WalEntryV1Error::RecordTooLarge(
+                        data_len,
+                    )));
+                    break;
+                }
+            };
 
             // With a pool the decision was already taken, at enqueue time and
             // before these bytes entered a page — so the writer carries it out
@@ -320,7 +335,7 @@ impl WriterState {
                     entry_id,
                     data_len
                 );
-                self.rotate(entry_id.clone(), data_len).await?;
+                self.rotate(entry_id.clone(), data_len).await;
             } else {
                 log::debug!(
                     "WAL writer: current file {} for queue '{}' can hold entry {}, data size: {}",
@@ -342,7 +357,10 @@ impl WriterState {
                 Bytes::new()
             } else {
                 let mut entry_buf = BytesMut::new();
-                WalEntryV1::new(&data).write_to_bytes(&mut entry_buf)?;
+                if let Err(e) = WalEntryV1::new(&data).write_to_bytes(&mut entry_buf) {
+                    outcome = Err(e.into());
+                    break;
+                }
                 entry_buf.freeze()
             };
 
@@ -399,7 +417,7 @@ impl WriterState {
             pool.note_handed_over(id);
         }
 
-        Ok(())
+        outcome
     }
 
     /// Checks the writer's idea of which file it is on against the enqueue
@@ -448,8 +466,22 @@ impl WriterState {
             self.queue_id
         );
 
+        // Every entry is attempted, and the first failure is what the batch
+        // reports. Stopping at it would leave the entries behind it in their
+        // pages with nothing ever handing them over, so one unwritable record
+        // would take the rest of the batch -- and the queue -- with it.
+        let mut outcome = Ok(());
         for (entry_id, data, placement) in entries {
-            self.write(entry_id, data, placement).await?;
+            if let Err(e) = self.write(entry_id, data, placement).await {
+                log::error!(
+                    "WAL writer: error writing an entry of a batch for queue '{}': {}",
+                    self.queue_id,
+                    e
+                );
+                if outcome.is_ok() {
+                    outcome = Err(e);
+                }
+            }
         }
 
         log::debug!(
@@ -457,14 +489,28 @@ impl WriterState {
             self.queue_id
         );
 
-        Ok(())
+        outcome
     }
 
-    async fn rotate(
-        &mut self,
-        next_entry_id: UintN,
-        next_data_size: usize,
-    ) -> Result<(), WalError> {
+    /// Rotates onto the next file. Does not fail, and must not.
+    ///
+    /// The enqueue side decided this rotation before the record's bytes entered
+    /// a page: it has already advanced its own file counter and stamped the
+    /// pages with it. So the two sides are only in step again once the writer
+    /// has arrived at the same file, and there is no consistent state to roll
+    /// back *to* -- the pages carry the new epoch whatever the writer does, and
+    /// the enqueue side has run on ahead over an unbounded channel.
+    ///
+    /// Leaving them apart is the worst of the options and used to be what
+    /// happened: `take_pending` skips pages stamped above the writer's epoch,
+    /// so every one of them would be skipped for ever. They never reach the
+    /// file, never become durable, never become reusable, and the queue stops
+    /// on a full pool that nothing can drain.
+    ///
+    /// So this converges forward instead, and waits as long as it has to. A
+    /// queue held up here is back-pressure of the same kind a full pool is:
+    /// appenders wait, and nothing is discarded or written out of order.
+    async fn rotate(&mut self, next_entry_id: UintN, next_data_size: usize) {
         log::info!(
             "WAL writer: rotating file for queue '{}', current file: {}, next entry: {}",
             self.queue_id,
@@ -472,7 +518,21 @@ impl WriterState {
             next_entry_id
         );
 
-        self.file_writer.close().await?;
+        // A failed close is the old file's final flush not completing, and its
+        // records are `take_pending`'s "already closed" case, which says so.
+        // The rotation still has to happen: stopping here would leave the two
+        // sides on different files for ever, which loses this file's records
+        // *and* every later file's.
+        if let Err(e) = self.file_writer.close().await {
+            log::error!(
+                "WAL writer: queue '{}': closing file {} failed ({}); its unflushed records \
+                 reach no file. Rotating anyway -- staying on a file the enqueue side has \
+                 already moved past would stall the queue for good.",
+                self.queue_id,
+                self.file_id,
+                e
+            );
+        }
         let _ = self.wal_complete_sender.send(WalFile {
             queue_id: self.queue_id.clone(),
             file_id: self.file_id.clone(),
@@ -502,16 +562,45 @@ impl WriterState {
         // flush ran inside `close()` and asked the pool for its own epoch's
         // pages, so it could not take this file's records however far ahead the
         // enqueue side had run — which is the whole of trap 3.
-        self.file_writer = new_file_writer(
-            &self.queue_path,
-            &self.file_id,
-            &self.header,
-            &self.settings,
-            self.written_sender.clone(),
-            self.pool.clone(),
-            self.file_epoch,
-        )
-        .await?;
+        //
+        // Retried rather than reported: the counters above have already moved,
+        // so returning here would leave the writer on a file it has no writer
+        // for. Opening a file is the kind of failure that passes -- a full
+        // disk, a descriptor limit -- so waiting for it to pass is a real
+        // strategy rather than a hope.
+        let mut attempt: u32 = 0;
+        loop {
+            match new_file_writer(
+                &self.queue_path,
+                &self.file_id,
+                &self.header,
+                &self.settings,
+                self.written_sender.clone(),
+                self.pool.clone(),
+                self.file_epoch,
+            )
+            .await
+            {
+                Ok(writer) => {
+                    self.file_writer = writer;
+                    break;
+                }
+                Err(e) => {
+                    if attempt % ROTATE_WARN_EVERY == 0 {
+                        log::error!(
+                            "WAL writer: queue '{}': opening file {} failed ({}); retrying. \
+                             Nothing is written or lost while this queue waits, but it is \
+                             not making progress either.",
+                            self.queue_id,
+                            self.file_id,
+                            e
+                        );
+                    }
+                    attempt = attempt.saturating_add(1);
+                    tokio::time::sleep(ROTATE_RETRY_DELAY).await;
+                }
+            }
+        }
 
         log::info!(
             "WAL writer: successfully rotated from file {} to {} for queue '{}'",
@@ -519,10 +608,15 @@ impl WriterState {
             self.file_id,
             self.queue_id
         );
-
-        Ok(())
     }
 }
+
+/// How long to wait between attempts to open the file a rotation needs.
+const ROTATE_RETRY_DELAY: Duration = Duration::from_millis(10);
+
+/// Attempts between complaints, so a queue stuck here says so about every five
+/// seconds rather than once or continuously.
+const ROTATE_WARN_EVERY: u32 = 500;
 
 async fn new_file_writer(
     queue_path: &Path,
