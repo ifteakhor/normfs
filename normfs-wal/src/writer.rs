@@ -203,17 +203,26 @@ impl WalWriter {
     ) -> Result<(), WalError> {
         log::trace!("WAL writer: enqueuing entry {} for write", entry_id);
 
+        // A pooled record's bytes reach the file from its page, so they do not
+        // ride the channel: only `placement.record_len` does. Otherwise every
+        // record in flight is held twice until the writer task gets to it.
+        let data = if placement.in_pool { Bytes::new() } else { data };
         self.write_chan
             .send(WriteRequest::Enqueue(entry_id, data, placement))
             .map_err(|_| WalError::SendError)
     }
 
-    pub fn enqueue_batch(&self, entries: Vec<(UintN, Bytes, Placement)>) -> Result<(), WalError> {
+    pub fn enqueue_batch(&self, mut entries: Vec<(UintN, Bytes, Placement)>) -> Result<(), WalError> {
         log::trace!(
             "WAL writer: enqueuing batch of {} entries for write",
             entries.len()
         );
 
+        for (_, data, placement) in entries.iter_mut() {
+            if placement.in_pool {
+                *data = Bytes::new();
+            }
+        }
         self.write_chan
             .send(WriteRequest::EnqueueBatch(entries))
             .map_err(|_| WalError::SendError)
@@ -271,12 +280,19 @@ impl WriterState {
         }
 
         for (entry_id, data, placement) in entries {
+            // A pooled record arrives without its payload; the placement
+            // carries the length instead.
+            let data_len = if placement.in_pool {
+                placement.record_len
+            } else {
+                data.len()
+            };
+
             // Rotation is decided on the encoded length, not the record length:
             // the varint prefix and CRC also have to fit. A record wider than a
             // u32 has no frame at all, so it is an error rather than a rotation.
-            let record_size = u32::try_from(data.len()).map_err(|_| {
-                WalError::WalEntryV1Error(WalEntryV1Error::RecordTooLarge(data.len()))
-            })?;
+            let record_size = u32::try_from(data_len)
+                .map_err(|_| WalError::WalEntryV1Error(WalEntryV1Error::RecordTooLarge(data_len)))?;
 
             // With a pool the decision was already taken, at enqueue time and
             // before these bytes entered a page — so the writer carries it out
@@ -302,16 +318,16 @@ impl WriterState {
                     "WAL writer: need to rotate file for queue '{}', entry {}, data size: {}",
                     self.queue_id,
                     entry_id,
-                    data.len()
+                    data_len
                 );
-                self.rotate(entry_id.clone(), data.len()).await?;
+                self.rotate(entry_id.clone(), data_len).await?;
             } else {
                 log::debug!(
                     "WAL writer: current file {} for queue '{}' can hold entry {}, data size: {}",
                     self.file_id,
                     self.queue_id,
                     entry_id,
-                    data.len()
+                    data_len
                 );
             }
 

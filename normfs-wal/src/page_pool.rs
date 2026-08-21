@@ -171,6 +171,10 @@ pub struct Placement {
     /// The record is already in a page, so its bytes reach the file from there
     /// and must not be buffered again.
     pub in_pool: bool,
+    /// The record's length. A pooled record rides the writer channel without
+    /// its payload — the pool already holds the bytes — and this is what the
+    /// writer sizes a rotation's header from instead.
+    pub record_len: usize,
     pub rotate: RotateHint,
     /// Which file this record was charged to, counted from zero.
     ///
@@ -399,7 +403,7 @@ pub(crate) fn encoded_len_of(record_len: usize) -> Option<u64> {
 ///
 /// The cost is that `max_file_size` is a threshold rather than a cap: a file
 /// overshoots it by at most the tail of one page.
-fn charge_paged(inner: &mut Inner, entry_len: u64, opened_page: bool) -> Placement {
+fn charge_paged(inner: &mut Inner, entry_len: u64, record_len: usize, opened_page: bool) -> Placement {
     let active = inner.ring.active_page();
     let Some(fill) = inner.fill.as_mut() else {
         // Not armed: no writer is taking pages from this pool yet, so there is
@@ -407,6 +411,7 @@ fn charge_paged(inner: &mut Inner, entry_len: u64, opened_page: bool) -> Placeme
         // either, so they are all still at the zero this would write.
         return Placement {
             in_pool: true,
+            record_len,
             rotate: RotateHint::None,
             epoch: 0,
         };
@@ -430,6 +435,7 @@ fn charge_paged(inner: &mut Inner, entry_len: u64, opened_page: bool) -> Placeme
 
     Placement {
         in_pool: true,
+        record_len,
         rotate,
         epoch,
     }
@@ -857,7 +863,7 @@ impl PagePool {
             match outcome {
                 AppendOutcome::Cached(_) => {
                     over_watermark = inner.unwritten >= self.flush_watermark;
-                    charge_paged(&mut inner, entry_len, opened_page)
+                    charge_paged(&mut inner, entry_len, record.len(), opened_page)
                 }
                 AppendOutcome::TooLarge => {
                     match self.hold_oversize(&mut inner, expected_id, record, entry_len)? {
@@ -936,7 +942,7 @@ impl PagePool {
         // file: it is the first thing in whatever comes after it, so the
         // boundary has somewhere to land. That is what `true` says here, and it
         // is why a queue whose every record is oversized still rotates files.
-        let placed = charge_paged(inner, entry_len, true);
+        let placed = charge_paged(inner, entry_len, record.len(), true);
 
         inner.oversize_bytes = inner.oversize_bytes.saturating_add(framed.len());
         inner.oversize.insert(
