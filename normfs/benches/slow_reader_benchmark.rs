@@ -30,6 +30,12 @@ const RECORDS: usize = 10_000_000;
 /// A queue gets 64 pages from the first, the floor of 2 from the second.
 const POOLS: [(&str, usize); 2] = [("default 256 MiB", 256 << 20), ("tight 1 MiB", 1 << 20)];
 
+/// Pinned rather than inherited. The question here is what share of a pool a
+/// reader can pin, so the pool has to be measured in pages rather than bytes --
+/// and the tight case is one page at the production default of 4 MiB, which is
+/// below the floor a queue needs to run at all.
+const PAGE_SIZE: usize = 256 * 1024;
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -38,6 +44,7 @@ async fn main() {
     // one would leave the read benchmarks a dataset half its manifest.
     let cfg = BenchConfig {
         dir: std::env::temp_dir().join("normfs-slow-reader-bench"),
+        mem_page_size: PAGE_SIZE,
         ..BenchConfig::new()
     };
     println!("NormFS Slow Reader Benchmark");
@@ -102,7 +109,11 @@ async fn run(
     memory: usize,
     readers: usize,
 ) -> Result<Run, Box<dyn std::error::Error>> {
-    println!("--- {} MiB pool, {readers} slow reader(s) ---", memory >> 20);
+    println!(
+        "--- {} MiB pool ({} pages), {readers} slow reader(s) ---",
+        memory >> 20,
+        memory / PAGE_SIZE
+    );
     cfg.reset_dir()?;
     cfg.write_manifest()?;
 

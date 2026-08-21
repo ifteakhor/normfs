@@ -56,6 +56,10 @@ pub struct BenchConfig {
     /// `None` disables the cap, so nothing offloads to the store.
     pub max_queue_bytes: Option<u64>,
     pub wal_file_bytes: usize,
+    /// Memory page size, which is both the record cap and the granularity a
+    /// WAL file ends at. Part of the dataset signature for that second reason:
+    /// two runs at different page sizes do not produce comparable files.
+    pub mem_page_size: usize,
 }
 
 impl BenchConfig {
@@ -68,6 +72,7 @@ impl BenchConfig {
             encryption: EncryptionType::None,
             max_queue_bytes: None,
             wal_file_bytes: WAL_FILE_BYTES,
+            mem_page_size: NormFsSettings::default().mem_page_size,
         }
     }
 
@@ -86,6 +91,7 @@ impl BenchConfig {
 
         NormFsSettings {
             max_disk_usage_per_queue: self.max_queue_bytes,
+            mem_page_size: self.mem_page_size,
             wal_settings: WalSettings {
                 max_file_size: self.wal_file_bytes,
                 ..Default::default()
@@ -123,6 +129,11 @@ impl BenchConfig {
             "WAL file size: {:.0} MiB",
             self.wal_file_bytes as f64 / (1024.0 * 1024.0)
         );
+        println!(
+            "Memory page size: {} KiB (largest record {} B)",
+            self.mem_page_size / 1024,
+            normfs_wal::max_record_len(self.mem_page_size)
+        );
         println!("Data directory: {}", self.dir.display());
         println!();
     }
@@ -131,13 +142,15 @@ impl BenchConfig {
     /// rejected rather than silently measured.
     fn signature(&self) -> String {
         format!(
-            "blocks={} block_size={} compression={:?} encryption={:?} max_queue={:?} wal_file={}\n",
+            "blocks={} block_size={} compression={:?} encryption={:?} max_queue={:?} wal_file={} \
+             page={}\n",
             self.total_blocks,
             self.block_size,
             self.compression,
             self.encryption,
             self.max_queue_bytes,
-            self.wal_file_bytes
+            self.wal_file_bytes,
+            self.mem_page_size
         )
     }
 

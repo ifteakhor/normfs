@@ -3,15 +3,24 @@
 //!
 //! Run one case per invocation so the peak-RSS figure belongs to that case:
 //!
-//!   cargo bench -p normfs --bench record_size_bench -- can50
-//!   cargo bench -p normfs --bench record_size_bench -- img1m
-//!   cargo bench -p normfs --bench record_size_bench -- img1m_paced
+//!   cargo bench -p normfs --bench record_size_bench -- can50 256k
+//!   cargo bench -p normfs --bench record_size_bench -- img1m 4m
+//!   cargo bench -p normfs --bench record_size_bench -- img1m_paced 16m
 //!
 //! `img1m_paced` writes at the camera's real 20 frames/s for a fixed stretch
 //! and reports CPU as a share of one core; the other two write as fast as the
-//! queue accepts. The page size is compiled in (`MEM_PAGE_SIZE`), so a sweep
-//! over page sizes is one rebuild per point; pass a label for the printed line
-//! via NORMFS_BENCH_LABEL.
+//! queue accepts.
+//!
+//! The page size is the second argument, so a sweep is one build rather than
+//! one rebuild per point -- which is also what stops a stale binary
+//! reproducing a previous point's numbers exactly. It is echoed in the result
+//! line, so a pasted log still says what produced it. Omit it for the
+//! configured default. Pass a label for the printed line via
+//! NORMFS_BENCH_LABEL.
+//!
+//! A record larger than a page is refused, so `img1m` at a page below ~1 MiB
+//! reports its records as refused rather than quietly measuring something
+//! else.
 
 mod common;
 
@@ -40,7 +49,7 @@ fn peak_rss_mib() -> f64 {
     kib / 1024.0
 }
 
-fn settings() -> NormFsSettings {
+fn settings(page_size: usize) -> NormFsSettings {
     let queue_config = QueueConfig {
         compression_type: CompressionType::None,
         enable_fsync: true,
@@ -48,6 +57,7 @@ fn settings() -> NormFsSettings {
     };
     NormFsSettings {
         max_disk_usage_per_queue: None,
+        mem_page_size: page_size,
         wal_settings: WalSettings {
             max_file_size: 128 << 20,
             ..Default::default()
@@ -58,16 +68,34 @@ fn settings() -> NormFsSettings {
     }
 }
 
+/// `64k`, `256k`, `1m`, `4m`, `16m`, or a plain byte count.
+fn parse_page_size(arg: &str) -> Option<usize> {
+    let (digits, scale) = match arg.as_bytes().last()? {
+        b'k' | b'K' => (&arg[..arg.len() - 1], 1024),
+        b'm' | b'M' => (&arg[..arg.len() - 1], 1024 * 1024),
+        _ => (arg, 1),
+    };
+    digits.parse::<usize>().ok()?.checked_mul(scale)
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    let case = std::env::args()
+    let positional: Vec<String> = std::env::args()
         .skip(1)
-        .find(|a| !a.starts_with('-'))
-        .unwrap_or_else(|| {
-            eprintln!("usage: record_size_bench -- can50|img1m|img1m_paced");
+        .filter(|a| !a.starts_with('-'))
+        .collect();
+    let Some(case) = positional.first().cloned() else {
+        eprintln!("usage: record_size_bench -- can50|img1m|img1m_paced [page_size]");
+        std::process::exit(2);
+    };
+    let page_size = match positional.get(1) {
+        Some(arg) => parse_page_size(arg).unwrap_or_else(|| {
+            eprintln!("unrecognised page size {arg}; try 64k, 256k, 1m, 4m, 16m");
             std::process::exit(2);
-        });
+        }),
+        None => NormFsSettings::default().mem_page_size,
+    };
     let label = std::env::var("NORMFS_BENCH_LABEL").unwrap_or_default();
 
     let (block_size, count, paced) = match case.as_str() {
@@ -80,11 +108,23 @@ async fn main() {
         }
     };
 
+    // A record no page can hold is refused at enqueue, so say so here rather
+    // than reporting a run of errors as a measurement.
+    let cap = normfs_wal::max_record_len(page_size);
+    if block_size > cap {
+        eprintln!(
+            "case {case} writes {block_size} B records, which a {} KiB page cannot hold \
+             (largest is {cap} B): this point of the sweep does not exist",
+            page_size / 1024
+        );
+        std::process::exit(2);
+    }
+
     let dir = std::env::temp_dir().join("normfs-record-size-bench");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let normfs = NormFS::new(dir.clone(), settings()).await.unwrap();
+    let normfs = NormFS::new(dir.clone(), settings(page_size)).await.unwrap();
     let queue = normfs.resolve("record_size_bench");
     normfs.ensure_queue_exists_for_write(&queue).await.unwrap();
 
@@ -110,7 +150,7 @@ async fn main() {
     // `close()` can leave WAL files unmigrated; the run has not paid its full
     // cost until a reopen drains them.
     {
-        let normfs = NormFS::new(dir.clone(), settings()).await.unwrap();
+        let normfs = NormFS::new(dir.clone(), settings(page_size)).await.unwrap();
         let queue = normfs.resolve("record_size_bench");
         normfs.ensure_queue_exists_for_write(&queue).await.unwrap();
         let deadline = Instant::now() + Duration::from_secs(900);
@@ -124,9 +164,10 @@ async fn main() {
     let cpu = cpu_seconds() - c0;
     let mb = (count as f64 * block_size as f64) / (1024.0 * 1024.0);
     println!(
-        "case={case} label={label} records={count} block={block_size}B \
+        "case={case} label={label} page={}KiB records={count} block={block_size}B \
          enqueue={enqueue_wall:.2}s settled={wall:.2}s cpu={cpu:.2}s \
          cpu_pct={:.1} thr={:.2}MB/s rss_peak={:.0}MiB",
+        page_size / 1024,
         cpu / wall * 100.0,
         mb / wall,
         peak_rss_mib()

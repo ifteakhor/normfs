@@ -20,20 +20,29 @@ const COLD_RECORDS: usize = 20_000;
 const HOT_RECORDS: usize = 8_000_000;
 const MEMORY: usize = 8 * 1024 * 1024;
 
+/// Pinned rather than inherited: this benchmark is about how a fixed budget is
+/// shared between five queues, so the number of pages that budget buys is the
+/// thing being measured. At the production default of 4 MiB it would buy two,
+/// and there would be nothing left to share.
+const PAGE_SIZE: usize = 256 * 1024;
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
     let cfg = BenchConfig {
         dir: std::env::temp_dir().join("normfs-multiq-bench"),
+        mem_page_size: PAGE_SIZE,
         ..BenchConfig::new()
     };
     println!("NormFS Multi-Queue Write Benchmark");
     println!("========================");
     println!(
         "{COLD_QUEUES} cold queues x {COLD_RECORDS} records, 1 hot queue x {HOT_RECORDS} \
-         records of {} B, max_memory_usage {} MiB",
+         records of {} B, max_memory_usage {} MiB in {} pages of {} KiB",
         cfg.block_size,
-        MEMORY >> 20
+        MEMORY >> 20,
+        MEMORY / PAGE_SIZE,
+        PAGE_SIZE / 1024
     );
     println!("Data directory: {}", cfg.dir.display());
     println!();
