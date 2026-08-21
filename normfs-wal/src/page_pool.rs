@@ -57,13 +57,24 @@ use crate::wal_ring_v1::{AppendOutcome, WalRing};
 /// contract requires `normfs_wal_page_is_reusable`, whose first conjunct is
 /// `pin_count == 0`. So a pinned page cannot be reset, and the bytes below
 /// `used_bytes` cannot change: appends only ever move that cursor forward, into
-/// space this slice does not cover. The page buffers are `Vec<u8>`s allocated
-/// once when the ring is built and never reallocated, and the `Arc` keeps the
-/// pool — and with it the buffers — alive for at least as long as the guard.
+/// space this slice does not cover. The arena is allocated once and never
+/// reallocated, and the `Arc` keeps the pool — and with it the arena — alive
+/// for at least as long as the guard.
 ///
 /// That is what the pin conjunct was always for. Until now nothing pinned
 /// anything, so it read as a precaution against a caller that did not exist;
 /// with reads borrowing from pages it carries its intended meaning.
+///
+/// ## Provenance
+///
+/// `ptr` comes from [`WalRing::record_ptr`], which derives it from the arena
+/// base the C ring writes through. It is deliberately not taken from a `&[u8]`
+/// over the page: that would give the pointer a temporary reference's
+/// provenance while C keeps writing the same allocation through an older
+/// pointer, which under Stacked Borrows entitles an append to invalidate a tag
+/// this guard is still holding — a page it may not touch, argued from a rule
+/// that does not care. Deriving from the base the writes already use settles
+/// it structurally instead.
 pub struct PageGuard {
     pool: Arc<PagePool>,
     page_index: usize,
@@ -1192,13 +1203,21 @@ impl PagePool {
                     if id < start || id > end {
                         continue;
                     }
-                    let Some(rec) = inner.ring.record(k, i) else {
+                    // `record_ptr` rather than `record(..).as_ptr()`: this
+                    // pointer outlives the call, so it has to carry the arena's
+                    // provenance rather than a temporary slice's. See
+                    // `WalRing::record_ptr_at`.
+                    let Some((ptr, len)) = inner.ring.record_ptr(k, i) else {
                         continue;
                     };
                     if found.len() >= PIN_PAYLOADS_PER_READ {
-                        copied.push((id, Bytes::copy_from_slice(rec)));
+                        // SAFETY: copied out before the lock is released, and
+                        // the page cannot be reused while the lock is held.
+                        copied.push((id, Bytes::copy_from_slice(unsafe {
+                            std::slice::from_raw_parts(ptr, len)
+                        })));
                     } else {
-                        found.push((id, k, rec.as_ptr(), rec.len()));
+                        found.push((id, k, ptr, len));
                     }
                 }
             }

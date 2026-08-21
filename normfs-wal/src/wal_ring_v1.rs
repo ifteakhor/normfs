@@ -685,16 +685,50 @@ impl WalRing {
     // proven `assigns \nothing`, so casting the shared page reference to a
     // mutable pointer for FFI is sound.
     fn record_at(&self, page_index: usize, index: u32) -> Option<&[u8]> {
-        let page = self.page(page_index);
-        let offset = unsafe { normfs_wal_page_offset(page, index) as usize };
-        let buffer = self.page_slice(page_index);
-        let framed = &buffer[offset..];
-        let decoded = unsafe { normfs_wal_entry_v1_decode(framed.as_ptr(), framed.len()) };
+        let (ptr, len) = self.record_ptr_at(page_index, index)?;
+        // SAFETY: `record_ptr_at` returns a pointer into the arena and the
+        // length the decoder gave for that record, and `&self` bounds the
+        // borrow to a caller that is not appending.
+        Some(unsafe { std::slice::from_raw_parts(ptr, len) })
+    }
+
+    /// The record's bytes as a raw pointer into the arena, with no reference
+    /// formed over them along the way.
+    ///
+    /// This is what a caller holding a pin wants. Building a `&[u8]` over the
+    /// page and taking `as_ptr()` from it gives a pointer whose provenance is
+    /// that temporary reference rather than the arena, and C writes the arena
+    /// through a pointer older than it -- so under Stacked Borrows the next
+    /// append is entitled to invalidate the tag the pointer is carrying, even
+    /// though the bytes it names are pinned and never move. Deriving straight
+    /// from the base the C ring holds keeps the provenance the writes expect
+    /// and takes the question away rather than arguing it.
+    fn record_ptr_at(&self, page_index: usize, index: u32) -> Option<(*const u8, usize)> {
+        debug_assert!(
+            page_index < self.ring.page_count,
+            "page {page_index} is outside this ring"
+        );
+        let offset = unsafe { normfs_wal_page_offset(self.page(page_index), index) as usize };
+        if offset >= self.page_size {
+            return None;
+        }
+        // SAFETY: the arena covers page_count * page_size bytes from this base,
+        // and `offset` is inside page `page_index` by the check above.
+        let framed = unsafe { self.ring.arena.add(page_index * self.page_size + offset) };
+        let decoded = unsafe { normfs_wal_entry_v1_decode(framed, self.page_size - offset) };
         if decoded.status != ENTRY_OK {
             return None;
         }
-        let s = offset + decoded.record_offset;
-        Some(&buffer[s..s + decoded.record_size])
+        Some((
+            unsafe { framed.add(decoded.record_offset) },
+            decoded.record_size,
+        ))
+    }
+
+    /// As [`WalRing::record`], for a caller that keeps the pointer past this
+    /// call under a pin. See [`WalRing::record_ptr_at`].
+    pub fn record_ptr(&self, page_index: usize, index: u32) -> Option<(*const u8, usize)> {
+        self.record_ptr_at(page_index, index)
     }
 
     /// Advances the reclaim boundary: entries with id `< min_essential_id` may
