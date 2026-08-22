@@ -681,3 +681,41 @@ async fn a_durable_buffered_ack_is_sent_without_another_write_or_a_close() {
     assert_eq!(watermark, UintN::from(1u64));
     drop(writer);
 }
+
+/// A close whose final flush cannot write reports the failure instead of
+/// returning Ok: `rotate` keys wal_complete on this, and an Ok here would
+/// have the store worker archive a truncated file. /dev/full accepts the
+/// empty header (nothing to flush) and then refuses every write.
+#[tokio::test]
+async fn a_close_that_cannot_flush_says_so() {
+    if !Path::new("/dev/full").exists() {
+        return;
+    }
+    let (ack_sender, _ack_receiver) = mpsc::unbounded_channel();
+    let settings = AckFileWriterSettings {
+        max_buffer_size: 1024 * 1024,
+        max_file_size: 10 * 1024 * 1024,
+        write_interval: Duration::from_secs(3600),
+        fsync: false,
+    };
+    let mut writer = AckFileWriter::new(
+        "/dev/full",
+        settings,
+        ack_sender,
+        Bytes::new(),
+        None,
+        0,
+    )
+    .await
+    .expect("an empty header has nothing to flush, so construction succeeds");
+
+    let queue = QueueIdResolver::new("test_instance").resolve("full");
+    writer
+        .write_maybe_pooled(queue, UintN::from(0u64), Bytes::from_static(b"doomed"), false)
+        .await;
+
+    assert!(
+        writer.close().await.is_err(),
+        "the closing flush lost this entry's bytes, and close() must say so"
+    );
+}

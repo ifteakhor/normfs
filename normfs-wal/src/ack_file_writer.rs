@@ -102,7 +102,7 @@ struct WriterState {
 pub struct AckFileWriter {
     settings: AckFileWriterSettings,
     state: Arc<Mutex<WriterState>>,
-    writer_handle: Mutex<Option<JoinHandle<()>>>,
+    writer_handle: Mutex<Option<JoinHandle<bool>>>,
     shutdown_tx: mpsc::Sender<()>,
     buffer_full_notify: Arc<Notify>,
     pooled: bool,
@@ -131,10 +131,10 @@ async fn flush_pool(
     pool: &Arc<PagePool>,
     epoch: u64,
     fsync: bool,
-) {
+) -> bool {
     let pending = pool.take_pending(epoch);
     if pending.is_empty() {
-        return;
+        return true;
     }
 
     let total: u64 = pending.iter().map(|(_, b)| b.len() as u64).sum();
@@ -215,7 +215,7 @@ async fn flush_pool(
              the next flush",
             path.display()
         );
-        return;
+        return false;
     }
     tail_guard.flushed_len += total;
     for (write, _) in &pending {
@@ -253,6 +253,7 @@ async fn flush_pool(
             path.display(),
         );
     }
+    true
 }
 
 const MAX_RETRIES: u32 = 1000;
@@ -378,7 +379,12 @@ impl AckFileWriter {
     pub async fn close(&mut self) -> std::io::Result<()> {
         let _ = self.shutdown_tx.send(()).await;
         if let Some(handle) = self.writer_handle.lock().await.take() {
-            handle.await.map_err(std::io::Error::other)?;
+            let clean = handle.await.map_err(std::io::Error::other)?;
+            if !clean {
+                return Err(std::io::Error::other(
+                    "the closing flush could not write everything owed to the file",
+                ));
+            }
         }
         Ok(())
     }
@@ -394,7 +400,7 @@ async fn writer_task(
     ack_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: Option<Arc<PagePool>>,
     epoch: u64,
-) {
+) -> bool {
     let mut interval = tokio::time::interval(settings.write_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
 
@@ -402,11 +408,14 @@ async fn writer_task(
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => {
-                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
-                break;
+                // The task's return value: whether the closing flush wrote
+                // everything owed. Mid-life flushes may fail and retry, but a
+                // failure here has no next flush behind it, and `close()`
+                // must not report a file complete that is missing its tail.
+                return flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
             }
             _ = buffer_full_notify.notified() => {
-                flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
+                let _ = flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
             }
             // The timer is what a queue nobody writes to often depends on:
             // nothing else on this path can start a flush, so one record on an
@@ -417,7 +426,7 @@ async fn writer_task(
             // the pool lock and walking every page.
             _ = interval.tick() => {
                 if has_pending(&state, &pool).await {
-                    flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
+                    let _ = flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
                 }
             }
         }
@@ -441,7 +450,8 @@ async fn has_pending(state: &Arc<Mutex<WriterState>>, pool: &Option<Arc<PagePool
 }
 
 /// Sends the flush to whichever holds the unwritten bytes: the pool if this
-/// writer was given one, the entry buffer otherwise.
+/// writer was given one, the entry buffer otherwise. False when something
+/// owed to the file is still unwritten.
 async fn flush(
     path: &Path,
     file: &Arc<Mutex<FileTail>>,
@@ -450,7 +460,7 @@ async fn flush(
     pool: &Option<Arc<PagePool>>,
     epoch: u64,
     fsync: bool,
-) {
+) -> bool {
     // Buffer first, then pages. With a pool the buffer is always empty --
     // everything the pool accepted comes out of `take_pending`, in one id
     // order -- so this is the unpooled path only, and the two never mix within
@@ -462,11 +472,12 @@ async fn flush(
     // them, and V1's positional ids would hand every payload after that point
     // out under the wrong id.
     if !flush_buffer(path, file, state, ack_sender, fsync).await {
-        return;
+        return false;
     }
     if let Some(pool) = pool {
-        flush_pool(path, file, state, ack_sender, pool, epoch, fsync).await;
+        return flush_pool(path, file, state, ack_sender, pool, epoch, fsync).await;
     }
+    true
 }
 
 /// False when the buffer still owes the file bytes, so nothing may be written
