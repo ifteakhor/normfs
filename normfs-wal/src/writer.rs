@@ -24,6 +24,9 @@ enum WriteRequest {
 #[derive(Clone)]
 pub struct WalWriter {
     write_chan: mpsc::UnboundedSender<WriteRequest>,
+    /// Set by `close()` before its request is sent: the request cannot reach
+    /// a task that is inside the rotation retry loop, but this can.
+    closing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct WriterState {
@@ -51,6 +54,12 @@ struct WriterState {
     // disagreement — which writes a file whose entry ids do not line up with
     // its header — into something greppable.
     file_epoch: u64,
+    // Set by `WalWriter::close`; the rotation retry loop checks it, because
+    // that loop runs on the only task that could dequeue the close request.
+    closing: Arc<std::sync::atomic::AtomicBool>,
+    // A rotation stood down for a close, so this writer has no file. Entries
+    // that still arrive are dropped loudly.
+    rotation_abandoned: bool,
 }
 
 impl WalWriter {
@@ -106,6 +115,7 @@ impl WalWriter {
         )
         .await?;
 
+        let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut state = WriterState {
             queue_path: queue_fs_path,
             queue_id: queue.clone(),
@@ -120,6 +130,8 @@ impl WalWriter {
             buffer: OrderedBuffer::new(last_entry_id, queue.clone()),
             pool,
             file_epoch: 0,
+            closing: Arc::clone(&closing),
+            rotation_abandoned: false,
         };
 
         let queue_log_str = queue.to_string();
@@ -193,7 +205,10 @@ impl WalWriter {
             );
         });
 
-        Ok(Self { write_chan: tx })
+        Ok(Self {
+            write_chan: tx,
+            closing,
+        })
     }
 
     pub fn enqueue(
@@ -230,6 +245,7 @@ impl WalWriter {
     }
 
     pub async fn close(&self) -> Result<(), WalError> {
+        self.closing.store(true, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.write_chan
             .send(WriteRequest::Close(tx))
@@ -251,6 +267,19 @@ impl WriterState {
             self.queue_id,
             data.len()
         );
+
+        if self.rotation_abandoned {
+            log::error!(
+                "WAL writer: queue '{}' entry {}: dropped -- a close abandoned a rotation, \
+                 so this writer has no file to give it",
+                self.queue_id,
+                entry_id
+            );
+            return Err(WalError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "the writer's rotation was abandoned by a close",
+            )));
+        }
 
         let entries = if self.buffer.can_write(&entry_id) {
             // direct write
@@ -335,7 +364,14 @@ impl WriterState {
                     entry_id,
                     data_len
                 );
-                self.rotate(entry_id.clone(), data_len).await;
+                if !self.rotate(entry_id.clone(), data_len).await {
+                    self.rotation_abandoned = true;
+                    outcome = Err(WalError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "the writer's rotation was abandoned by a close",
+                    )));
+                    break;
+                }
             } else {
                 log::debug!(
                     "WAL writer: current file {} for queue '{}' can hold entry {}, data size: {}",
@@ -510,7 +546,12 @@ impl WriterState {
     /// So this converges forward instead, and waits as long as it has to. A
     /// queue held up here is back-pressure of the same kind a full pool is:
     /// appenders wait, and nothing is discarded or written out of order.
-    async fn rotate(&mut self, next_entry_id: UintN, next_data_size: usize) {
+    ///
+    /// A close is the one thing that interrupts the wait: its request sits in
+    /// the channel this task is not reading, so the retry loop checks the
+    /// flag `close()` sets instead. False means the rotation stood down and
+    /// the writer has no file; the caller must stop handing it entries.
+    async fn rotate(&mut self, next_entry_id: UintN, next_data_size: usize) -> bool {
         log::info!(
             "WAL writer: rotating file for queue '{}', current file: {}, next entry: {}",
             self.queue_id,
@@ -586,6 +627,17 @@ impl WriterState {
                     break;
                 }
                 Err(e) => {
+                    if self.closing.load(std::sync::atomic::Ordering::Relaxed) {
+                        log::error!(
+                            "WAL writer: queue '{}': abandoning the rotation to file {} ({}); \
+                             a close is waiting on this task. Records not yet written stay \
+                             unwritten.",
+                            self.queue_id,
+                            self.file_id,
+                            e
+                        );
+                        return false;
+                    }
                     if attempt % ROTATE_WARN_EVERY == 0 {
                         log::error!(
                             "WAL writer: queue '{}': opening file {} failed ({}); retrying. \
@@ -608,6 +660,7 @@ impl WriterState {
             self.file_id,
             self.queue_id
         );
+        true
     }
 }
 

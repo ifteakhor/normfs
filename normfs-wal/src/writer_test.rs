@@ -789,3 +789,73 @@ async fn a_rotation_that_cannot_open_its_file_waits_rather_than_desyncing() {
         "records reached no file at all: the writer and the pool never agreed again"
     );
 }
+
+/// A close interrupts a rotation that is stuck retrying. The retry loop runs
+/// on the writer task, the only consumer of the request channel, so without
+/// the closing flag a Close request would sit undequeued for as long as the
+/// disk stayed broken.
+#[tokio::test]
+async fn a_close_interrupts_a_rotation_that_is_stuck_retrying() {
+    use crate::page_pool::PagePool;
+    use std::sync::Arc;
+
+    init_logger();
+    let tmp_dir = tempdir().unwrap();
+    let (written_sender, _written) = mpsc::unbounded_channel();
+    let (wal_complete_sender, _complete) = mpsc::unbounded_channel();
+    let store = WalStore::new(tmp_dir.path(), written_sender, wal_complete_sender);
+
+    let resolver = QueueIdResolver::new("test_instance");
+    let queue_id = resolver.resolve("rotate_close");
+    let first_file = UintN::from(1u64);
+
+    const PAGE_SIZE: usize = 1024;
+    let record = Bytes::from(vec![b'r'; 200]);
+
+    let pool = Arc::new(PagePool::new(8, PAGE_SIZE, 0));
+    let settings = WalSettings {
+        max_file_size: 256,
+        write_buffer_size: 128,
+        write_interval: Duration::from_millis(10),
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::None,
+        compression_type: normfs_types::CompressionType::None,
+    };
+
+    let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
+    tokio::fs::create_dir_all(&wal_dir).await.unwrap();
+
+    // A directory where file 2 has to be created, so the rotation retries.
+    // It is never removed: the only way out of the retry is the close.
+    let blocked = UintN::from(2u64).to_file_path(wal_dir.to_str().unwrap(), "wal");
+    tokio::fs::create_dir_all(&blocked).await.unwrap();
+
+    store
+        .start_writer_with_pool(
+            &queue_id,
+            &first_file,
+            WalHeader::default(),
+            settings,
+            None,
+            Some(Arc::clone(&pool)),
+        )
+        .await
+        .unwrap();
+
+    const COUNT: u64 = 24;
+    for id in 0..COUNT {
+        let placement = pool.place(id, &record).await.expect("a record fits a page");
+        store
+            .enqueue_pooled(&queue_id, UintN::from(id), Bytes::new(), placement)
+            .unwrap();
+    }
+
+    // Let the writer reach the blocked rotation and start retrying.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // The blocker stays. Close must still return.
+    tokio::time::timeout(Duration::from_secs(5), store.close())
+        .await
+        .expect("close() hung behind a rotation that can only retry")
+        .expect("close() reported an error");
+}
