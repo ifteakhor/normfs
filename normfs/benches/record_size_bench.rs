@@ -81,10 +81,20 @@ fn parse_page_size(arg: &str) -> Option<usize> {
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    let positional: Vec<String> = std::env::args()
-        .skip(1)
-        .filter(|a| !a.starts_with('-'))
-        .collect();
+    // `cargo bench` hands a bare `--bench` to a harness=false binary. Any
+    // other flag is a mistyped page size, and dropping it would run the sweep
+    // at the default under the wrong label.
+    let mut positional: Vec<String> = Vec::new();
+    for a in std::env::args().skip(1) {
+        if a == "--bench" {
+            continue;
+        }
+        if a.starts_with('-') {
+            eprintln!("unrecognised flag {a}");
+            std::process::exit(2);
+        }
+        positional.push(a);
+    }
     let Some(case) = positional.first().cloned() else {
         eprintln!("usage: record_size_bench -- can50|img1m|img1m_paced [page_size]");
         std::process::exit(2);
