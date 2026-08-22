@@ -168,6 +168,10 @@ pub enum PoolError {
     /// so a record that takes an id and then reaches no file does not go
     /// missing on its own, it renumbers every record after it.
     TooLarge,
+    /// The drainer went away while this append was waiting for a page. Only a
+    /// flush can end the wait and a flush needs a drainer, so this wait would
+    /// never end: the queue is closing, and the caller must give up.
+    NoDrainer,
 }
 
 /// What the enqueue side decided about a record, for the writer to carry out.
@@ -729,6 +733,7 @@ impl PagePool {
 
         // Registered before the retry re-tests the pool: `notify_waiters`
         // leaves no permit, and `enable()` is what joins the waiter list.
+        let had_drainer = self.has_drainer();
         loop {
             let woken = self.space.notified();
             tokio::pin!(woken);
@@ -741,6 +746,16 @@ impl PagePool {
                 }
                 Ok(None) => {}
                 Err(e) => return Err(e),
+            }
+
+            // Only a wait the close orphaned: a pool that never had a
+            // drainer may still be fed durability by hand, and its waits are
+            // the caller's own. Checked between arming the waiter and parking
+            // on it, so a `clear_drainer` cannot slip through the gap -- it
+            // flips the flag before it notifies, and the notify wakes this
+            // waiter.
+            if had_drainer && !self.has_drainer() {
+                return Err(PoolError::NoDrainer);
             }
 
             // `Full` means every page this queue holds is pinned or still holds

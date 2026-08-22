@@ -295,6 +295,17 @@ impl MemQueue {
             if pool.has_drainer() {
                 placement = match pool.place(id_to_u64(&id), &data).await {
                     Ok(placed) => placed,
+                    Err(normfs_wal::PoolError::NoDrainer) => {
+                        // The queue closed while this append waited for a
+                        // page. The record reaches no file; the writer is
+                        // gone, so the send below fails and the caller sees
+                        // the error.
+                        log::warn!(
+                            target: "normfs-mem",
+                            "entry {id} arrived while the queue was closing; it reaches no file"
+                        );
+                        Placement::legacy()
+                    }
                     Err(e) => {
                         // Unreachable through `NormFS::enqueue`, which refuses
                         // a record no page can hold before it takes an id --

@@ -1054,3 +1054,46 @@ async fn a_resync_waits_rather_than_discarding_unwritten_records() {
     assert!(placed.is_ok_and(|r| r.is_ok()), "a drained pool must resync");
     assert_eq!(pool.next_entry_id(), far + 1);
 }
+
+/// An append parked on a full pool returns when the drainer goes away,
+/// instead of waiting for a flush that can no longer happen.
+#[tokio::test]
+async fn a_parked_append_returns_when_the_drainer_leaves() {
+    use crate::page_pool::PoolError;
+
+    let pool = Arc::new(PagePool::new(2, 256, 0));
+    pool.set_drainer();
+    pool.arm_file_fill(1 << 20, 4);
+
+    // Fill every page; nothing is durable, so nothing is reusable.
+    let record = vec![0x33u8; 100];
+    let mut id = 0;
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            pool.place(id, &record),
+        )
+        .await
+        {
+            Ok(Ok(_)) => id += 1,
+            Ok(Err(e)) => panic!("a record this size fits a page: {e:?}"),
+            Err(_) => break,
+        }
+    }
+
+    // The next append parks. The close (clear_drainer) must end its wait.
+    let parked = tokio::spawn({
+        let pool = Arc::clone(&pool);
+        let record = record.clone();
+        async move { pool.place(id, &record).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(!parked.is_finished(), "the pool must be full for this to test anything");
+
+    pool.clear_drainer();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+        .await
+        .expect("the parked append never returned after the drainer left")
+        .unwrap();
+    assert!(matches!(result, Err(PoolError::NoDrainer)));
+}
