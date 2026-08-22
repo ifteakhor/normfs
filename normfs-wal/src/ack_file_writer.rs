@@ -429,12 +429,11 @@ async fn writer_task(
 async fn has_pending(state: &Arc<Mutex<WriterState>>, pool: &Option<Arc<PagePool>>) -> bool {
     {
         let state = state.lock().await;
-        // An undelivered ack counts as pending on its own: a buffered entry
-        // whose bytes an earlier flush wrote can sit behind a pooled ack
-        // until the pool catches up, and once everything is durable only a
-        // flush's empty-buffer pass will send it. A tick that skips flushing
-        // here would leave that ack waiting for the next write or the close.
-        if !state.buffer.is_empty() || !state.acks.is_empty() {
+        // A leading buffered ack counts as pending on its own: its bytes may
+        // already be durable, and only a flush's empty-buffer pass will send
+        // it. A pooled ack at the head does not count -- no flush can move it
+        // until the pool does, and the pool check below says whether it will.
+        if !state.buffer.is_empty() || buffered_run_len(&state) > 0 {
             return true;
         }
     }

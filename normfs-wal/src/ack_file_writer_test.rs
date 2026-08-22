@@ -601,13 +601,10 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
 }
 
 /// A durable buffered entry's ack arrives without another write and without a
-/// close: an undelivered ack is pending work, so the interval keeps flushing
-/// until it is sent.
-///
-/// The shape that strands it: a buffered entry's bytes are written while a
-/// pooled ack ahead of it holds the cut at zero, and the pool's own flush
-/// later drains only its own ids. The buffered ack is then at the head with
-/// its bytes durable, and only a flush's empty-buffer pass will send it.
+/// close. The stranding shape: the entry's bytes are written while a pooled
+/// ack ahead of it holds the cut at zero, the pool's flush later drains only
+/// its own ids, and the ack is left at the head, durable, waiting for a flush
+/// with no other reason to run.
 #[tokio::test]
 async fn a_durable_buffered_ack_is_sent_without_another_write_or_a_close() {
     use crate::page_pool::PagePool;
