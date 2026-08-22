@@ -25,7 +25,12 @@ async fn test_signature_verification() {
 
     let queue_name = "test_queue";
 
-    let settings = NormFsSettings::default();
+    // 1 MiB entries below; the subject is signing, so the page size is
+    // pinned wide enough to accept them whatever the default is.
+    let settings = NormFsSettings {
+        mem_page_size: 4 * 1024 * 1024,
+        ..Default::default()
+    };
     let normfs = NormFS::new(data_dir.clone(), settings).await.unwrap();
     let normfs = Arc::new(normfs);
 
@@ -94,7 +99,12 @@ async fn test_signature_verification_fails_on_tampered_header() {
 
     let queue_name = "test_queue";
 
-    let settings = NormFsSettings::default();
+    // 1 MiB entries below; the subject is signing, so the page size is
+    // pinned wide enough to accept them whatever the default is.
+    let settings = NormFsSettings {
+        mem_page_size: 4 * 1024 * 1024,
+        ..Default::default()
+    };
     let normfs = NormFS::new(data_dir.clone(), settings).await.unwrap();
     let normfs = Arc::new(normfs);
 
@@ -161,7 +171,12 @@ async fn test_signature_verification_fails_on_tampered_content() {
 
     let queue_name = "test_queue";
 
-    let settings = NormFsSettings::default();
+    // 1 MiB entries below; the subject is signing, so the page size is
+    // pinned wide enough to accept them whatever the default is.
+    let settings = NormFsSettings {
+        mem_page_size: 4 * 1024 * 1024,
+        ..Default::default()
+    };
     let normfs = NormFS::new(data_dir.clone(), settings).await.unwrap();
     let normfs = Arc::new(normfs);
 
