@@ -337,7 +337,7 @@ impl AckFileWriter {
 
     /// `in_pool` says the record's bytes are the pool's to hand over, so they
     /// must not be buffered again here. With a pool that is every record: one
-    /// larger than a page is held whole by the pool rather than routed round it.
+    /// no page can hold was refused before it was given an id.
     ///
     /// A pooled record is not counted into `current_size` either. That counter
     /// exists only to answer `can_add`, and `can_add` is not consulted on the

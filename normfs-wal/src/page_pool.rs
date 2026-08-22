@@ -759,9 +759,8 @@ impl PagePool {
             }
 
             // Only a flush can end this wait, so ask for one rather than
-            // waiting for the writer's next tick. Without this an appender that
-            // is over budget pays a whole flush interval per record, which for
-            // a queue of records larger than a page is every record.
+            // waiting for the writer's next tick. Without this an appender
+            // waiting on a full pool pays a whole flush interval per page.
             self.signal_flush();
 
             if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {

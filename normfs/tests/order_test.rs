@@ -348,15 +348,17 @@ async fn a_record_larger_than_a_page_is_refused() {
     fs.close().await.unwrap();
 }
 
-/// A record wider than the configured memory total is refused too, whatever the
-/// page size says: accepting it would put the process arbitrarily far over
-/// `max_memory_usage` on a single call.
+/// A record wider than the configured memory total is refused, and consumes
+/// no id.
+///
+/// It is the page cap that refuses it: `MemoryBelowFloor` makes the page
+/// bound the narrower of `check_framable`'s two in every constructible
+/// instance, so no test can isolate the memory bound. This one pins the
+/// user-visible property.
 #[tokio::test]
 async fn a_record_wider_than_the_memory_bound_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut settings = settings();
-    // A page larger than the whole budget, so the memory bound is the narrower
-    // of the two and this tests it rather than the page cap.
     settings.max_memory_usage = 4 * 1024 * 1024;
     settings.mem_page_size = 2 * 1024 * 1024;
     let bound = settings.max_memory_usage;

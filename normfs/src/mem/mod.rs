@@ -296,12 +296,11 @@ impl MemQueue {
                 placement = match pool.place(id_to_u64(&id), &data).await {
                     Ok(placed) => placed,
                     Err(e) => {
-                        // The only error left is a record wider than the V1
-                        // frame, and `NormFS::enqueue` refuses one before it
-                        // takes an id. A record merely larger than a page is
-                        // not an error any more -- the pool holds it whole and
-                        // hands it over in its turn, which is what keeps it in
-                        // the sequence rather than beside it.
+                        // Unreachable through `NormFS::enqueue`, which refuses
+                        // a record no page can hold before it takes an id --
+                        // with the same arithmetic the pool uses, so the two
+                        // cannot disagree. Reaching this arm means that guard
+                        // was bypassed.
                         log::error!(
                             target: "normfs-mem",
                             "entry {id} of {} bytes was accepted and cannot be written ({e:?}): \
@@ -530,9 +529,9 @@ impl MemQueue {
             }
 
             // The floor can rise between the min_cached check and the pin --
-            // an oversize release, a page leaving the ring -- and the run then
-            // starts above `start_id`. A truncated range must go to the files,
-            // not out as a success.
+            // a page leaving the ring -- and the run then starts above
+            // `start_id`. A truncated range must go to the files, not out as
+            // a success.
             if ring.min_cached_id().is_none_or(|m| UintN::from(m) > start_id) {
                 return MemReadResult::fail();
             }
@@ -720,11 +719,11 @@ impl MemQueue {
                             current_id = current_id.step_by(step);
                         }
                     }
-                    // The floor can rise between the check and the pin -- an
-                    // oversize release, a page leaving the ring -- and the run
-                    // above starts past the ids this follow owes. Re-checked
-                    // now that the survivors are pinned: a truncated backlog
-                    // must go to the files, not out as a success.
+                    // The floor can rise between the check and the pin -- a
+                    // page leaving the ring -- and the run above starts past
+                    // the ids this follow owes. Re-checked now that the
+                    // survivors are pinned: a truncated backlog must go to
+                    // the files, not out as a success.
                     if backlog && !covered(ring.min_cached_id()) {
                         return MemReadResult::fail();
                     }
