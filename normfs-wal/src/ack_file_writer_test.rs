@@ -520,3 +520,82 @@ async fn a_buffered_ack_does_not_report_a_pooled_record_durable() {
         "both entries are on disk now, so the watermark should have reached entry 1"
     );
 }
+
+/// An entry buffered while a flush's file I/O is in flight is not acked by
+/// that flush. The one-byte buffer bound starts a flush on every write, and
+/// fsync yields mid-I/O on this single-threaded runtime, so writing the next
+/// entry the moment the previous one appears in the file lands it inside the
+/// window where the flush has written but not yet drained its acks.
+#[tokio::test]
+async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("during.wal");
+    let (ack_sender, mut ack_receiver) = mpsc::unbounded_channel();
+
+    let settings = AckFileWriterSettings {
+        max_buffer_size: 1,
+        max_file_size: 10 * 1024 * 1024,
+        write_interval: Duration::from_secs(3600),
+        fsync: true,
+    };
+    let mut writer = AckFileWriter::new(
+        &file_path,
+        settings,
+        ack_sender,
+        Bytes::from_static(b"HDR!"),
+        None,
+        0,
+    )
+    .await
+    .unwrap();
+    let queue = QueueIdResolver::new("test_instance").resolve("during");
+
+    let payload = |id: u64| format!("entry-{id:03}-payload");
+    let assert_acked_bytes_on_disk = |id: UintN| {
+        let id = id.to_u64().unwrap();
+        let pat = payload(id);
+        let content = fs::read(&file_path).unwrap();
+        assert!(
+            content.windows(pat.len()).any(|w| w == pat.as_bytes()),
+            "entry {id} was acked while its bytes were still in the buffer"
+        );
+    };
+
+    const ENTRIES: u64 = 20;
+    for i in 0..ENTRIES {
+        let body = Bytes::from(payload(i));
+        writer
+            .write_maybe_pooled(queue.clone(), UintN::from(i), body.clone(), false)
+            .await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let on_disk = fs::read(&file_path)
+                .unwrap()
+                .windows(body.len())
+                .any(|w| w == &body[..]);
+            while let Ok((_, id)) = ack_receiver.try_recv() {
+                assert_acked_bytes_on_disk(id);
+            }
+            if on_disk {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "entry {i} never reached the file"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    writer.close().await.unwrap();
+    let mut highest = None;
+    while let Ok((_, id)) = ack_receiver.try_recv() {
+        assert_acked_bytes_on_disk(id.clone());
+        highest = Some(id.to_u64().unwrap());
+    }
+    assert_eq!(
+        highest,
+        Some(ENTRIES - 1),
+        "the closing flush reports the last entry once its bytes are down"
+    );
+}

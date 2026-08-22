@@ -471,7 +471,7 @@ async fn flush_buffer(
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
     fsync: bool,
 ) -> bool {
-    let data_to_write = {
+    let (data_to_write, ack_cut) = {
         let mut state_guard = state.lock().await;
         if state_guard.buffer.is_empty() {
             // Nothing owed. Any buffered entry still at the head of the list
@@ -479,12 +479,17 @@ async fn flush_buffer(
             // its bytes back, so an empty buffer means every buffered byte
             // reached the file -- and reporting it here is what stops it
             // waiting for a flush that has no work of its own to do.
-            let ack = take_buffered_ack(&mut state_guard);
+            let cut = buffered_run_len(&state_guard);
+            let ack = take_buffered_ack(&mut state_guard, cut);
             drop(state_guard);
             send_ack(ack, ack_sender);
             return true;
         }
-        state_guard.buffer.split().freeze()
+        // Under the same lock as the split, so the cut names exactly the
+        // entries whose bytes are in `data_to_write`. Anything buffered during
+        // the file I/O below waits for the flush that writes its bytes.
+        let cut = buffered_run_len(&state_guard);
+        (state_guard.buffer.split().freeze(), cut)
     };
 
     if data_to_write.is_empty() {
@@ -555,7 +560,7 @@ async fn flush_buffer(
 
     if write_successful {
         let mut state_guard = state.lock().await;
-        let ack = take_buffered_ack(&mut state_guard);
+        let ack = take_buffered_ack(&mut state_guard, ack_cut);
         drop(state_guard);
         send_ack(ack, ack_sender);
     } else {
@@ -574,22 +579,24 @@ async fn flush_buffer(
     write_successful
 }
 
-/// Takes the entries this writer's buffer has made durable, and returns the
-/// highest of them to report.
-///
-/// Only the run at the head of the list, and only entries whose bytes were
-/// buffered. An ack is a watermark -- the reader of the channel keeps the
-/// highest it has seen -- so reporting a buffered entry from beyond a pooled
-/// one that is still sitting in its page would report that pooled record
-/// durable too, while its bytes have not been written at all. Stopping at the
-/// first entry this flush does not cover is what keeps the watermark a claim
-/// about the file rather than about the buffer.
-fn take_buffered_ack(state: &mut WriterState) -> Option<PendingAck> {
-    let cut = state
+/// How many acks at the head of the list describe buffered bytes. Only valid
+/// under the state lock; callers capture it beside the `split()` rather than
+/// recomputing it after the file I/O.
+fn buffered_run_len(state: &WriterState) -> usize {
+    state
         .acks
         .iter()
         .position(|a| !a.buffered)
-        .unwrap_or(state.acks.len());
+        .unwrap_or(state.acks.len())
+}
+
+/// Takes the first `cut` acks and returns the highest of them to report.
+///
+/// An ack is a watermark, so it may only ever name bytes the file already
+/// has. `cut` was captured at split time, which keeps out entries buffered
+/// during the flush's file I/O, and the run stops at the first pooled entry,
+/// which keeps out records still sitting in their pages.
+fn take_buffered_ack(state: &mut WriterState, cut: usize) -> Option<PendingAck> {
     let mut done: Vec<PendingAck> = state.acks.drain(0..cut).collect();
     done.pop()
 }
