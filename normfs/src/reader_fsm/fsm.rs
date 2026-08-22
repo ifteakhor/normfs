@@ -758,13 +758,18 @@ impl ReaderFSM {
             ctx.queue, current_file, ctx.next_id, prefetch_handle.is_some());
 
         // Check if next_id is beyond the queue's last entry
-        // If so, we've read all available data - complete the read
-        if let Some(Some(queue_last_id)) = self.mem.get_last_id(&ctx.queue) {
-            if ctx.next_id > queue_last_id {
-                log::debug!(target: "normfs-reader-fsm",
-                    "Reached end of queue: next_id={} > queue_last_id={}, completing read",
-                    ctx.next_id, queue_last_id);
-                return Ok(ReaderState::Completed);
+        // If so, we've read all available data - complete the read.
+        // Only a bounded read is done at that point: a follow that has caught
+        // up has delivered its backlog, not finished, and falls through to
+        // the subscribe below -- which the now-empty backlog lets succeed.
+        if ctx.last_id.is_some() {
+            if let Some(Some(queue_last_id)) = self.mem.get_last_id(&ctx.queue) {
+                if ctx.next_id > queue_last_id {
+                    log::debug!(target: "normfs-reader-fsm",
+                        "Reached end of queue: next_id={} > queue_last_id={}, completing read",
+                        ctx.next_id, queue_last_id);
+                    return Ok(ReaderState::Completed);
+                }
             }
         }
 
