@@ -875,3 +875,17 @@ async fn a_follow_with_an_unservable_backlog_fails_to_the_files() {
         "memory served a follow whose backlog it cannot answer"
     );
 }
+
+#[test]
+fn a_page_below_the_ring_minimum_is_refused() {
+    // The C contracts require a page to hold one empty record's frame and its
+    // offset slot; past this check the arena panics instead of erroring.
+    assert!(matches!(
+        MemStore::with_page_size(16, 8),
+        Err(crate::Error::PageBelowMinimum { page_size: 8, .. })
+    ));
+    assert!(matches!(
+        MemStore::with_page_size(0, 0),
+        Err(crate::Error::PageBelowMinimum { page_size: 0, .. })
+    ));
+}

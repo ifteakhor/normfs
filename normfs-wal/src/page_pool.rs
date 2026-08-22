@@ -331,6 +331,11 @@ impl Inner {
 /// entry fits iff `entry_size + 4 <= cap`.
 const PAGE_ENTRY_SLOT: usize = 4;
 
+/// The smallest page the ring accepts: one empty record's frame plus its
+/// offset slot. The C contracts require exactly this, so a smaller page is a
+/// violated precondition, not a degenerate configuration.
+pub const MIN_PAGE_SIZE: usize = crate::wal_entry_v1::WAL_ENTRY_V1_MIN_SIZE + PAGE_ENTRY_SLOT;
+
 /// The largest record a page of `page_size` bytes will accept.
 ///
 /// The one place this arithmetic lives. The enqueue guard refuses a record

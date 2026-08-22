@@ -1033,6 +1033,12 @@ impl MemStore {
     /// meaning what it says -- at a 4 MiB page a 1 MiB budget would silently
     /// allocate 8 MiB -- and the pool exists to make that number true.
     pub fn with_page_size(max_memory_usage: usize, page_size: usize) -> Result<Self, crate::Error> {
+        if page_size < normfs_wal::MIN_PAGE_SIZE {
+            return Err(crate::Error::PageBelowMinimum {
+                page_size,
+                minimum: normfs_wal::MIN_PAGE_SIZE,
+            });
+        }
         let needed = MEM_MIN_PAGES_PER_QUEUE.saturating_mul(page_size);
         let pages = max_memory_usage / page_size.max(1);
         if pages < MEM_MIN_PAGES_PER_QUEUE {

@@ -498,7 +498,8 @@ impl CommandProcessor {
                     | Error::Cloud(_)
                     | Error::Io(_)
                     | Error::RecordTooLarge(_)
-                    | Error::MemoryBelowFloor { .. } => {
+                    | Error::MemoryBelowFloor { .. }
+                    | Error::PageBelowMinimum { .. } => {
                         error!(
                             "Read stream failed (client_id: {}, read_id: {}, queue_id: {}, error: {:?})",
                             sender.client_id(), read_id, queue_id, err

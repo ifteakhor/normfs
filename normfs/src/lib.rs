@@ -65,6 +65,9 @@ pub enum Error {
         page_size: usize,
         needed: usize,
     },
+    /// `mem_page_size` is below the smallest page the ring's contracts allow.
+    /// Refused at construction; past this check the arena panics instead.
+    PageBelowMinimum { page_size: usize, minimum: usize },
 }
 
 impl std::fmt::Display for Error {
@@ -92,6 +95,11 @@ impl std::fmt::Display for Error {
                  single queue needs at a page size of {page_size}; raise max_memory_usage or \
                  lower mem_page_size"
             ),
+            Error::PageBelowMinimum { page_size, minimum } => write!(
+                f,
+                "mem_page_size of {page_size} bytes is below the {minimum} bytes a page needs \
+                 to hold even an empty record"
+            ),
         }
     }
 }
@@ -109,6 +117,7 @@ impl std::error::Error for Error {
             Error::ClientDisconnected => None,
             Error::RecordTooLarge(_) => None,
             Error::MemoryBelowFloor { .. } => None,
+            Error::PageBelowMinimum { .. } => None,
         }
     }
 }
