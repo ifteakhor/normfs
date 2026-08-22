@@ -424,11 +424,19 @@ async fn writer_task(
     }
 }
 
-/// Whether either store owes the file bytes. Both are cheap: a length and a
-/// counter.
+/// Whether either store owes the file bytes, or the channel an ack. All
+/// cheap: two lengths and a counter.
 async fn has_pending(state: &Arc<Mutex<WriterState>>, pool: &Option<Arc<PagePool>>) -> bool {
-    if !state.lock().await.buffer.is_empty() {
-        return true;
+    {
+        let state = state.lock().await;
+        // An undelivered ack counts as pending on its own: a buffered entry
+        // whose bytes an earlier flush wrote can sit behind a pooled ack
+        // until the pool catches up, and once everything is durable only a
+        // flush's empty-buffer pass will send it. A tick that skips flushing
+        // here would leave that ack waiting for the next write or the close.
+        if !state.buffer.is_empty() || !state.acks.is_empty() {
+            return true;
+        }
     }
     pool.as_ref().is_some_and(|p| p.has_pending())
 }

@@ -599,3 +599,88 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
         "the closing flush reports the last entry once its bytes are down"
     );
 }
+
+/// A durable buffered entry's ack arrives without another write and without a
+/// close: an undelivered ack is pending work, so the interval keeps flushing
+/// until it is sent.
+///
+/// The shape that strands it: a buffered entry's bytes are written while a
+/// pooled ack ahead of it holds the cut at zero, and the pool's own flush
+/// later drains only its own ids. The buffered ack is then at the head with
+/// its bytes durable, and only a flush's empty-buffer pass will send it.
+#[tokio::test]
+async fn a_durable_buffered_ack_is_sent_without_another_write_or_a_close() {
+    use crate::page_pool::PagePool;
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("stranded.wal");
+    let (ack_sender, mut ack_receiver) = mpsc::unbounded_channel();
+
+    let pool = Arc::new(PagePool::new(4, 4096, 0));
+    pool.set_drainer();
+    pool.arm_file_fill(10 * 1024 * 1024, 4);
+
+    let settings = AckFileWriterSettings {
+        max_buffer_size: 1024 * 1024,
+        max_file_size: 10 * 1024 * 1024,
+        write_interval: Duration::from_millis(10),
+        fsync: true,
+    };
+    let writer = AckFileWriter::new(
+        &file_path,
+        settings,
+        ack_sender,
+        Bytes::from_static(b"HDR!"),
+        Some(Arc::clone(&pool)),
+        0,
+    )
+    .await
+    .unwrap();
+    let queue = QueueIdResolver::new("test_instance").resolve("stranded");
+
+    // Entry 0 in a page, not yet handed over; entry 1 through the buffer.
+    pool.place(0, b"pooled-entry-zero".as_slice()).await.unwrap();
+    writer
+        .write_maybe_pooled(queue.clone(), UintN::from(0u64), Bytes::new(), true)
+        .await;
+    writer
+        .write_maybe_pooled(
+            queue.clone(),
+            UintN::from(1u64),
+            Bytes::from_static(b"buffered-entry-one"),
+            false,
+        )
+        .await;
+
+    // Entry 1's bytes reach the file behind the held cut; then entry 0 is
+    // handed over and becomes durable, draining its own ack.
+    pool.note_handed_over(0);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while pool.durable_before() < 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "entry 0 never reached the file"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // No further write and no close: the ack for entry 1 must still arrive.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let watermark = loop {
+        if let Ok((_, id)) = ack_receiver.try_recv() {
+            if id == UintN::from(1u64) {
+                break id;
+            }
+            continue;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the ack for entry 1 is stranded: its bytes are durable but nothing \
+             delivers it until the next write or the close"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert_eq!(watermark, UintN::from(1u64));
+    drop(writer);
+}
