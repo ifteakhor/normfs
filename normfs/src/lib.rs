@@ -195,10 +195,13 @@ impl Default for NormFsSettings {
         Self {
             store_cfg: Default::default(),
             max_memory_usage: 256 * 1024 * 1024, // 256MB
-            // Provisional. Set from the page-size sweep once the numbers are
-            // in: it is both the record cap and the arena's sharing unit, and
-            // those two pull in opposite directions.
-            mem_page_size: 4 * 1024 * 1024, // 4MiB
+            // The sweep says CPU and throughput are flat from 64 KiB to
+            // 16 MiB, so the sharing unit decides: at 4 MiB this budget is 64
+            // pages and four queues exhaust it, pushing every later queue
+            // into a private out-of-budget pool. 256 KiB keeps ~500 queue
+            // floors inside the budget. Deployments with wider records raise
+            // this and max_memory_usage together, deliberately.
+            mem_page_size: 256 * 1024,
             max_disk_usage_per_queue: None,
             wal_settings: Default::default(),
             cloud_settings: None,

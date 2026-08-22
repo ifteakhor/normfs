@@ -823,9 +823,13 @@ async fn test_recovery_large_entries() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    // Setup: Write large entries
+    // Setup: Write large entries. The subject is their recovery, so the page
+    // size is pinned wide enough to accept them whatever the default is.
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings {
+            mem_page_size: 4 * 1024 * 1024,
+            ..Default::default()
+        };
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -849,7 +853,10 @@ async fn test_recovery_large_entries() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings {
+            mem_page_size: 4 * 1024 * 1024,
+            ..Default::default()
+        };
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
