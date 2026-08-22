@@ -564,22 +564,39 @@ impl WriterState {
         // The rotation still has to happen: stopping here would leave the two
         // sides on different files for ever, which loses this file's records
         // *and* every later file's.
-        if let Err(e) = self.file_writer.close().await {
+        let closed_ok = match self.file_writer.close().await {
+            Ok(()) => true,
+            Err(e) => {
+                log::error!(
+                    "WAL writer: queue '{}': closing file {} failed ({}); its unflushed records \
+                     reach no file. Rotating anyway -- staying on a file the enqueue side has \
+                     already moved past would stall the queue for good.",
+                    self.queue_id,
+                    self.file_id,
+                    e
+                );
+                false
+            }
+        };
+        // Completion lets the store worker archive the file and delete it
+        // from the WAL. A file whose final flush failed is a valid prefix
+        // missing its tail; it stays here, where recovery and reads still
+        // see what survived.
+        if closed_ok {
+            let _ = self.wal_complete_sender.send(WalFile {
+                queue_id: self.queue_id.clone(),
+                file_id: self.file_id.clone(),
+                encryption_type: self.settings.encryption_type,
+                compression_type: self.settings.compression_type,
+            });
+        } else {
             log::error!(
-                "WAL writer: queue '{}': closing file {} failed ({}); its unflushed records \
-                 reach no file. Rotating anyway -- staying on a file the enqueue side has \
-                 already moved past would stall the queue for good.",
+                "WAL writer: queue '{}': file {} is not reported complete; it stays in the \
+                 WAL for recovery and reads",
                 self.queue_id,
-                self.file_id,
-                e
+                self.file_id
             );
         }
-        let _ = self.wal_complete_sender.send(WalFile {
-            queue_id: self.queue_id.clone(),
-            file_id: self.file_id.clone(),
-            encryption_type: self.settings.encryption_type,
-            compression_type: self.settings.compression_type,
-        });
 
         let old_file_id = self.file_id.clone();
         self.file_id = self.file_id.increment();
