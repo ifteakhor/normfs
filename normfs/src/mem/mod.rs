@@ -730,7 +730,20 @@ impl MemQueue {
                     let last_id = entries.last().map(|(id, _)| id.clone());
                     (entries, last_id)
                 }
-                _ => (Vec::new(), None),
+                _ => {
+                    // An empty ring holds none of the backlog either: after a
+                    // recovery-style start the ids below `last_id` exist only
+                    // on disk, and subscribing here would hand the client the
+                    // future while silently skipping its past.
+                    let backlog = inner
+                        .last_id
+                        .as_ref()
+                        .is_some_and(|last| start_id <= *last);
+                    if backlog {
+                        return MemReadResult::fail();
+                    }
+                    (Vec::new(), None)
+                }
             }
         };
 

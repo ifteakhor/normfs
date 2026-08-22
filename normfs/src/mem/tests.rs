@@ -889,3 +889,31 @@ fn a_page_below_the_ring_minimum_is_refused() {
         Err(crate::Error::PageBelowMinimum { page_size: 0, .. })
     ));
 }
+
+/// A follow into an empty ring with a disk backlog also goes to the files:
+/// after a recovery-style start the backlog exists only on disk, and
+/// subscribing would silently skip it.
+#[tokio::test]
+async fn a_follow_into_an_empty_ring_with_a_disk_backlog_fails_to_the_files() {
+    let mem = Arc::new(mem_store(1024 * 1024));
+    let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
+    let queue = resolver.resolve("empty_follow");
+    // Ids 0..=4 exist on disk; memory holds none of them.
+    mem.start_queue(&queue, Some(UintN::from(4u64)), false);
+
+    let pool = mem.pool(&queue).unwrap();
+    assert_eq!(
+        pool.min_cached_id(),
+        None,
+        "the ring must be empty for this to test anything"
+    );
+
+    let (tx, _rx) = mpsc::channel(16);
+    let result = mem
+        .follow_full(&queue, &UintN::zero(), UintN::zero(), 1, &tx)
+        .await;
+    assert!(
+        !result.success,
+        "memory subscribed a follow whose backlog it cannot answer"
+    );
+}
