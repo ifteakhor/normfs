@@ -812,6 +812,23 @@ impl ReaderFSM {
         // Data not in memory yet - check prefetch result
         let next_file_id = current_file.increment();
 
+        // next_id never advances when no file holds it, so without this bound
+        // the walk increments the file id forever.
+        let (wal_last_id, store_last_id) = tokio::join!(
+            self.wal.get_last_file_id(&ctx.queue),
+            self.store.get_last_file_id(&ctx.queue)
+        );
+        let last_file_id = match (wal_last_id.ok().flatten(), store_last_id.ok().flatten()) {
+            (Some(w), Some(s)) => Some(w.max(s)),
+            (w, s) => w.or(s),
+        };
+        if last_file_id.is_none_or(|last| next_file_id > last) {
+            log::debug!(target: "normfs-reader-fsm",
+                "No file after {} for queue {}, completing read",
+                current_file, ctx.queue);
+            return Ok(ReaderState::Completed);
+        }
+
         if let Some(handle) = prefetch_handle {
             log::trace!(target: "normfs-reader-fsm",
                 "Checking prefetch result for file: queue={}, file_id={}",

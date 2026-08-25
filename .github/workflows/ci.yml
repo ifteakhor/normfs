@@ -20,6 +20,7 @@ jobs:
   rust:
     name: cargo test --workspace
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -32,6 +33,7 @@ jobs:
   build:
     name: build + test C (c99, -Werror)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # The runner's gcc, not the pinned image: this checks portability.
@@ -44,6 +46,7 @@ jobs:
   cross:
     name: cross build (zig)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
