@@ -1,6 +1,18 @@
 use globset::{Glob, GlobMatcher};
 use normfs_types::{CompressionType, EncryptionType};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceMode {
+    Durable,
+    MemoryOnly,
+}
+
+impl Default for PersistenceMode {
+    fn default() -> Self {
+        Self::Durable
+    }
+}
+
 /// Which arena a queue draws pages from. The pool sets the page size, and
 /// with it the idle 2-page floor and the widest record the queue accepts.
 /// Passive by default: wide records are for queues somebody names in a rule.
