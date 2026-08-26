@@ -93,6 +93,21 @@ func NewClient(addr string, logger *slog.Logger) (Client, error) {
 	return mc, nil
 }
 
+// NewSingleConnClient creates a client backed by one TCP connection.
+func NewSingleConnClient(addr string, logger *slog.Logger) (Client, error) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial %s: %w", addr, err)
+	}
+
+	client, err := newClient(conn, addr, logger)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
 // initializeConnections creates all the required connections
 func (mc *multiClient) initializeConnections() error {
 	writeConn, err := mc.connFactory()
