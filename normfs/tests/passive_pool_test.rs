@@ -1,10 +1,7 @@
 //! Two arenas: active pages for the queues somebody names in a rule, small
-//! passive pages for everything else.
-//!
-//! The pool a queue lands in is decided by its config, so the same instance
-//! must refuse a wide record on a passive queue and accept it on an active
-//! one — and a passive queue must still be a working queue: written, flushed,
-//! read back, recovered.
+//! passive pages for everything else. The same instance must refuse a wide
+//! record on a passive queue, accept it on an active one, and a passive
+//! queue must still work end to end.
 
 use bytes::Bytes;
 use normfs::{

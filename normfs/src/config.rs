@@ -1,12 +1,9 @@
 use globset::{Glob, GlobMatcher};
 use normfs_types::{CompressionType, EncryptionType};
 
-/// Which page arena a queue draws from.
-///
-/// The pool decides the queue's page size, and with it two things: the 2-page
-/// floor an idle queue holds forever, and the widest record the queue accepts.
-/// Passive is the default so a queue nobody thought about costs a tiny floor;
-/// the queues that need wide records are the ones somebody names in a rule.
+/// Which arena a queue draws pages from. The pool sets the page size, and
+/// with it the idle 2-page floor and the widest record the queue accepts.
+/// Passive by default: wide records are for queues somebody names in a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PoolKind {
     Active,

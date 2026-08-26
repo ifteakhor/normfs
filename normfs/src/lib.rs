@@ -58,9 +58,8 @@ pub enum Error {
     /// The record does not fit a page, framing included, so no page can hold
     /// it. Refused before an id is taken — see [`NormFS::enqueue`].
     RecordTooLarge(usize),
-    /// The queue was closed for good ([`NormFS::close_queue`]). Close is a
-    /// promise — followers were told they have everything — so a later write
-    /// is an error rather than a quiet resurrection. The data stays readable.
+    /// The queue was closed for good ([`NormFS::close_queue`]); a later
+    /// write is an error. The data stays readable.
     QueueClosed,
     /// `max_memory_usage` cannot hold the two pages a single queue needs to
     /// work. Refused at construction rather than rounded up: rounding up would
@@ -188,8 +187,7 @@ impl From<std::io::Error> for Error {
 
 /// 32 KiB pages, so a passive queue's permanent 2-page floor is 64 KiB.
 pub const DEFAULT_PASSIVE_PAGE_SIZE: usize = 32 * 1024;
-/// Enough for the floors of ~128 rare queues before the arena-exhausted
-/// fallback (a private floor) starts absorbing the rest.
+/// Floors for ~128 rare queues before the private-floor fallback kicks in.
 pub const DEFAULT_PASSIVE_MEMORY_USAGE: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -205,12 +203,11 @@ pub struct NormFsSettings {
     /// `max_memory_usage` into more chunks, so more queues get a working
     /// allowance and the two-page floor each one holds while idle is smaller.
     pub mem_page_size: usize,
-    /// Page size of the passive arena, which serves queues whose config says
-    /// `PoolKind::Passive` (the default). It caps their records the same way
-    /// `mem_page_size` caps an active queue's.
+    /// Page size of the passive arena. Caps a passive queue's records the
+    /// same way `mem_page_size` caps an active one's.
     pub mem_passive_page_size: usize,
-    /// Budget of the passive arena, separate from `max_memory_usage` so a
-    /// crowd of rare queues cannot eat the active arena and vice versa.
+    /// Passive arena budget, separate so rare queues and busy ones cannot
+    /// eat each other's memory.
     pub max_passive_memory_usage: usize,
     /// WAL settings (used for disk monitor validation, etc.)
     pub wal_settings: WalSettings,
@@ -242,8 +239,7 @@ impl Default for NormFsSettings {
 }
 
 impl NormFsSettings {
-    /// Every queue on the active arena: the pre-two-pool behavior, for
-    /// embedders and tests whose records are wider than a passive page.
+    /// Every queue on the active arena: the pre-two-pool behavior.
     pub fn all_active() -> Self {
         Self {
             queue_settings: QueueSettings::all_active(),
@@ -449,16 +445,13 @@ impl NormFS {
         }
     }
 
-    // Whether the queue was ever closed for good, consulting the durable
-    // marker once and mirroring it into memory so the hot paths only ever
-    // check the set.
+    // Consults the durable marker once and mirrors it into memory.
     fn queue_closed_durably(&self, queue: &QueueId) -> bool {
         if self.mem.is_closed(queue) {
             return true;
         }
-        // A queue live in memory already had its marker consulted when it
-        // started, so the disk is only asked about queues memory does not
-        // know — the stat stays off the per-request path.
+        // A queue live in memory had its marker consulted when it started;
+        // the disk stat stays off the per-request path.
         if self.mem.get_last_id(queue).is_some() {
             return false;
         }
@@ -473,8 +466,8 @@ impl NormFS {
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
 
-        // Reads stay legal on a closed queue; this only loads the marker so
-        // the reader side knows a follow here must end rather than wait.
+        // Reads stay legal on a closed queue; this only loads the marker
+        // so a follow here knows to end.
         self.queue_closed_durably(queue);
 
         if self.mem.get_last_id(queue).is_some() {
@@ -513,9 +506,8 @@ impl NormFS {
         self.settings.queue_settings.get_config(&queue.to_string())
     }
 
-    // From config rather than from the live queue, so the answer exists before
-    // the queue does — the size check runs on the first write, which is also
-    // what creates the queue.
+    // From config, not the live queue: the size check runs on the first
+    // write, which is what creates the queue.
     fn page_size_for(&self, queue: &QueueId) -> usize {
         match self.get_config_for_queue(queue).pool {
             config::PoolKind::Active => self.settings.mem_page_size,
@@ -975,9 +967,8 @@ impl NormFS {
         check_framable(&data, self.page_size_for(queue), self.settings.max_memory_usage)?;
         let Some((entry_id, placement)) = self.mem.enqueue_awaiting(queue, data.clone()).await
         else {
-            // A close can win the race between the closed check above and the
-            // placement: the queue leaves the map and the record takes no id,
-            // so refusing it here costs the sequence nothing.
+            // A close won the race after the check above. The record took
+            // no id, so refusing it costs the sequence nothing.
             return Err(if self.mem.is_closed(queue) {
                 Error::QueueClosed
             } else {
@@ -1081,16 +1072,10 @@ impl NormFS {
             .await
     }
 
-    /// Closes one queue for good: no write will ever be accepted again, not
-    /// even after a restart. Reads are untouched — everything the queue wrote
-    /// stays reachable — and a follow ends at the last record instead of
-    /// waiting forever.
-    ///
-    /// The order is the safety argument. Writes are refused first, so nothing
-    /// can slip in behind the flush; the writer then flushes and completes its
-    /// file, which is what makes the pages releasable and the data readable
-    /// from the migrated file; the marker is written only after that, so a
-    /// marker on disk implies the data reached it; memory is released last.
+    /// Closes a queue for good: no write is ever accepted again, reads stay,
+    /// a follow ends at the last record. The order is the safety argument:
+    /// refuse writes, flush and complete the file, then the marker, so a
+    /// marker on disk implies the data reached it. Memory is released last.
     pub async fn close_queue(&self, queue: &QueueId) -> Result<(), Error> {
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
@@ -1098,12 +1083,10 @@ impl NormFS {
         log::info!(target: "normfs", "Closing queue '{}' for good", queue);
         let dir = queue.to_fs_path(&self.path);
 
-        // Refusals that change nothing come first, so a close that cannot
-        // succeed leaves no half-closed state behind. A name nothing ever
-        // wrote is more likely a typo than an intent, and certifying it
-        // would brick the real name forever; a child queue named "closed"
-        // occupies the marker's path, which is the same reserved-name rule
-        // the wal/ and store/ directories already impose.
+        // Checks that change nothing come first, so a refused close leaves
+        // no half-closed state. An unknown name is more likely a typo than
+        // an intent, and "closed" is a reserved child name the same way
+        // wal/ and store/ already are.
         if self.mem.get_last_id(queue).is_none() && !dir.exists() {
             return Err(Error::QueueNotFound);
         }
@@ -1114,18 +1097,15 @@ impl NormFS {
             )));
         }
 
-        // Refusal of writes next, and it waits for the in-flight append: when
-        // begin_close returns, everything accepted is placed and nothing
-        // more can be, so the closing flush below is the whole story.
+        // Waits for the in-flight append: after this, everything accepted
+        // is placed and nothing more can be.
         self.mem.begin_close(queue).await;
 
         self.wal.close_writer(queue).await?;
 
-        // The marker asserts that everything the queue accepted is on disk.
-        // A failed closing flush in an *earlier* attempt leaves records in
-        // pages with no writer to drain them; certifying that would trade an
-        // error for silent loss, so the close stays incomplete — the records
-        // are in the WAL file for recovery, and a restart can close cleanly.
+        // The marker certifies everything accepted is on disk. Records a
+        // failed flush stranded stay in the WAL file for recovery; the close
+        // stays incomplete rather than certifying loss.
         if !self.mem.is_fully_durable(queue) {
             return Err(Error::Wal(WalError::CloseIncomplete));
         }
@@ -1134,8 +1114,7 @@ impl NormFS {
         std::fs::create_dir_all(&dir)?;
         let marker = std::fs::File::create(dir.join("closed"))?;
         marker.sync_all()?;
-        // The entry itself must survive a power cut, not only the file's
-        // bytes, and the entry lives in the directory.
+        // The directory entry must survive a power cut too.
         std::fs::File::open(&dir)?.sync_all()?;
 
         self.mem.close_queue(queue);

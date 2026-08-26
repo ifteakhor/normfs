@@ -15,8 +15,7 @@ pub enum WalError {
     SendError,
     WalNotFound,
     WriterNotFound,
-    /// A closing flush could not write everything the queue accepted. The
-    /// records stay in the WAL file for recovery; the close is not certified.
+    /// A closing flush could not write everything; the file stays for recovery.
     CloseIncomplete,
     WalEmpty(UintN),
 }

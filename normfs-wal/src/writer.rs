@@ -192,15 +192,12 @@ impl WalWriter {
                                 false
                             }
                         };
-                        // A clean close is also this file's completion: no
-                        // writer will ever rotate it out, so this is the only
-                        // moment it can migrate. A file that lost entries or
-                        // could not flush stays in the WAL, where recovery
-                        // and reads still see what survived.
+                        // A clean close is this file's only chance to
+                        // migrate: no writer will ever rotate it out. A file
+                        // that lost entries stays in the WAL for recovery.
                         let closed_ok = flushed && state.buffer.pending.is_empty();
-                        // Only a file this writer put entries into: completing
-                        // a header-only file hands the store worker nothing to
-                        // parse and a last id it can only get wrong.
+                        // Never a header-only file: the store worker would
+                        // parse nothing and compute a last id from it.
                         if closed_ok && state.has_written {
                             let _ = state.wal_complete_sender.send(WalFile {
                                 queue_id: state.queue_id.clone(),

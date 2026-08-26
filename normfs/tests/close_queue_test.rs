@@ -1,10 +1,6 @@
-//! Closing a queue for good.
-//!
-//! Close is a promise with three parts: no write is ever accepted again (not
-//! even after a restart), everything already written stays readable, and a
-//! follower is told "that was the last record" instead of waiting forever.
-//! Each test pins one part; together they are what makes the promise safe to
-//! rely on.
+//! Close is a promise with three parts: no write is ever accepted again,
+//! everything written stays readable, and a follower is told "that was the
+//! last record" instead of waiting forever. Each test pins one part.
 
 use std::time::Duration;
 

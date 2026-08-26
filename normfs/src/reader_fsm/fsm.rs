@@ -274,13 +274,9 @@ impl ReaderFSM {
         let end_id = if limit > 0 {
             Some(start_id.add(&UintN::from((limit - 1) * step)))
         } else if self.mem.is_closed(&queue) {
-            // A follow on a closed queue is a bounded read in disguise:
-            // nothing will ever arrive past the last record, so pinning it as
-            // the end lets the ordinary machinery complete instead of
-            // subscribing a wait that can never end. The id comes from the
-            // closed record, not the queues map — close removes the queue
-            // from the map, and a follow arriving after that must still
-            // deliver the backlog rather than swallow it.
+            // A follow on a closed queue is a bounded read: nothing arrives
+            // past the last record. The bound comes from the closed record,
+            // not the map, which close has already emptied.
             match self.mem.closed_last_id(&queue) {
                 Some(last) if start_id <= last => Some(last),
                 // Closed and nothing at or past the start: the reader already
@@ -365,12 +361,9 @@ impl ReaderFSM {
             })
         } else {
             if self.mem.is_closed(&queue) {
-                // Same conversion as the positive lookup: a follow on a
-                // closed queue is bounded by its last record, so resolve the
-                // tail offset against it and read to the end instead of
-                // subscribing a wait that can never end. Offset zero follows
-                // the live semantics — subscribe from the *next* record — and
-                // on a closed queue the next record does not exist.
+                // Same conversion as the positive lookup. Offset zero keeps
+                // the live semantics (subscribe from the *next* record), and
+                // a closed queue's next record does not exist.
                 if offset == UintN::zero() {
                     return Ok(ReaderState::Completed);
                 }
@@ -816,10 +809,8 @@ impl ReaderFSM {
                 }
             }
         } else if self.mem.is_closed(&ctx.queue) {
-            // The queue closed while this follow was walking the files. The
-            // subscribe below can never be answered, so the closed record's
-            // last id bounds the walk the same way the lookup would have
-            // bounded it had the close come first.
+            // The queue closed mid-walk; the subscribe below can never be
+            // answered, so the closed record's last id bounds the walk.
             match self.mem.closed_last_id(&ctx.queue) {
                 Some(last) if ctx.next_id <= last => {}
                 _ => return Ok(ReaderState::Completed),

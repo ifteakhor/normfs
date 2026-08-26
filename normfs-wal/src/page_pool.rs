@@ -629,9 +629,8 @@ impl PagePool {
         arena.forget_label(inner.ring.ring_id());
     }
 
-    /// Whether every record in every page is on disk. What `release_to_arena`
-    /// requires, exposed so a close can refuse to certify a queue whose bytes
-    /// never made it.
+    /// Whether every record in every page is on disk: what a close needs to
+    /// know before it certifies anything.
     pub fn is_fully_durable(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         let essential = inner.ring.min_essential_id();
