@@ -198,7 +198,10 @@ impl WalWriter {
                         // could not flush stays in the WAL, where recovery
                         // and reads still see what survived.
                         let closed_ok = flushed && state.buffer.pending.is_empty();
-                        if closed_ok {
+                        // Only a file this writer put entries into: completing
+                        // a header-only file hands the store worker nothing to
+                        // parse and a last id it can only get wrong.
+                        if closed_ok && state.has_written {
                             let _ = state.wal_complete_sender.send(WalFile {
                                 queue_id: state.queue_id.clone(),
                                 file_id: state.file_id.clone(),

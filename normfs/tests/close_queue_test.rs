@@ -398,3 +398,84 @@ async fn a_zero_offset_tail_follow_on_a_closed_queue_delivers_nothing() {
 
     fs.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_close_of_an_unknown_name_is_refused_not_certified() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
+        .await
+        .unwrap();
+
+    let typo = fs.resolve("tpyo");
+    let refused = fs.close_queue(&typo).await;
+    assert!(
+        matches!(refused, Err(Error::QueueNotFound)),
+        "closing a name nothing ever wrote must be refused, got {refused:?}"
+    );
+
+    // The real spelling is not bricked: the name still opens for writing.
+    fs.ensure_queue_exists_for_write(&typo)
+        .await
+        .expect("a refused close must leave nothing behind");
+    fs.enqueue(&typo, Bytes::from_static(b"first")).await.unwrap();
+
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_colliding_marker_path_fails_the_close_and_leaves_the_queue_writable() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
+        .await
+        .unwrap();
+
+    let child = fs.resolve("parent/closed");
+    fs.ensure_queue_exists_for_write(&child).await.unwrap();
+    fs.enqueue(&child, Bytes::from_static(b"child")).await.unwrap();
+
+    let parent = fs.resolve("parent");
+    fs.ensure_queue_exists_for_write(&parent).await.unwrap();
+    fs.enqueue(&parent, Bytes::from_static(b"one")).await.unwrap();
+
+    let refused = fs.close_queue(&parent).await;
+    assert!(
+        refused.is_err(),
+        "the child dir occupies the marker path; close must refuse, got Ok"
+    );
+
+    // Refused before anything changed: the parent still accepts writes.
+    fs.enqueue(&parent, Bytes::from_static(b"two"))
+        .await
+        .expect("a refused close must not leave the queue half closed");
+
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_close_of_a_never_written_queue_migrates_nothing() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
+        .await
+        .unwrap();
+    let queue = fs.resolve("silent");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    fs.close_queue(&queue).await.unwrap();
+
+    // A header-only file has nothing for the store worker: completing it
+    // writes an empty store file and a last id computed from nothing.
+    let store_dir = temp
+        .path()
+        .join(fs.get_instance_id())
+        .join("silent")
+        .join("store");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let store_files = std::fs::read_dir(&store_dir)
+        .map(|d| d.filter_map(|e| e.ok()).count())
+        .unwrap_or(0);
+    assert_eq!(
+        store_files, 0,
+        "a file with no entries must not migrate to the store"
+    );
+
+    fs.close().await.unwrap();
+}

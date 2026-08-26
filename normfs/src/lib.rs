@@ -456,6 +456,12 @@ impl NormFS {
         if self.mem.is_closed(queue) {
             return true;
         }
+        // A queue live in memory already had its marker consulted when it
+        // started, so the disk is only asked about queues memory does not
+        // know — the stat stays off the per-request path.
+        if self.mem.get_last_id(queue).is_some() {
+            return false;
+        }
         if queue.to_fs_path(&self.path).join("closed").is_file() {
             self.mem.mark_closed(queue);
             return true;
@@ -1090,7 +1096,25 @@ impl NormFS {
         let _guard = queue_lock.lock().await;
 
         log::info!(target: "normfs", "Closing queue '{}' for good", queue);
-        // Refusal first, and it waits for the in-flight append: when
+        let dir = queue.to_fs_path(&self.path);
+
+        // Refusals that change nothing come first, so a close that cannot
+        // succeed leaves no half-closed state behind. A name nothing ever
+        // wrote is more likely a typo than an intent, and certifying it
+        // would brick the real name forever; a child queue named "closed"
+        // occupies the marker's path, which is the same reserved-name rule
+        // the wal/ and store/ directories already impose.
+        if self.mem.get_last_id(queue).is_none() && !dir.exists() {
+            return Err(Error::QueueNotFound);
+        }
+
+        if dir.join("closed").is_dir() {
+            return Err(Error::Io(std::io::Error::other(
+                "a child queue named 'closed' occupies this queue's marker path",
+            )));
+        }
+
+        // Refusal of writes next, and it waits for the in-flight append: when
         // begin_close returns, everything accepted is placed and nothing
         // more can be, so the closing flush below is the whole story.
         self.mem.begin_close(queue).await;
@@ -1107,7 +1131,6 @@ impl NormFS {
         }
 
 
-        let dir = queue.to_fs_path(&self.path);
         std::fs::create_dir_all(&dir)?;
         let marker = std::fs::File::create(dir.join("closed"))?;
         marker.sync_all()?;

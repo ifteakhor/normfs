@@ -377,107 +377,6 @@ impl MemQueue {
         Some((id, placement))
     }
 
-    /// Enqueues without awaiting, for a queue no writer is draining.
-    ///
-    /// It cannot take the append gate — the gate is held across an `await` and
-    /// this is not async — so it is not safe beside [`MemQueue::enqueue_awaiting`]:
-    /// the two would allocate ids from `last_id` independently, and the pool,
-    /// which follows the caller's sequence rather than owning it, would find
-    /// the next id it is handed is not the one it expected.
-    ///
-    /// That is survivable now rather than silent — the pool steps over a small
-    /// gap instead of re-seeding, so nothing it holds is discarded — but the
-    /// record this call takes an id for still reaches no file. So it says so.
-    pub fn enqueue(&self, data: Bytes) -> UintN {
-        self.warn_if_drained("enqueue");
-        let mut inner = self.inner.write().unwrap();
-        let id = inner
-            .last_id
-            .as_ref()
-            .map_or(UintN::zero(), |id| id.increment());
-
-        let subscribers_data = if self.subscribers.lock().unwrap().is_empty() {
-            None
-        } else {
-            Some(data.clone())
-        };
-
-        self.cache_append(&mut inner, id_to_u64(&id), &data);
-        inner.last_id = Some(id.clone());
-
-        log::debug!(target: "normfs-mem", "Enqueued entry - ID: {}, Data size: {} bytes", id, data.len());
-
-        drop(inner);
-
-        if let Some(data) = subscribers_data {
-            self.notify_subscribers(&[(id.clone(), data)]);
-        }
-
-        id
-    }
-
-    /// The batch form of [`MemQueue::enqueue`], and under the same rule: not for
-    /// a queue a writer is draining.
-    pub fn enqueue_batch(&self, entries: Vec<Bytes>) -> Vec<UintN> {
-        self.warn_if_drained("enqueue_batch");
-        if entries.is_empty() {
-            return Vec::new();
-        }
-
-        let mut inner = self.inner.write().unwrap();
-        let mut ids = Vec::with_capacity(entries.len());
-        let mut next_id = inner
-            .last_id
-            .as_ref()
-            .map_or(UintN::zero(), |id| id.increment());
-
-        let has_subscribers = !self.subscribers.lock().unwrap().is_empty();
-        let mut entries_with_ids = if has_subscribers {
-            Vec::with_capacity(entries.len())
-        } else {
-            Vec::new()
-        };
-
-        for data in entries {
-            ids.push(next_id.clone());
-            if has_subscribers {
-                entries_with_ids.push((next_id.clone(), data.clone()));
-            }
-            self.cache_append(&mut inner, id_to_u64(&next_id), &data);
-            next_id = next_id.increment();
-        }
-
-        if let Some(last_id) = ids.last() {
-            inner.last_id = Some(last_id.clone());
-        }
-
-        drop(inner);
-
-        if has_subscribers {
-            self.notify_subscribers(&entries_with_ids);
-        }
-
-        ids
-    }
-
-    /// Says so, loudly, when a synchronous append is used on a queue whose pool
-    /// a writer is draining. See [`MemQueue::enqueue`].
-    fn warn_if_drained(&self, what: &str) {
-        let drained = {
-            let inner = self.inner.read().unwrap();
-            inner.pool.as_ref().is_some_and(|p| p.has_drainer())
-        };
-        if drained {
-            log::error!(
-                target: "normfs-mem",
-                "MemQueue::{what} used on a queue a WAL writer is draining: it does not hold \
-                 the append gate, so the id it takes is not one the pool will see and the \
-                 record reaches no file. Use enqueue_awaiting."
-            );
-            debug_assert!(false, "MemQueue::{what} on a drained queue");
-        }
-    }
-
     pub fn get_last_id(&self) -> Option<UintN> {
         self.inner.read().unwrap().last_id.clone()
     }
@@ -1083,15 +982,6 @@ impl MemStore {
     /// rather than a floor. Rounding it up is how `max_memory_usage` stops
     /// meaning what it says -- at a 4 MiB page a 1 MiB budget would silently
     /// allocate 8 MiB -- and the pool exists to make that number true.
-    pub fn with_page_size(max_memory_usage: usize, page_size: usize) -> Result<Self, crate::Error> {
-        Self::with_pools(
-            max_memory_usage,
-            page_size,
-            crate::DEFAULT_PASSIVE_MEMORY_USAGE,
-            crate::DEFAULT_PASSIVE_PAGE_SIZE,
-        )
-    }
-
     pub fn with_pools(
         max_memory_usage: usize,
         page_size: usize,
@@ -1213,22 +1103,27 @@ impl MemStore {
     /// an id. Waits for the in-flight append (the gate holder), so when this
     /// returns, everything accepted is placed and the closing flush that
     /// follows is bounded.
+    /// The final id is read under the same gate, and the close becomes
+    /// visible to readers only after that. The other order recorded a bound
+    /// an in-flight append was still moving: a follow was told "complete" at
+    /// N while N+1 went on to be accepted, flushed, and certified.
     pub async fn begin_close(&self, queue: &QueueId) {
-        let last = self.get_last_id(queue).flatten();
-        {
-            let mut closed = self.closed.write().unwrap();
-            let entry = closed.entry(queue.clone()).or_insert(None);
-            if entry.is_none() {
-                *entry = last;
-            }
-        }
         let mem_queue = {
             let queues = self.queues.read().unwrap();
             queues.get(queue).cloned()
         };
-        if let Some(q) = mem_queue {
-            let _gate = q.append_gate.lock().await;
-            q.closed.store(true, Ordering::Relaxed);
+        let last = match mem_queue {
+            Some(q) => {
+                let _gate = q.append_gate.lock().await;
+                q.closed.store(true, Ordering::Relaxed);
+                q.inner.read().unwrap().last_id.clone()
+            }
+            None => None,
+        };
+        let mut closed = self.closed.write().unwrap();
+        let entry = closed.entry(queue.clone()).or_insert(None);
+        if entry.is_none() {
+            *entry = last;
         }
     }
 
@@ -1278,25 +1173,6 @@ impl MemStore {
             queues.get(queue).cloned()
         };
         mem_queue?.enqueue_awaiting(data).await
-    }
-
-    pub fn enqueue(&self, queue: &QueueId, data: Bytes) -> UintN {
-        let queues = self.queues.read().unwrap();
-        let mem_queue = queues.get(queue).expect("queue not setup");
-        let id = mem_queue.enqueue(data);
-        log::debug!(target: "normfs-mem", "Enqueued to queue '{}' - Entry ID: {}", queue, id);
-        id
-    }
-
-    pub fn enqueue_batch(&self, queue: &QueueId, entries: Vec<Bytes>) -> Vec<UintN> {
-        let queues = self.queues.read().unwrap();
-        let mem_queue = queues.get(queue).expect("queue not setup");
-        let ids = mem_queue.enqueue_batch(entries);
-        if let (Some(first), Some(last)) = (ids.first(), ids.last()) {
-            log::debug!(target: "normfs-mem", "Enqueued batch to queue '{}' - Count: {}, First ID: {}, Last ID: {}",
-                queue, ids.len(), first, last);
-        }
-        ids
     }
 
     pub async fn enqueue_batch_awaiting(
