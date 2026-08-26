@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc::Sender;
 
 use bytes::Bytes;
+use crate::config::PoolKind;
 use normfs_types::{DataSource, QueueId, ReadEntry, SubscriberCallback};
 use normfs_wal::{AppendOutcome, PagePool, Placement, WalArena};
 use uintn::UintN;
@@ -82,10 +83,20 @@ pub struct MemStore {
     /// rather than a per-queue allowance that each new queue re-derives -- and
     /// so a busy queue can take a page an idle one has released.
     arena: Arc<WalArena>,
-    page_size: usize,
+    /// A second, small-paged arena for queues that write rarely. Its page size
+    /// caps their records, and in exchange their permanent 2-page floor costs
+    /// two small pages instead of two of the active arena's.
+    passive_arena: Arc<WalArena>,
     /// Ring ids, which is what the arena's owner array records. Distinct per
-    /// queue and never reused while a queue is alive.
+    /// queue and never reused while a queue is alive. Shared across both
+    /// arenas so a ring id names one queue no matter where its pages live.
     next_ring_id: AtomicU64,
+    /// Queues closed for good, mapped to the last id each had when it closed
+    /// (`None` when only the durable marker is known so far). The id is
+    /// recorded here because close removes the queue from the map above, and
+    /// a follow arriving after that still needs to know where the sequence
+    /// ended to deliver the backlog instead of swallowing it.
+    closed: RwLock<HashMap<QueueId, Option<UintN>>>,
 }
 
 struct Inner {
@@ -100,6 +111,10 @@ struct Inner {
 
 struct MemQueue {
     inner: RwLock<Inner>,
+    /// Set under the append gate when the queue closes, so it cannot flip in
+    /// the middle of a batch: an enqueue holds the gate for its whole
+    /// placement, and a close waits its turn before refusing what follows.
+    closed: std::sync::atomic::AtomicBool,
     /// The pages this queue started with. It can hold more or fewer now --
     /// the pool's own `page_count` is the live figure.
     pages: usize,
@@ -169,6 +184,7 @@ impl MemQueue {
 
         MemQueue {
             pages: pool.page_count(),
+            closed: std::sync::atomic::AtomicBool::new(false),
             inner: RwLock::new(Inner {
                 pool: Some(pool),
                 last_id,
@@ -246,7 +262,7 @@ impl MemQueue {
     /// the time the writer sees the entry, the bytes are already placed, and a
     /// rotation decided then would flush them into the file they were meant to
     /// come after.
-    pub async fn enqueue_awaiting(&self, data: Bytes) -> (UintN, Placement) {
+    pub async fn enqueue_awaiting(&self, data: Bytes) -> Option<(UintN, Placement)> {
         // Held across the append and the charge together, so the pool sees ids
         // in order: it follows the caller's sequence rather than owning it.
         let _gate = self.append_gate.lock().await;
@@ -259,17 +275,29 @@ impl MemQueue {
     /// The gate is taken once for the whole batch, so the ids a batch returns
     /// are contiguous — another enqueue cannot interleave into the middle of
     /// one.
-    pub async fn enqueue_batch_awaiting(&self, entries: Vec<Bytes>) -> Vec<(UintN, Placement)> {
+    pub async fn enqueue_batch_awaiting(&self, entries: Vec<Bytes>) -> Option<Vec<(UintN, Placement)>> {
         let _gate = self.append_gate.lock().await;
         let mut out = Vec::with_capacity(entries.len());
         for data in entries {
-            out.push(self.enqueue_gated(data).await);
+            match self.enqueue_gated(data).await {
+                Some(placed) => out.push(placed),
+                // The writer left mid-batch. The prefix already placed keeps
+                // its ids — those records were accepted — and the WAL send
+                // reports the failure to the caller.
+                None if !out.is_empty() => break,
+                None => return None,
+            }
         }
-        out
+        Some(out)
     }
 
     /// The body of an enqueue, with the append gate already held.
-    async fn enqueue_gated(&self, data: Bytes) -> (UintN, Placement) {
+    async fn enqueue_gated(&self, data: Bytes) -> Option<(UintN, Placement)> {
+        // Checked under the gate, so a refusal is final: the close that set
+        // this waited for every in-flight append before it flushed.
+        if self.closed.load(Ordering::Relaxed) {
+            return None;
+        }
         // The id is not committed until the record is placed. This future can
         // be dropped at the await below, and a cancelled enqueue must consume
         // nothing: an id taken with no record behind it is a gap the pool
@@ -296,15 +324,15 @@ impl MemQueue {
                 placement = match pool.place(id_to_u64(&id), &data).await {
                     Ok(placed) => placed,
                     Err(normfs_wal::PoolError::NoDrainer) => {
-                        // The queue closed while this append waited for a
-                        // page. The record reaches no file; the writer is
-                        // gone, so the send below fails and the caller sees
-                        // the error.
+                        // The writer left while this append waited for a
+                        // page. The record reaches no file, so it must not
+                        // take an id or reach a subscriber: either would put
+                        // a record in the sequence that no recovery can show.
                         log::warn!(
                             target: "normfs-mem",
-                            "entry {id} arrived while the queue was closing; it reaches no file"
+                            "entry {id} arrived while the queue was closing; it is refused"
                         );
-                        Placement::legacy()
+                        return None;
                     }
                     Err(e) => {
                         // Unreachable through `NormFS::enqueue`, which refuses
@@ -346,7 +374,7 @@ impl MemQueue {
             self.notify_subscribers(&[(id.clone(), data)]);
         }
 
-        (id, placement)
+        Some((id, placement))
     }
 
     /// Enqueues without awaiting, for a queue no writer is draining.
@@ -1056,6 +1084,32 @@ impl MemStore {
     /// meaning what it says -- at a 4 MiB page a 1 MiB budget would silently
     /// allocate 8 MiB -- and the pool exists to make that number true.
     pub fn with_page_size(max_memory_usage: usize, page_size: usize) -> Result<Self, crate::Error> {
+        Self::with_pools(
+            max_memory_usage,
+            page_size,
+            crate::DEFAULT_PASSIVE_MEMORY_USAGE,
+            crate::DEFAULT_PASSIVE_PAGE_SIZE,
+        )
+    }
+
+    pub fn with_pools(
+        max_memory_usage: usize,
+        page_size: usize,
+        passive_memory_usage: usize,
+        passive_page_size: usize,
+    ) -> Result<Self, crate::Error> {
+        let arena = Self::arena_for(max_memory_usage, page_size)?;
+        let passive_arena = Self::arena_for(passive_memory_usage, passive_page_size)?;
+        Ok(MemStore {
+            queues: RwLock::new(HashMap::new()),
+            arena,
+            passive_arena,
+            next_ring_id: AtomicU64::new(0),
+            closed: RwLock::new(HashMap::new()),
+        })
+    }
+
+    fn arena_for(max_memory_usage: usize, page_size: usize) -> Result<Arc<WalArena>, crate::Error> {
         if page_size < normfs_wal::MIN_PAGE_SIZE {
             return Err(crate::Error::PageBelowMinimum {
                 page_size,
@@ -1071,18 +1125,18 @@ impl MemStore {
                 needed,
             });
         }
-        Ok(MemStore {
-            queues: RwLock::new(HashMap::new()),
-            arena: Arc::new(WalArena::new(pages, page_size)),
-            page_size,
-            next_ring_id: AtomicU64::new(0),
-        })
+        Ok(Arc::new(WalArena::new(pages, page_size)))
     }
 
     /// The shared page arena, for tests that assert on who holds what.
     #[cfg(test)]
     pub fn arena(&self) -> &Arc<WalArena> {
         &self.arena
+    }
+
+    #[cfg(test)]
+    pub fn passive_arena(&self) -> &Arc<WalArena> {
+        &self.passive_arena
     }
 
     /// The queue's page pool, so the WAL writer can put those same pages on
@@ -1103,43 +1157,127 @@ impl MemStore {
     /// reserve 16 MiB. Being wrong about it is cheap now: the range grows into
     /// the arena on demand, so a queue promoted to writing takes what it needs
     /// on its first busy moment instead of holding it in advance.
-    pub fn start_queue(&self, queue: &QueueId, last_id: Option<UintN>, readonly: bool) {
+    pub fn start_queue(
+        &self,
+        queue: &QueueId,
+        last_id: Option<UintN>,
+        readonly: bool,
+        pool: PoolKind,
+    ) {
         let mut queues = self.queues.write().unwrap();
         if !queues.contains_key(queue) {
+            let arena = match pool {
+                PoolKind::Active => &self.arena,
+                PoolKind::Passive => &self.passive_arena,
+            };
             // Pages come out of the one arena, so the total is bounded by the
             // setting however many queues start. It used to be the setting
             // divided by the queue count at this moment, which bounded nothing.
-            let want = if readonly {
+            //
+            // A passive queue starts at the floor even for writing: rare
+            // writers are the reason its arena exists, and the range still
+            // grows on demand if one of them bursts.
+            let want = if readonly || pool == PoolKind::Passive {
                 MEM_MIN_PAGES_PER_QUEUE
             } else {
-                pages_for_new_queue(self.arena.free_pages(), self.arena.page_count())
+                pages_for_new_queue(arena.free_pages(), arena.page_count())
             };
             let ring_id = self.next_ring_id.fetch_add(1, Ordering::Relaxed);
-            let new_queue = Arc::new(MemQueue::new(
-                last_id.clone(),
-                &self.arena,
-                ring_id,
-                want,
-                queue,
-            ));
+            let new_queue = Arc::new(MemQueue::new(last_id.clone(), arena, ring_id, want, queue));
             log::debug!(target: "normfs-mem",
-                "Starting queue '{}' with last_id: {:?}, {} pages ({} KiB) from the shared arena \
+                "Starting queue '{}' with last_id: {:?}, {} pages ({} KiB) from the {:?} arena \
                  ({} of {} still free)",
-                queue, last_id, new_queue.pages, new_queue.pages * self.page_size / 1024,
-                self.arena.free_pages(), self.arena.page_count());
+                queue, last_id, new_queue.pages, new_queue.pages * arena.page_size() / 1024,
+                pool, arena.free_pages(), arena.page_count());
             queues.insert(queue.clone(), new_queue);
         }
     }
 
-    pub async fn enqueue_awaiting(&self, queue: &QueueId, data: Bytes) -> (UintN, Placement) {
+    pub fn mark_closed(&self, queue: &QueueId) {
+        self.closed.write().unwrap().entry(queue.clone()).or_insert(None);
+    }
+
+    pub fn is_closed(&self, queue: &QueueId) -> bool {
+        self.closed.read().unwrap().contains_key(queue)
+    }
+
+    /// The last id a closed queue ever assigned: the recorded one if close
+    /// saw it, else whatever a live (readonly-restarted) queue knows. `None`
+    /// means the queue truly never wrote.
+    pub fn closed_last_id(&self, queue: &QueueId) -> Option<UintN> {
+        let recorded = self.closed.read().unwrap().get(queue).cloned().flatten();
+        recorded.or_else(|| self.get_last_id(queue).flatten())
+    }
+
+    /// Stops the write side: every later enqueue is refused before it takes
+    /// an id. Waits for the in-flight append (the gate holder), so when this
+    /// returns, everything accepted is placed and the closing flush that
+    /// follows is bounded.
+    pub async fn begin_close(&self, queue: &QueueId) {
+        let last = self.get_last_id(queue).flatten();
+        {
+            let mut closed = self.closed.write().unwrap();
+            let entry = closed.entry(queue.clone()).or_insert(None);
+            if entry.is_none() {
+                *entry = last;
+            }
+        }
         let mem_queue = {
             let queues = self.queues.read().unwrap();
             queues.get(queue).cloned()
         };
-        match mem_queue {
-            Some(q) => q.enqueue_awaiting(data).await,
-            None => (self.enqueue(queue, data), Placement::legacy()),
+        if let Some(q) = mem_queue {
+            let _gate = q.append_gate.lock().await;
+            q.closed.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// Whether everything the queue ever accepted is on disk. True for a
+    /// queue with no pages; the marker that certifies a close must not be
+    /// written while this is false.
+    pub fn is_fully_durable(&self, queue: &QueueId) -> bool {
+        let pool = {
+            let queues = self.queues.read().unwrap();
+            queues.get(queue).and_then(|q| q.inner.read().unwrap().pool.clone())
+        };
+        pool.is_none_or(|p| p.is_fully_durable())
+    }
+
+    /// Ends a closed queue's life in memory: subscribers are dropped (their
+    /// streams end), and the pages go back to their arena. Called after the
+    /// WAL writer has flushed, so the pages are reusable; if any are not, the
+    /// release declines by itself and the pages are simply not traded again.
+    pub fn close_queue(&self, queue: &QueueId) {
+        // The last id is recorded before the queue leaves the map, and a
+        // recorded id is never clobbered: a second close of an already-empty
+        // map entry must not erase what the first one knew.
+        self.mark_closed(queue);
+        let removed = self.queues.write().unwrap().remove(queue);
+        if let Some(q) = removed {
+            let pool = q.inner.write().unwrap().pool.take();
+            if let Some(pool) = pool {
+                // Only when nothing else can touch the pool: released slots
+                // go to the next queue, and a straggler still holding this
+                // pool would read pages the new owner is writing. A straggler
+                // keeps the pages alive instead, and the ring's own drop
+                // releases them when the last holder lets go.
+                if let Some(pool) = Arc::into_inner(pool) {
+                    pool.release_to_arena();
+                }
+            }
+        }
+    }
+
+    /// `None` when the queue is not in the map — never started, or closed for
+    /// good. The caller owns the words for why; this layer only knows the
+    /// record was not taken, which is the fact that keeps a racing close safe:
+    /// a record that got no id needs no place in the sequence.
+    pub async fn enqueue_awaiting(&self, queue: &QueueId, data: Bytes) -> Option<(UintN, Placement)> {
+        let mem_queue = {
+            let queues = self.queues.read().unwrap();
+            queues.get(queue).cloned()
+        };
+        mem_queue?.enqueue_awaiting(data).await
     }
 
     pub fn enqueue(&self, queue: &QueueId, data: Bytes) -> UintN {
@@ -1165,19 +1303,12 @@ impl MemStore {
         &self,
         queue: &QueueId,
         entries: Vec<Bytes>,
-    ) -> Vec<(UintN, Placement)> {
+    ) -> Option<Vec<(UintN, Placement)>> {
         let mem_queue = {
             let queues = self.queues.read().unwrap();
             queues.get(queue).cloned()
         };
-        match mem_queue {
-            Some(q) => q.enqueue_batch_awaiting(entries).await,
-            None => self
-                .enqueue_batch(queue, entries)
-                .into_iter()
-                .map(|id| (id, Placement::legacy()))
-                .collect(),
-        }
+        mem_queue?.enqueue_batch_awaiting(entries).await
     }
 
     pub fn get_last_id(&self, queue: &QueueId) -> Option<Option<UintN>> {

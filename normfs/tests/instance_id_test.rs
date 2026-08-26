@@ -9,7 +9,7 @@ async fn test_instance_id_persists_across_restarts() {
     let temp_path = temp_dir.path().to_path_buf();
 
     // Create first NormFS instance
-    let normfs1 = NormFS::new(temp_path.clone(), NormFsSettings::default())
+    let normfs1 = NormFS::new(temp_path.clone(), NormFsSettings::all_active())
         .await
         .unwrap();
     let instance_id_1 = normfs1.get_instance_id().to_string();
@@ -17,7 +17,7 @@ async fn test_instance_id_persists_across_restarts() {
     normfs1.close().await.unwrap();
 
     // Create second NormFS instance with same path
-    let normfs2 = NormFS::new(temp_path.clone(), NormFsSettings::default())
+    let normfs2 = NormFS::new(temp_path.clone(), NormFsSettings::all_active())
         .await
         .unwrap();
     let instance_id_2 = normfs2.get_instance_id().to_string();
@@ -37,7 +37,7 @@ async fn test_queue_paths_use_instance_id() {
     let temp_path = temp_dir.path().to_path_buf();
 
     // Create NormFS and write some data
-    let normfs = NormFS::new(temp_path.clone(), NormFsSettings::default())
+    let normfs = NormFS::new(temp_path.clone(), NormFsSettings::all_active())
         .await
         .unwrap();
     let instance_id = normfs.get_instance_id().to_string();
@@ -93,7 +93,7 @@ async fn test_queue_data_readable_after_restart() {
 
     // First session: write data
     {
-        let normfs = NormFS::new(temp_path.clone(), NormFsSettings::default())
+        let normfs = NormFS::new(temp_path.clone(), NormFsSettings::all_active())
             .await
             .unwrap();
         let queue_id = normfs.resolve("persistent-queue");
@@ -114,7 +114,7 @@ async fn test_queue_data_readable_after_restart() {
 
     // Second session: read data back
     {
-        let normfs = NormFS::new(temp_path.clone(), NormFsSettings::default())
+        let normfs = NormFS::new(temp_path.clone(), NormFsSettings::all_active())
             .await
             .unwrap();
         let queue_id = normfs.resolve("persistent-queue");

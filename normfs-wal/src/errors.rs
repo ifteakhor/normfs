@@ -15,6 +15,9 @@ pub enum WalError {
     SendError,
     WalNotFound,
     WriterNotFound,
+    /// A closing flush could not write everything the queue accepted. The
+    /// records stay in the WAL file for recovery; the close is not certified.
+    CloseIncomplete,
     WalEmpty(UintN),
 }
 
@@ -30,6 +33,7 @@ impl std::fmt::Display for WalError {
             WalError::SendError => write!(f, "Failed to send WAL entry"),
             WalError::WalNotFound => write!(f, "WAL file not found"),
             WalError::WriterNotFound => write!(f, "WAL writer not found"),
+            WalError::CloseIncomplete => write!(f, "Closing flush could not write everything; the file stays for recovery"),
             WalError::WalEmpty(id) => write!(f, "WAL file {} is empty", id),
         }
     }

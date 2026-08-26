@@ -41,7 +41,7 @@ async fn a_lone_record_on_a_silent_queue_reaches_disk() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().to_path_buf();
 
-    let mut settings = NormFsSettings::default();
+    let mut settings = NormFsSettings::all_active();
     settings.wal_settings.write_interval = Duration::from_millis(20);
 
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
@@ -75,7 +75,7 @@ async fn a_lone_record_on_a_silent_queue_reaches_disk() {
     // And it reads back, so what landed is the record rather than a header the
     // writer happened to widen.
     fs.close().await.unwrap();
-    let fs = NormFS::new(path.clone(), NormFsSettings::default())
+    let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
         .await
         .unwrap();
     let queue = fs.resolve("weekly");
@@ -105,7 +105,7 @@ async fn the_flush_timer_survives_a_long_idle_stretch() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().to_path_buf();
 
-    let mut settings = NormFsSettings::default();
+    let mut settings = NormFsSettings::all_active();
     settings.wal_settings.write_interval = Duration::from_millis(20);
 
     let fs = NormFS::new(path.clone(), settings).await.unwrap();

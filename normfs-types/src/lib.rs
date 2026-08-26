@@ -50,7 +50,7 @@ impl QueueId {
         format!("{}{}/", prefix, self.path.trim_start_matches('/'))
     }
 
-    fn to_fs_path(&self, prefix: &std::path::Path) -> std::path::PathBuf {
+    pub fn to_fs_path(&self, prefix: &std::path::Path) -> std::path::PathBuf {
         let relative = self.path.trim_start_matches('/');
         prefix.join(relative)
     }

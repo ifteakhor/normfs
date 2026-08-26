@@ -16,7 +16,7 @@ async fn test_repeated_backward_read_with_concurrent_writes() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = Arc::new(NormFS::new(path.clone(), settings).await.unwrap());
 
     let queue_id = fs.resolve("test-queue");
@@ -95,7 +95,7 @@ async fn test_repeated_backward_read_loop() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
     let queue_id = fs.resolve("test-queue");

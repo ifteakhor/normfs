@@ -18,7 +18,7 @@ use uintn::UintN;
 enum WriteRequest {
     Enqueue(UintN, Bytes, Placement),
     EnqueueBatch(Vec<(UintN, Bytes, Placement)>),
-    Close(oneshot::Sender<()>),
+    Close(oneshot::Sender<bool>),
 }
 
 #[derive(Clone)]
@@ -181,19 +181,37 @@ impl WalWriter {
                                 ids.join(", ")
                             );
                         }
-                        if let Err(e) = state.file_writer.close().await {
-                            log::error!(
-                                "WAL writer: error closing file writer for queue '{}': {}",
-                                state.queue_id,
-                                e
-                            );
+                        let flushed = match state.file_writer.close().await {
+                            Ok(()) => true,
+                            Err(e) => {
+                                log::error!(
+                                    "WAL writer: error closing file writer for queue '{}': {}",
+                                    state.queue_id,
+                                    e
+                                );
+                                false
+                            }
+                        };
+                        // A clean close is also this file's completion: no
+                        // writer will ever rotate it out, so this is the only
+                        // moment it can migrate. A file that lost entries or
+                        // could not flush stays in the WAL, where recovery
+                        // and reads still see what survived.
+                        let closed_ok = flushed && state.buffer.pending.is_empty();
+                        if closed_ok {
+                            let _ = state.wal_complete_sender.send(WalFile {
+                                queue_id: state.queue_id.clone(),
+                                file_id: state.file_id.clone(),
+                                encryption_type: state.settings.encryption_type,
+                                compression_type: state.settings.compression_type,
+                            });
                         }
                         // After the closing flush, so it releases whatever is
                         // still waiting.
                         if let Some(pool) = state.pool.as_ref() {
                             pool.clear_drainer();
                         }
-                        let _ = responder.send(());
+                        let _ = responder.send(closed_ok);
                         break;
                     }
                 }
@@ -250,7 +268,11 @@ impl WalWriter {
         self.write_chan
             .send(WriteRequest::Close(tx))
             .map_err(|_| WalError::SendError)?;
-        rx.await.map_err(|_| WalError::SendError)
+        match rx.await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(WalError::CloseIncomplete),
+            Err(_) => Err(WalError::SendError),
+        }
     }
 }
 

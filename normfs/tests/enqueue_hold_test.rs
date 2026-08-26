@@ -16,7 +16,7 @@ use normfs::{NormFS, NormFsSettings};
 #[tokio::test]
 async fn an_enqueued_record_is_not_held_by_the_writer_channel() {
     let temp = tempfile::TempDir::new().unwrap();
-    let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::default())
+    let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
         .await
         .unwrap();
     let queue = fs.resolve("hold");
@@ -32,7 +32,7 @@ async fn an_enqueued_record_is_not_held_by_the_writer_channel() {
 
     // The widest record a page takes. The copy is larger but the rule is the
     // same, and this is the size at which a second hold costs the most.
-    let cap = normfs_wal::max_record_len(NormFsSettings::default().mem_page_size);
+    let cap = normfs_wal::max_record_len(NormFsSettings::all_active().mem_page_size);
     let wide = Bytes::from(vec![9u8; cap]);
     fs.enqueue(&queue, wide.clone()).await.unwrap();
     assert!(

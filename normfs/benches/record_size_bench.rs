@@ -54,6 +54,7 @@ fn settings(page_size: usize) -> NormFsSettings {
         compression_type: CompressionType::None,
         enable_fsync: true,
         encryption_type: EncryptionType::None,
+        ..QueueConfig::active()
     };
     NormFsSettings {
         max_disk_usage_per_queue: None,
@@ -104,7 +105,7 @@ async fn main() {
             eprintln!("unrecognised page size {arg}; try 64k, 256k, 1m, 4m, 16m");
             std::process::exit(2);
         }),
-        None => NormFsSettings::default().mem_page_size,
+        None => NormFsSettings::all_active().mem_page_size,
     };
     let label = std::env::var("NORMFS_BENCH_LABEL").unwrap_or_default();
 

@@ -29,7 +29,7 @@ async fn test_signature_verification() {
     // pinned wide enough to accept them whatever the default is.
     let settings = NormFsSettings {
         mem_page_size: 4 * 1024 * 1024,
-        ..Default::default()
+        ..NormFsSettings::all_active()
     };
     let normfs = NormFS::new(data_dir.clone(), settings).await.unwrap();
     let normfs = Arc::new(normfs);
@@ -103,7 +103,7 @@ async fn test_signature_verification_fails_on_tampered_header() {
     // pinned wide enough to accept them whatever the default is.
     let settings = NormFsSettings {
         mem_page_size: 4 * 1024 * 1024,
-        ..Default::default()
+        ..NormFsSettings::all_active()
     };
     let normfs = NormFS::new(data_dir.clone(), settings).await.unwrap();
     let normfs = Arc::new(normfs);
@@ -175,7 +175,7 @@ async fn test_signature_verification_fails_on_tampered_content() {
     // pinned wide enough to accept them whatever the default is.
     let settings = NormFsSettings {
         mem_page_size: 4 * 1024 * 1024,
-        ..Default::default()
+        ..NormFsSettings::all_active()
     };
     let normfs = NormFS::new(data_dir.clone(), settings).await.unwrap();
     let normfs = Arc::new(normfs);

@@ -40,7 +40,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     println!("Data directory: {:?}", bench_dir);
     println!();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let normfs = NormFS::new(bench_dir.clone(), settings).await?;
     let normfs = Arc::new(normfs);
     let queue_name = normfs.resolve("parallel_tail_queue");

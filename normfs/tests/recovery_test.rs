@@ -53,7 +53,7 @@ async fn test_recovery_empty_latest_file() {
 
     // Setup: Create queue with some entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -80,7 +80,7 @@ async fn test_recovery_empty_latest_file() {
 
     // Recovery: Start queue again
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -122,7 +122,7 @@ async fn test_recovery_multiple_empty_files() {
 
     // Setup: Create queue with entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -150,7 +150,7 @@ async fn test_recovery_multiple_empty_files() {
 
     // Recovery: Should walk back from file 4 -> 3 -> 2 -> 1 (found)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -191,7 +191,7 @@ async fn test_recovery_header_only_file() {
 
     // Setup: Create queue and write entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -207,7 +207,7 @@ async fn test_recovery_header_only_file() {
 
     // Start again - this creates a new file with only header
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -219,7 +219,7 @@ async fn test_recovery_header_only_file() {
 
     // Recovery: Should handle file with only header
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -245,7 +245,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
 
     // Setup: Create queue with entries in file 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -262,7 +262,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
 
     // Start again - this creates file 2 with only header, no entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -274,7 +274,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
 
     // Recovery: Should reuse file 2 (header-only)
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -330,7 +330,7 @@ async fn test_recovery_multiple_header_only_files() {
 
     // Setup: Create queue with entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -349,7 +349,7 @@ async fn test_recovery_multiple_header_only_files() {
     // its header-only size so the reuse check below is independent of the
     // entry format (V1 headers/entries are smaller than the old V0 ones).
     let header_only_size = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -368,7 +368,7 @@ async fn test_recovery_multiple_header_only_files() {
 
     // Recovery: Should reuse file 2 (header-only)
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -423,7 +423,7 @@ async fn test_recovery_all_empty_files() {
 
     // Initialize NormFS to establish instance_id
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -441,7 +441,7 @@ async fn test_recovery_all_empty_files() {
 
     // Recovery: Should start from zero
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -464,7 +464,7 @@ async fn test_recovery_gap_in_files() {
 
     // Setup: Create queue with entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -492,7 +492,7 @@ async fn test_recovery_gap_in_files() {
 
     // Recovery: Should find no entries and start from 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -513,7 +513,7 @@ async fn test_recovery_old_data_different_session() {
 
     // Session 1: Write some video data
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -541,7 +541,7 @@ async fn test_recovery_old_data_different_session() {
 
     // Session 2: Start queue - OLD BUG would find file 3 (empty) and derive wrong last_id
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let video_queue_id = fs.resolve("video-queue");
@@ -573,7 +573,7 @@ async fn test_recovery_store_files_with_empty_wal() {
 
     // Setup: Create entries and let them convert to Store
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -601,7 +601,7 @@ async fn test_recovery_store_files_with_empty_wal() {
 
     // Recovery: Should find entries in Store, not be confused by empty WAL
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -624,7 +624,7 @@ async fn test_recovery_alternating_empty_files() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -651,7 +651,7 @@ async fn test_recovery_alternating_empty_files() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -673,7 +673,7 @@ async fn test_recovery_large_file_ids() {
 
     // Setup with normal entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -703,7 +703,7 @@ async fn test_recovery_large_file_ids() {
 
     // Recovery: Should handle large file ID
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -727,7 +727,7 @@ async fn test_recovery_multiple_restarts() {
 
     // Do 5 cycles of start -> write -> close
     for cycle in 0..5 {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -753,7 +753,7 @@ async fn test_recovery_multiple_restarts() {
 
     // Final check: Should have 10 entries total (0-9)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -779,7 +779,7 @@ async fn test_recovery_single_entry_file() {
 
     // Setup: Write exactly 1 entry
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -802,7 +802,7 @@ async fn test_recovery_single_entry_file() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -828,7 +828,7 @@ async fn test_recovery_large_entries() {
     let instance_id = {
         let settings = NormFsSettings {
             mem_page_size: 4 * 1024 * 1024,
-            ..Default::default()
+            ..NormFsSettings::all_active()
         };
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
@@ -855,7 +855,7 @@ async fn test_recovery_large_entries() {
     {
         let settings = NormFsSettings {
             mem_page_size: 4 * 1024 * 1024,
-            ..Default::default()
+            ..NormFsSettings::all_active()
         };
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
@@ -877,7 +877,7 @@ async fn test_recovery_empty_directory() {
     let path = temp_dir.path().to_path_buf();
 
     // Don't create any files, just start
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
     let queue_id = fs.resolve("test-queue");
 
@@ -898,7 +898,7 @@ async fn test_recovery_different_header_formats() {
 
     // Setup: Write entries with specific sizes
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -922,7 +922,7 @@ async fn test_recovery_different_header_formats() {
 
     // Recovery: Should preserve data/id size from file 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -944,7 +944,7 @@ async fn test_recovery_readonly_queue() {
 
     // Setup: Write some entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -971,7 +971,7 @@ async fn test_recovery_readonly_queue() {
 
     // Recovery as readonly
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let queue_id = fs.resolve("test-queue");
 
@@ -995,7 +995,7 @@ async fn test_recovery_incomplete_write() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1020,7 +1020,7 @@ async fn test_recovery_incomplete_write() {
 
     // Recovery after "crash"
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1041,7 +1041,7 @@ async fn test_recovery_scattered_files() {
 
     // Setup: Create files 1, 3, 5 with data
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1068,7 +1068,7 @@ async fn test_recovery_scattered_files() {
 
     // Recovery: Should walk back from 7 -> 6 -> 5 -> 4 -> 3 -> 2 -> 1 (found)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1090,7 +1090,7 @@ async fn test_recovery_zero_byte_vs_header_only() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1106,7 +1106,7 @@ async fn test_recovery_zero_byte_vs_header_only() {
 
     // Start again to create header-only file 2
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1125,7 +1125,7 @@ async fn test_recovery_zero_byte_vs_header_only() {
 
     // Recovery: Should walk back and find file 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1147,7 +1147,7 @@ async fn test_recovery_with_batch_writes() {
 
     // Setup: Write batches
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1179,7 +1179,7 @@ async fn test_recovery_with_batch_writes() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1205,7 +1205,7 @@ async fn test_recovery_corrupted_header() {
 
     // Setup: Write valid entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1231,7 +1231,7 @@ async fn test_recovery_corrupted_header() {
 
     // Recovery: Should skip corrupted file 2 and find file 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1252,7 +1252,7 @@ async fn test_recovery_truncated_file() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1278,7 +1278,7 @@ async fn test_recovery_truncated_file() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1300,7 +1300,7 @@ async fn test_recovery_multiple_corrupted_files() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1328,7 +1328,7 @@ async fn test_recovery_multiple_corrupted_files() {
 
     // Recovery: Should walk back from 5 -> 4 -> 3 -> 2 -> 1 (valid)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1349,7 +1349,7 @@ async fn test_recovery_partial_entry() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1384,7 +1384,7 @@ async fn test_recovery_partial_entry() {
 
     // Recovery: Should handle partial data gracefully
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1405,7 +1405,7 @@ async fn test_recovery_garbage_at_end() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1437,7 +1437,7 @@ async fn test_recovery_garbage_at_end() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1458,7 +1458,7 @@ async fn test_recovery_corrupted_middle_file() {
 
     // Setup: Create file 1 with entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1490,7 +1490,7 @@ async fn test_recovery_corrupted_middle_file() {
 
     // Recovery: Should walk back 3 (empty) -> 2 (corrupted) -> 1 (valid)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1512,7 +1512,7 @@ async fn test_recovery_all_files_corrupted() {
 
     // Initialize NormFS to establish instance_id
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -1531,7 +1531,7 @@ async fn test_recovery_all_files_corrupted() {
 
     // Recovery: Should start fresh since all files are corrupted
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1554,7 +1554,7 @@ async fn test_recovery_wrong_file_type() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1578,7 +1578,7 @@ async fn test_recovery_wrong_file_type() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1600,7 +1600,7 @@ async fn test_recovery_random_corruption() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1624,7 +1624,7 @@ async fn test_recovery_random_corruption() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1647,7 +1647,7 @@ async fn test_recovery_skipped_file_in_sequence() {
 
     // Setup: Create queue with entries in file 1
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1679,7 +1679,7 @@ async fn test_recovery_skipped_file_in_sequence() {
 
     // Recovery: Should walk backward from file 3 to file 1, skipping missing file 2
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1725,7 +1725,7 @@ async fn test_recovery_multiple_skipped_files() {
 
     // Setup: Create queue with entries in file 1
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1756,7 +1756,7 @@ async fn test_recovery_multiple_skipped_files() {
 
     // Recovery: Should walk backward from file 5, skip files 4, 3, 2 (missing), find file 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1794,7 +1794,7 @@ async fn test_wal_async_old_file_processing() {
 
     // Setup: Create queue with entries in multiple files
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1827,7 +1827,7 @@ async fn test_wal_async_old_file_processing() {
 
     // Recovery: Start queue again (should trigger async old file processing)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         // Start should complete quickly without blocking on old file processing
@@ -1871,7 +1871,7 @@ async fn test_read_backward_wal_memory_boundary() {
 
     // Create resolver and queue_id once for the entire test
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -1880,7 +1880,7 @@ async fn test_read_backward_wal_memory_boundary() {
 
     // Step 1: Create queue and write 10 entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
@@ -1896,7 +1896,7 @@ async fn test_read_backward_wal_memory_boundary() {
 
     // Step 2: Reopen and write 1 entry (this goes to memory, WAL has entries 0-9)
     let fs = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
@@ -1972,7 +1972,7 @@ async fn test_read_backward_wal_only_after_recovery() {
 
     // Create resolver and queue_id once for the entire test
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -1981,7 +1981,7 @@ async fn test_read_backward_wal_only_after_recovery() {
 
     // Step 1: Create queue and write 10 entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
@@ -1995,7 +1995,7 @@ async fn test_read_backward_wal_only_after_recovery() {
 
     // Step 2: Reopen without writing anything
     let fs = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
@@ -2048,7 +2048,7 @@ async fn test_read_backward_multiple_entries_crossing_boundary() {
 
     // Create resolver and queue_id once for the entire test
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -2057,7 +2057,7 @@ async fn test_read_backward_multiple_entries_crossing_boundary() {
 
     // Step 1: Create queue and write 10 entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
@@ -2071,7 +2071,7 @@ async fn test_read_backward_multiple_entries_crossing_boundary() {
 
     // Step 2: Reopen and write 5 more entries
     let fs = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
@@ -2153,7 +2153,7 @@ async fn test_read_completes_on_last_entry_after_recovery() {
 
     // Create resolver and queue_id once for the entire test
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -2162,7 +2162,7 @@ async fn test_read_completes_on_last_entry_after_recovery() {
 
     // Step 1: Create queue and write 100 entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
@@ -2178,7 +2178,7 @@ async fn test_read_completes_on_last_entry_after_recovery() {
 
     // Step 3: Reopen queue for write
     let fs = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
@@ -2274,7 +2274,7 @@ async fn test_read_completes_on_last_entry_after_recovery_readonly() {
 
     // Create resolver and queue_id once for the entire test
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -2283,7 +2283,7 @@ async fn test_read_completes_on_last_entry_after_recovery_readonly() {
 
     // Step 1: Create queue and write 100 entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
@@ -2299,7 +2299,7 @@ async fn test_read_completes_on_last_entry_after_recovery_readonly() {
 
     // Step 3: Reopen queue in readonly mode
     let fs = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         fs.ensure_queue_exists_for_read(&queue_id).await.unwrap();
@@ -2373,7 +2373,7 @@ async fn test_read_range_from_memory() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
     let queue_id = fs.resolve("test-queue");
 
@@ -2440,7 +2440,7 @@ async fn test_read_from_memory_with_step() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
     let queue_id = fs.resolve("test-queue");
 
@@ -2506,7 +2506,7 @@ async fn test_wal_async_no_old_files() {
 
     // Setup: Create fresh queue
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -2523,7 +2523,7 @@ async fn test_wal_async_no_old_files() {
 
     // Recovery: Start queue again
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -2548,7 +2548,7 @@ async fn test_wal_async_excludes_current_file() {
 
     // Initialize NormFS to establish instance_id
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -2572,7 +2572,7 @@ async fn test_wal_async_excludes_current_file() {
 
     // Start queue - should recover and determine file 4 as next
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -2607,7 +2607,7 @@ async fn test_read_empty_queue_shift_from_tail() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
     // Create and start an empty queue
@@ -2651,7 +2651,7 @@ async fn test_read_empty_queue_absolute() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
     // Create and start an empty queue
@@ -2712,7 +2712,7 @@ async fn pooled_rotation_reads_back_in_id_order() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let mut settings = NormFsSettings::default();
+    let mut settings = NormFsSettings::all_active();
     // Pinned: this test counts on records spanning several pages, so it fixes
     // the page size rather than inheriting a default chosen for production.
     settings.mem_page_size = 256 * 1024;
@@ -2784,7 +2784,7 @@ async fn test_recovery_keeps_a_latest_file_it_cannot_read() {
     let path = temp_dir.path().to_path_buf();
 
     let instance_id = {
-        let fs = NormFS::new(path.clone(), NormFsSettings::default())
+        let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
             .await
             .unwrap();
         let instance_id = fs.get_instance_id().to_string();
@@ -2811,7 +2811,7 @@ async fn test_recovery_keeps_a_latest_file_it_cannot_read() {
     tokio::fs::write(&file_2, &bytes).await.unwrap();
 
     {
-        let fs = NormFS::new(path.clone(), NormFsSettings::default())
+        let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
             .await
             .unwrap();
         let queue_id = fs.resolve("test-queue");

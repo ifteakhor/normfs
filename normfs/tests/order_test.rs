@@ -100,7 +100,7 @@ async fn entries_on_disk(dir: &std::path::Path) -> Vec<ReadEntry> {
 }
 
 fn settings() -> NormFsSettings {
-    let mut settings = NormFsSettings::default();
+    let mut settings = NormFsSettings::all_active();
     // Pinned rather than inherited. The page size is the record cap and the
     // granularity a file ends at, so a test about size classes and file
     // boundaries has to fix it: the default is chosen for production and moves

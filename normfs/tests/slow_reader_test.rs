@@ -21,7 +21,7 @@ const RECORDS: usize = 4000;
 const PAYLOAD: usize = 1024;
 
 fn settings() -> NormFsSettings {
-    let mut settings = NormFsSettings::default();
+    let mut settings = NormFsSettings::all_active();
     // A small arena of many small pages, so a handful of records is enough to
     // make the pool turn over rather than never filling in the first place --
     // and so there are pages to spare either side of the reader's pin share.

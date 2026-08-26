@@ -72,7 +72,7 @@ impl BenchConfig {
             encryption: EncryptionType::None,
             max_queue_bytes: None,
             wal_file_bytes: WAL_FILE_BYTES,
-            mem_page_size: NormFsSettings::default().mem_page_size,
+            mem_page_size: NormFsSettings::all_active().mem_page_size,
         }
     }
 
@@ -87,6 +87,7 @@ impl BenchConfig {
             compression_type: self.compression,
             enable_fsync: true,
             encryption_type: self.encryption,
+            ..QueueConfig::active()
         };
 
         NormFsSettings {

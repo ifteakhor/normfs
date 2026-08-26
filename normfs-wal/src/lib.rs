@@ -272,6 +272,17 @@ impl WalStore {
         writers.contains_key(queue_id)
     }
 
+    /// Closes one queue's writer: flushes, fsyncs, and completes the file so
+    /// it migrates. No writer is not an error — a second close, or a queue
+    /// that never wrote, has nothing to do.
+    pub async fn close_writer(&self, queue_id: &QueueId) -> Result<(), WalError> {
+        let writer = self.writers.write().unwrap().remove(queue_id);
+        match writer {
+            Some(writer) => writer.close().await,
+            None => Ok(()),
+        }
+    }
+
     pub async fn start_writer(
         &self,
         queue: &QueueId,

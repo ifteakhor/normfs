@@ -27,11 +27,12 @@ pub use normfs_wal::WalError;
 use offload::disk_monitor::DiskMonitor;
 pub use offload::disk_monitor::DiskMonitorConfig;
 
-pub use crate::config::{QueueConfig, QueueMode, QueueSettings};
+pub use crate::config::{PoolKind, QueueConfig, QueueMode, QueueSettings};
 
 pub use uintn::{Error as UintNError, UintN, UintNType};
 
 pub struct NormFS {
+    path: std::path::PathBuf,
     wal: Arc<WalStore>,
     store: Arc<PersistStore>,
     mem: Arc<mem::MemStore>,
@@ -57,6 +58,10 @@ pub enum Error {
     /// The record does not fit a page, framing included, so no page can hold
     /// it. Refused before an id is taken — see [`NormFS::enqueue`].
     RecordTooLarge(usize),
+    /// The queue was closed for good ([`NormFS::close_queue`]). Close is a
+    /// promise — followers were told they have everything — so a later write
+    /// is an error rather than a quiet resurrection. The data stays readable.
+    QueueClosed,
     /// `max_memory_usage` cannot hold the two pages a single queue needs to
     /// work. Refused at construction rather than rounded up: rounding up would
     /// mean the process quietly using more memory than it was configured for.
@@ -85,6 +90,7 @@ impl std::fmt::Display for Error {
                 f,
                 "Record of {n} bytes does not fit a memory page once framed"
             ),
+            Error::QueueClosed => write!(f, "Queue is closed and accepts no more writes"),
             Error::MemoryBelowFloor {
                 max_memory_usage,
                 page_size,
@@ -116,6 +122,7 @@ impl std::error::Error for Error {
             Error::NotFound => None,
             Error::ClientDisconnected => None,
             Error::RecordTooLarge(_) => None,
+            Error::QueueClosed => None,
             Error::MemoryBelowFloor { .. } => None,
             Error::PageBelowMinimum { .. } => None,
         }
@@ -179,6 +186,12 @@ impl From<std::io::Error> for Error {
     }
 }
 
+/// 32 KiB pages, so a passive queue's permanent 2-page floor is 64 KiB.
+pub const DEFAULT_PASSIVE_PAGE_SIZE: usize = 32 * 1024;
+/// Enough for the floors of ~128 rare queues before the arena-exhausted
+/// fallback (a private floor) starts absorbing the rest.
+pub const DEFAULT_PASSIVE_MEMORY_USAGE: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct NormFsSettings {
     pub store_cfg: StoreWriteConfig,
@@ -192,6 +205,13 @@ pub struct NormFsSettings {
     /// `max_memory_usage` into more chunks, so more queues get a working
     /// allowance and the two-page floor each one holds while idle is smaller.
     pub mem_page_size: usize,
+    /// Page size of the passive arena, which serves queues whose config says
+    /// `PoolKind::Passive` (the default). It caps their records the same way
+    /// `mem_page_size` caps an active queue's.
+    pub mem_passive_page_size: usize,
+    /// Budget of the passive arena, separate from `max_memory_usage` so a
+    /// crowd of rare queues cannot eat the active arena and vice versa.
+    pub max_passive_memory_usage: usize,
     /// WAL settings (used for disk monitor validation, etc.)
     pub wal_settings: WalSettings,
     pub max_disk_usage_per_queue: Option<u64>,
@@ -211,10 +231,23 @@ impl Default for NormFsSettings {
             // floors inside the budget. Deployments with wider records raise
             // this and max_memory_usage together, deliberately.
             mem_page_size: 256 * 1024,
+            mem_passive_page_size: DEFAULT_PASSIVE_PAGE_SIZE,
+            max_passive_memory_usage: DEFAULT_PASSIVE_MEMORY_USAGE,
             max_disk_usage_per_queue: None,
             wal_settings: Default::default(),
             cloud_settings: None,
             queue_settings: Default::default(),
+        }
+    }
+}
+
+impl NormFsSettings {
+    /// Every queue on the active arena: the pre-two-pool behavior, for
+    /// embedders and tests whose records are wider than a passive page.
+    pub fn all_active() -> Self {
+        Self {
+            queue_settings: QueueSettings::all_active(),
+            ..Self::default()
         }
     }
 }
@@ -260,9 +293,11 @@ impl NormFS {
 
         let store_done_rx = store.start_writers(wal_complete_recv).await;
 
-        let mem = Arc::new(mem::MemStore::with_page_size(
+        let mem = Arc::new(mem::MemStore::with_pools(
             settings.max_memory_usage,
             settings.mem_page_size,
+            settings.max_passive_memory_usage,
+            settings.mem_passive_page_size,
         )?);
 
         let mem_clone = mem.clone();
@@ -371,6 +406,7 @@ impl NormFS {
         );
 
         Ok(Self {
+            path: path.as_ref().to_path_buf(),
             wal,
             store: store_arc,
             mem,
@@ -399,22 +435,41 @@ impl NormFS {
         self.queue_resolver.resolve(path)
     }
 
-    pub async fn ensure_queue_exists_for_read(&self, queue: &QueueId) -> Result<(), Error> {
-        let queue_lock = {
-            let locks = self.queue_init_locks.read().unwrap();
-            if let Some(lock) = locks.get(queue).cloned() {
-                lock
-            } else {
-                drop(locks);
-                let mut locks = self.queue_init_locks.write().unwrap();
-                locks
-                    .entry(queue.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(())))
-                    .clone()
-            }
-        };
+    fn queue_init_lock(&self, queue: &QueueId) -> Arc<Mutex<()>> {
+        let locks = self.queue_init_locks.read().unwrap();
+        if let Some(lock) = locks.get(queue).cloned() {
+            lock
+        } else {
+            drop(locks);
+            let mut locks = self.queue_init_locks.write().unwrap();
+            locks
+                .entry(queue.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        }
+    }
 
+    // Whether the queue was ever closed for good, consulting the durable
+    // marker once and mirroring it into memory so the hot paths only ever
+    // check the set.
+    fn queue_closed_durably(&self, queue: &QueueId) -> bool {
+        if self.mem.is_closed(queue) {
+            return true;
+        }
+        if queue.to_fs_path(&self.path).join("closed").is_file() {
+            self.mem.mark_closed(queue);
+            return true;
+        }
+        false
+    }
+
+    pub async fn ensure_queue_exists_for_read(&self, queue: &QueueId) -> Result<(), Error> {
+        let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
+
+        // Reads stay legal on a closed queue; this only loads the marker so
+        // the reader side knows a follow here must end rather than wait.
+        self.queue_closed_durably(queue);
 
         if self.mem.get_last_id(queue).is_some() {
             return Ok(());
@@ -425,21 +480,12 @@ impl NormFS {
     }
 
     pub async fn ensure_queue_exists_for_write(&self, queue: &QueueId) -> Result<(), Error> {
-        let queue_lock = {
-            let locks = self.queue_init_locks.read().unwrap();
-            if let Some(lock) = locks.get(queue).cloned() {
-                lock
-            } else {
-                drop(locks);
-                let mut locks = self.queue_init_locks.write().unwrap();
-                locks
-                    .entry(queue.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(())))
-                    .clone()
-            }
-        };
-
+        let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
+
+        if self.queue_closed_durably(queue) {
+            return Err(Error::QueueClosed);
+        }
 
         let queue_exists = self.mem.get_last_id(queue).is_some();
         let has_writer = self.wal.has_writer(queue).await;
@@ -459,6 +505,16 @@ impl NormFS {
 
     fn get_config_for_queue(&self, queue: &QueueId) -> QueueConfig {
         self.settings.queue_settings.get_config(&queue.to_string())
+    }
+
+    // From config rather than from the live queue, so the answer exists before
+    // the queue does — the size check runs on the first write, which is also
+    // what creates the queue.
+    fn page_size_for(&self, queue: &QueueId) -> usize {
+        match self.get_config_for_queue(queue).pool {
+            config::PoolKind::Active => self.settings.mem_page_size,
+            config::PoolKind::Passive => self.settings.mem_passive_page_size,
+        }
     }
 
     /// Get the latest file ID across all sources (WAL, Store, S3).
@@ -830,13 +886,14 @@ impl NormFS {
         log::info!(target: "normfs", "  - Next entry will have ID: {}", header.num_entries_before);
         log::info!(target: "normfs", "----------------------------------------");
 
+        let queue_config = self.get_config_for_queue(queue);
+
         // Started first: the writer is handed this queue's page pool, so the
         // pool has to exist before it.
-        self.mem.start_queue(queue, last_entry_id.clone(), mode.readonly);
+        self.mem
+            .start_queue(queue, last_entry_id.clone(), mode.readonly, queue_config.pool);
 
         if !mode.readonly {
-            let queue_config = self.get_config_for_queue(queue);
-
             let mut wal_settings = self.settings.wal_settings.clone();
             wal_settings.enable_fsync = queue_config.enable_fsync;
             wal_settings.compression_type = queue_config.compression_type;
@@ -906,8 +963,21 @@ impl NormFS {
     /// not yet on disk. That wait is the back-pressure: the queue declines to
     /// run ahead of the disk rather than dropping what it already took.
     pub async fn enqueue(&self, queue: &QueueId, data: Bytes) -> Result<UintN, Error> {
-        check_framable(&data, self.settings.mem_page_size, self.settings.max_memory_usage)?;
-        let (entry_id, placement) = self.mem.enqueue_awaiting(queue, data.clone()).await;
+        if self.mem.is_closed(queue) {
+            return Err(Error::QueueClosed);
+        }
+        check_framable(&data, self.page_size_for(queue), self.settings.max_memory_usage)?;
+        let Some((entry_id, placement)) = self.mem.enqueue_awaiting(queue, data.clone()).await
+        else {
+            // A close can win the race between the closed check above and the
+            // placement: the queue leaves the map and the record takes no id,
+            // so refusing it here costs the sequence nothing.
+            return Err(if self.mem.is_closed(queue) {
+                Error::QueueClosed
+            } else {
+                Error::QueueNotFound
+            });
+        };
 
         log::debug!(target: "normfs", "Enqueuing entry - Queue: '{}', Entry ID: {}, Data size: {} bytes",
             queue, entry_id, data.len());
@@ -925,8 +995,12 @@ impl NormFS {
             return Ok(Vec::new());
         }
 
+        if self.mem.is_closed(queue) {
+            return Err(Error::QueueClosed);
+        }
+        let page_size = self.page_size_for(queue);
         for record in &data {
-            check_framable(record, self.settings.mem_page_size, self.settings.max_memory_usage)?;
+            check_framable(record, page_size, self.settings.max_memory_usage)?;
         }
 
         log::debug!(target: "normfs", "Enqueuing batch - Queue: '{}', Batch size: {} entries", queue, data.len());
@@ -935,7 +1009,13 @@ impl NormFS {
         // has to be: a record that reached a page but was reported as not in
         // one would be written to the file twice — once from the writer's
         // buffer and once from its page.
-        let placed = self.mem.enqueue_batch_awaiting(queue, data.clone()).await;
+        let Some(placed) = self.mem.enqueue_batch_awaiting(queue, data.clone()).await else {
+            return Err(if self.mem.is_closed(queue) {
+                Error::QueueClosed
+            } else {
+                Error::QueueNotFound
+            });
+        };
         let entry_ids: Vec<UintN> = placed.iter().map(|(id, _)| id.clone()).collect();
 
         if let (Some(first_id), Some(last_id)) = (entry_ids.first(), entry_ids.last()) {
@@ -993,6 +1073,50 @@ impl NormFS {
         self.reader_fsm
             .read(queue.clone(), position, limit, step, sender)
             .await
+    }
+
+    /// Closes one queue for good: no write will ever be accepted again, not
+    /// even after a restart. Reads are untouched — everything the queue wrote
+    /// stays reachable — and a follow ends at the last record instead of
+    /// waiting forever.
+    ///
+    /// The order is the safety argument. Writes are refused first, so nothing
+    /// can slip in behind the flush; the writer then flushes and completes its
+    /// file, which is what makes the pages releasable and the data readable
+    /// from the migrated file; the marker is written only after that, so a
+    /// marker on disk implies the data reached it; memory is released last.
+    pub async fn close_queue(&self, queue: &QueueId) -> Result<(), Error> {
+        let queue_lock = self.queue_init_lock(queue);
+        let _guard = queue_lock.lock().await;
+
+        log::info!(target: "normfs", "Closing queue '{}' for good", queue);
+        // Refusal first, and it waits for the in-flight append: when
+        // begin_close returns, everything accepted is placed and nothing
+        // more can be, so the closing flush below is the whole story.
+        self.mem.begin_close(queue).await;
+
+        self.wal.close_writer(queue).await?;
+
+        // The marker asserts that everything the queue accepted is on disk.
+        // A failed closing flush in an *earlier* attempt leaves records in
+        // pages with no writer to drain them; certifying that would trade an
+        // error for silent loss, so the close stays incomplete — the records
+        // are in the WAL file for recovery, and a restart can close cleanly.
+        if !self.mem.is_fully_durable(queue) {
+            return Err(Error::Wal(WalError::CloseIncomplete));
+        }
+
+
+        let dir = queue.to_fs_path(&self.path);
+        std::fs::create_dir_all(&dir)?;
+        let marker = std::fs::File::create(dir.join("closed"))?;
+        marker.sync_all()?;
+        // The entry itself must survive a power cut, not only the file's
+        // bytes, and the entry lives in the directory.
+        std::fs::File::open(&dir)?.sync_all()?;
+
+        self.mem.close_queue(queue);
+        Ok(())
     }
 
     pub async fn close(&self) -> Result<(), Error> {

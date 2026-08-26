@@ -16,7 +16,7 @@ async fn a_follow_after_a_restart_gets_the_backlog_and_then_new_entries() {
 
     const BACKLOG: u64 = 5;
     {
-        let fs = NormFS::new(path.clone(), NormFsSettings::default())
+        let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
             .await
             .unwrap();
         let queue = fs.resolve("follow");
@@ -29,7 +29,7 @@ async fn a_follow_after_a_restart_gets_the_backlog_and_then_new_entries() {
         fs.close().await.unwrap();
     }
 
-    let fs = NormFS::new(path.clone(), NormFsSettings::default())
+    let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
         .await
         .unwrap();
     let queue = fs.resolve("follow");
