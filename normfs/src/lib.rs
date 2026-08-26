@@ -848,13 +848,11 @@ impl NormFS {
         // A file that could not be read is not an empty file: `get_file_end`
         // already reports "absent" and "no entries" as Ok(None), and the reuse
         // branch below hands its id to a writer that opens with truncate(true).
-        let latest_unreadable = match self
+        let wal = self
             .wal
             .as_ref()
-            .expect("WAL backend must be available in durable mode")
-            .get_file_end(queue, &latest_file_id)
-            .await
-        {
+            .expect("WAL backend must be available in durable mode");
+        let latest_unreadable = match wal.get_file_end(queue, &latest_file_id).await {
             Err(e) => {
                 log::error!(target: "normfs",
                     "Queue '{}' - Latest file {} could not be read ({:?}); writing to the next \
