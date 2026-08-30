@@ -6,7 +6,7 @@
 # Usage: ./tail-sweep.sh <label> <out-file> <bin-dev> <bin-stack>
 set -u
 LABEL=$1; OUT=$2; BIN_DEV=$3; BIN_STACK=$4
-COUNTS="1 2 4 8 16 32 64 128 256 512 1000"
+COUNTS=${NORMFS_COUNTS:-"1 2 4 8 16 32 64 128 256 512 1000"}
 export NORMFS_PUBLISHES=${NORMFS_PUBLISHES:-500}
 export NORMFS_CHECK_MS=${NORMFS_CHECK_MS:-1}
 
