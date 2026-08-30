@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use uintn::UintN;
 
-const NUM_CLIENTS: usize = 1000;
+const NUM_CLIENTS_DEFAULT: usize = 1000;
 const PUBLISH_INTERVAL_MS: u64 = 10; // 10ms
-const NUM_PUBLISHES: usize = 3000; // 30 seconds of publishing
+const NUM_PUBLISHES_DEFAULT: usize = 3000;
 const POLL_INTERVAL_MS: u64 = 1; // Poll every 1ms
 const PROGRESS_INTERVAL: usize = 100; // Print progress every N publishes
 
@@ -22,7 +22,27 @@ async fn main() {
     }
 }
 
+fn env_or(name: &str, default: usize) -> usize {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+fn cpu_seconds() -> f64 {
+    let s = std::fs::read_to_string("/proc/self/stat").unwrap();
+    let rest = &s[s.rfind(')').unwrap() + 2..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let utime: u64 = f[11].parse().unwrap();
+    let stime: u64 = f[12].parse().unwrap();
+    (utime + stime) as f64 / 100.0
+}
+
 async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
+    #[allow(non_snake_case)]
+    let NUM_CLIENTS: usize = env_or("NORMFS_CLIENTS", NUM_CLIENTS_DEFAULT);
+    #[allow(non_snake_case)]
+    let NUM_PUBLISHES: usize = env_or("NORMFS_PUBLISHES", NUM_PUBLISHES_DEFAULT);
+    #[allow(non_snake_case)]
+    let CHECK_MS: u64 = env_or("NORMFS_CHECK_MS", 10) as u64;
+    let cpu0 = cpu_seconds();
     let bench_dir = PathBuf::from("/tmp/normfs-bench-parallel-tail");
 
     // Clean up and recreate
@@ -129,7 +149,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         // Wait for all clients to see this entry
         let mut all_seen = false;
         while !all_seen {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(CHECK_MS)).await;
 
             let seen = last_seen.lock().await;
             all_seen = seen.iter().all(|&v| v >= i);
@@ -166,6 +186,17 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n================================================");
     println!("Benchmark Results");
     println!("================================================\n");
+    {
+        let mut sorted = propagation_latencies.clone();
+        sorted.sort();
+        let q = |p: f64| sorted[((sorted.len() as f64 - 1.0) * p).round() as usize].as_secs_f64() * 1e6;
+        println!(
+            "RESULT clients={} publishes={} check_ms={} prop_p50_us={:.0} prop_p99_us={:.0} prop_max_us={:.0} cpu_s={:.2} wall_s={:.1}",
+            NUM_CLIENTS, NUM_PUBLISHES, CHECK_MS, q(0.5), q(0.99),
+            sorted.last().unwrap().as_secs_f64() * 1e6,
+            cpu_seconds() - cpu0, bench_start.elapsed().as_secs_f64()
+        );
+    }
 
     // Propagation latency stats
     let avg_propagation: Duration =
@@ -209,12 +240,6 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("Closing NormFS...");
-    let normfs = Arc::try_unwrap(normfs).unwrap_or_else(|arc| {
-        panic!(
-            "Failed to unwrap Arc, {} references remaining",
-            Arc::strong_count(&arc)
-        );
-    });
     normfs.close().await?;
 
     println!("NormFS closed successfully.");
