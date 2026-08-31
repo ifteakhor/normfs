@@ -95,6 +95,11 @@ pub struct MemStore {
     /// close removes the queue from the map above, and a later follow still
     /// needs to know where the sequence ended.
     closed: RwLock<HashMap<QueueId, Option<UintN>>>,
+    /// Whether a full cache page may be forgotten to admit new records. Only
+    /// set when nothing ever drains these pools to disk (memory-only mode):
+    /// eviction moves the durability watermark, which must stay fsync-backed
+    /// anywhere a writer can attach.
+    cache_evicts: std::sync::atomic::AtomicBool,
 }
 
 struct Inner {
@@ -116,6 +121,7 @@ struct MemQueue {
     /// the pool's own `page_count` is the live figure.
     pages: usize,
     page_size: usize,
+    evicts: bool,
     /// Held across an append so the pool sees ids in order.
     append_gate: tokio::sync::Mutex<()>,
     subscribers: Mutex<HashMap<usize, SubscriberCallback>>,
@@ -139,6 +145,7 @@ impl MemQueue {
         ring_id: u64,
         pages: usize,
         label: &QueueId,
+        evicts: bool,
     ) -> Self {
         let page_size = arena.page_size();
         let first_entry_id = last_id
@@ -188,6 +195,7 @@ impl MemQueue {
                 last_acked_id: None,
             }),
             page_size,
+            evicts,
             append_gate: tokio::sync::Mutex::new(()),
             subscribers: Mutex::new(HashMap::new()),
             next_subscriber_id: Mutex::new(0),
@@ -233,10 +241,12 @@ impl MemQueue {
         match pool.try_append(data) {
             AppendOutcome::Cached(_) => {}
             AppendOutcome::Full => {
-                // A free arena slot first, the oldest page second: nothing on
-                // this path is protected by disk, so forgetting the oldest
-                // page beats forgetting everything.
-                if (pool.try_grow() || pool.evict_oldest())
+                // Forgetting the oldest page beats forgetting everything,
+                // but only where no writer can ever attach; the durable
+                // pre-writer window keeps the reseed below. No grow here:
+                // arena pages taken on this path are never given back.
+                if self.evicts
+                    && pool.evict_oldest()
                     && matches!(pool.try_append(data), AppendOutcome::Cached(_))
                 {
                     return;
@@ -999,7 +1009,12 @@ impl MemStore {
             passive_arena,
             next_ring_id: AtomicU64::new(0),
             closed: RwLock::new(HashMap::new()),
+            cache_evicts: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    pub fn evict_cache_on_full(&self) {
+        self.cache_evicts.store(true, Ordering::Relaxed);
     }
 
     fn arena_for(max_memory_usage: usize, page_size: usize) -> Result<Arc<WalArena>, crate::Error> {
@@ -1075,7 +1090,14 @@ impl MemStore {
                 pages_for_new_queue(arena.free_pages(), arena.page_count())
             };
             let ring_id = self.next_ring_id.fetch_add(1, Ordering::Relaxed);
-            let new_queue = Arc::new(MemQueue::new(last_id.clone(), arena, ring_id, want, queue));
+            let new_queue = Arc::new(MemQueue::new(
+                last_id.clone(),
+                arena,
+                ring_id,
+                want,
+                queue,
+                self.cache_evicts.load(Ordering::Relaxed),
+            ));
             log::debug!(target: "normfs-mem",
                 "Starting queue '{}' with last_id: {:?}, {} pages ({} KiB) from the {:?} arena \
                  ({} of {} still free)",

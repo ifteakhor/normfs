@@ -569,7 +569,7 @@ impl PagePool {
     /// the page is empty, and `page_epoch` at zero because nothing has been
     /// charged to it yet — the append that lands on it stamps it with the file
     /// it belongs to, exactly as `charge_paged` does for every other page.
-    pub fn try_grow(&self) -> bool {
+    fn try_grow(&self) -> bool {
         let mut inner = self.inner.lock().unwrap();
         if !inner.ring.grow() {
             return false;
@@ -591,22 +591,28 @@ impl PagePool {
         }
         let mut inner = self.inner.lock().unwrap();
         let active = inner.ring.active_page();
-        let mut oldest: Option<(usize, u64)> = None;
+        // A pinned oldest page is passed over: the next-oldest goes instead,
+        // and its span is condemned too. That loses one extra page of window,
+        // where the reseed alternative loses all of them.
+        let mut oldest: Option<(u64, u64)> = None;
         for k in 0..inner.ring.page_count() {
             if k == active || inner.ring.page_pin_count(k) > 0 {
                 continue;
             }
-            let Some(first) = inner.ring.page_first_entry_id(k) else {
+            let (Some(first), Some(last)) = (
+                inner.ring.page_first_entry_id(k),
+                inner.ring.page_last_entry_id(k),
+            ) else {
                 continue;
             };
-            if oldest.is_none_or(|(_, f)| first < f) {
-                oldest = Some((k, first));
+            if oldest.is_none_or(|(f, _)| first < f) {
+                oldest = Some((first, last));
             }
         }
-        let Some((k, _)) = oldest else {
+        let Some((_, last)) = oldest else {
             return false;
         };
-        let past = inner.ring.page_last_entry_id(k).unwrap().saturating_add(1);
+        let past = last.saturating_add(1);
         if past <= inner.ring.min_essential_id() {
             return false;
         }

@@ -283,6 +283,7 @@ impl NormFS {
         )?);
 
         if settings.persistence_mode == PersistenceMode::MemoryOnly {
+            mem.evict_cache_on_full();
             if settings.cloud_settings.is_some() {
                 log::warn!(target: "normfs", "Ignoring cloud settings in memory-only mode");
             }
