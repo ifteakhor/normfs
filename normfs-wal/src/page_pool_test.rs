@@ -1097,3 +1097,24 @@ async fn a_parked_append_returns_when_the_drainer_leaves() {
         .unwrap();
     assert!(matches!(result, Err(PoolError::NoDrainer)));
 }
+
+#[tokio::test]
+async fn evict_oldest_frees_a_page_when_nothing_drains_the_pool() {
+    let pool = pool();
+    let filled = fill(&pool);
+    assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Full));
+
+    assert!(pool.evict_oldest());
+    match pool.try_append(&RECORD) {
+        AppendOutcome::Cached(id) => assert_eq!(id, filled),
+        other => panic!("append after evict_oldest returned {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn evict_oldest_refuses_once_a_writer_drains_the_pool() {
+    let pool = pool();
+    fill(&pool);
+    pool.set_drainer();
+    assert!(!pool.evict_oldest());
+}

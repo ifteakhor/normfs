@@ -233,6 +233,14 @@ impl MemQueue {
         match pool.try_append(data) {
             AppendOutcome::Cached(_) => {}
             AppendOutcome::Full => {
+                // A free arena slot first, the oldest page second: nothing on
+                // this path is protected by disk, so forgetting the oldest
+                // page beats forgetting everything.
+                if (pool.try_grow() || pool.evict_oldest())
+                    && matches!(pool.try_append(data), AppendOutcome::Cached(_))
+                {
+                    return;
+                }
                 // Start the cache again at this record and keep it, so what is
                 // held stays the newest contiguous run of ids rather than an
                 // arbitrary older one.

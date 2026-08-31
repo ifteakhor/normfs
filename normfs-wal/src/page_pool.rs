@@ -569,7 +569,7 @@ impl PagePool {
     /// the page is empty, and `page_epoch` at zero because nothing has been
     /// charged to it yet — the append that lands on it stamps it with the file
     /// it belongs to, exactly as `charge_paged` does for every other page.
-    fn try_grow(&self) -> bool {
+    pub fn try_grow(&self) -> bool {
         let mut inner = self.inner.lock().unwrap();
         if !inner.ring.grow() {
             return false;
@@ -582,6 +582,35 @@ impl PagePool {
             "page pool grew into arena slot {}, now {pages} pages",
             inner.ring.slot_range().map_or(0, |r| r.first_slot + pages - 1),
         );
+        true
+    }
+
+    pub fn evict_oldest(&self) -> bool {
+        if self.has_drainer() {
+            return false;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let active = inner.ring.active_page();
+        let mut oldest: Option<(usize, u64)> = None;
+        for k in 0..inner.ring.page_count() {
+            if k == active || inner.ring.page_pin_count(k) > 0 {
+                continue;
+            }
+            let Some(first) = inner.ring.page_first_entry_id(k) else {
+                continue;
+            };
+            if oldest.is_none_or(|(_, f)| first < f) {
+                oldest = Some((k, first));
+            }
+        }
+        let Some((k, _)) = oldest else {
+            return false;
+        };
+        let past = inner.ring.page_last_entry_id(k).unwrap().saturating_add(1);
+        if past <= inner.ring.min_essential_id() {
+            return false;
+        }
+        inner.ring.set_essential(past);
         true
     }
 
