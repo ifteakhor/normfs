@@ -1099,22 +1099,53 @@ async fn a_parked_append_returns_when_the_drainer_leaves() {
 }
 
 #[tokio::test]
-async fn evict_oldest_frees_a_page_when_nothing_drains_the_pool() {
+async fn an_evicting_append_forgets_the_oldest_page_and_lands() {
     let pool = pool();
     let filled = fill(&pool);
-    assert!(matches!(pool.try_append(&RECORD), AppendOutcome::Full));
-
-    assert!(pool.evict_oldest());
-    match pool.try_append(&RECORD) {
+    match pool.try_append_evicting(&RECORD) {
         AppendOutcome::Cached(id) => assert_eq!(id, filled),
-        other => panic!("append after evict_oldest returned {other:?}"),
+        other => panic!("evicting append returned {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn evict_oldest_refuses_once_a_writer_drains_the_pool() {
+async fn an_evicting_append_stays_full_once_a_writer_drains_the_pool() {
     let pool = pool();
     fill(&pool);
     pool.set_drainer();
-    assert!(!pool.evict_oldest());
+    assert!(matches!(
+        pool.try_append_evicting(&RECORD),
+        AppendOutcome::Full
+    ));
+}
+
+#[tokio::test]
+async fn an_evicting_append_passes_over_a_pinned_oldest_page() {
+    let pool = Arc::new(PagePool::new(3, PAGE_SIZE, 0));
+    let filled = fill(&pool);
+    assert_eq!(filled, 6);
+    let held = pool.pin_range(0, 0);
+    assert_eq!(held.len(), 1);
+
+    match pool.try_append_evicting(&RECORD) {
+        AppendOutcome::Cached(id) => assert_eq!(id, filled),
+        other => panic!("evicting append returned {other:?}"),
+    }
+    // Page 1 went, not the pinned page 0, and its span went with it.
+    assert!(pool.pin_range(2, 3).is_empty());
+    assert!(!pool.pin_range(4, 5).is_empty());
+    drop(held);
+}
+
+#[tokio::test]
+async fn an_evicting_append_refuses_when_every_old_page_is_pinned() {
+    let pool = pool();
+    fill(&pool);
+    let held = pool.pin_range(0, 0);
+    assert_eq!(held.len(), 1);
+    assert!(matches!(
+        pool.try_append_evicting(&RECORD),
+        AppendOutcome::Full
+    ));
+    drop(held);
 }

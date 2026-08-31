@@ -238,19 +238,18 @@ impl MemQueue {
             pool.reseed(id_u64);
         }
 
-        match pool.try_append(data) {
+        // Forgetting the oldest page beats forgetting everything, but only
+        // where no writer can ever attach; the durable pre-writer window
+        // keeps the reseed below. No grow: arena pages taken on this path
+        // are never given back.
+        let first_try = if self.evicts {
+            pool.try_append_evicting(data)
+        } else {
+            pool.try_append(data)
+        };
+        match first_try {
             AppendOutcome::Cached(_) => {}
             AppendOutcome::Full => {
-                // Forgetting the oldest page beats forgetting everything,
-                // but only where no writer can ever attach; the durable
-                // pre-writer window keeps the reseed below. No grow here:
-                // arena pages taken on this path are never given back.
-                if self.evicts
-                    && pool.evict_oldest()
-                    && matches!(pool.try_append(data), AppendOutcome::Cached(_))
-                {
-                    return;
-                }
                 // Start the cache again at this record and keep it, so what is
                 // held stays the newest contiguous run of ids rather than an
                 // arbitrary older one.

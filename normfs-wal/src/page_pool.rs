@@ -585,15 +585,17 @@ impl PagePool {
         true
     }
 
-    pub fn evict_oldest(&self) -> bool {
-        if self.has_drainer() {
-            return false;
-        }
+    pub fn try_append_evicting(&self, record: &[u8]) -> AppendOutcome {
         let mut inner = self.inner.lock().unwrap();
+        let (first_try, _) = append_locked(&mut inner, record);
+        if !matches!(first_try, AppendOutcome::Full) || self.has_drainer() {
+            return first_try;
+        }
         let active = inner.ring.active_page();
         // A pinned oldest page is passed over: the next-oldest goes instead,
         // and its span is condemned too. That loses one extra page of window,
-        // where the reseed alternative loses all of them.
+        // where the reseed alternative loses all of them. Scan and retry sit
+        // under one lock, so the page condemned is the page the retry takes.
         let mut oldest: Option<(u64, u64)> = None;
         for k in 0..inner.ring.page_count() {
             if k == active || inner.ring.page_pin_count(k) > 0 {
@@ -610,14 +612,14 @@ impl PagePool {
             }
         }
         let Some((_, last)) = oldest else {
-            return false;
+            return AppendOutcome::Full;
         };
         let past = last.saturating_add(1);
         if past <= inner.ring.min_essential_id() {
-            return false;
+            return AppendOutcome::Full;
         }
         inner.ring.set_essential(past);
-        true
+        append_locked(&mut inner, record).0
     }
 
     /// The arena this pool's pages come from, if it shares one.
