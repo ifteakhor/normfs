@@ -41,8 +41,8 @@ fn size_for(i: usize) -> usize {
     match i % 7 {
         0..=3 => 512,
         4 => 8 * 1024,
-        5 => 200 * 1024,  // most of a 256 KiB page
-        _ => 160 * 1024,  // larger than max_file_size below
+        5 => 200 * 1024, // most of a 256 KiB page
+        _ => 160 * 1024, // larger than max_file_size below
     }
 }
 
@@ -328,7 +328,9 @@ async fn a_record_larger_than_a_page_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     let settings = settings();
     let page = settings.mem_page_size;
-    let fs = NormFS::new(temp.path().to_path_buf(), settings).await.unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), settings)
+        .await
+        .unwrap();
     let queue = fs.resolve("bounded");
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
 
@@ -343,7 +345,10 @@ async fn a_record_larger_than_a_page_is_refused() {
     // The widest record that does fit is accepted, and takes the first id --
     // so none of the refusals above consumed one.
     let cap = normfs_wal::max_record_len(page);
-    let id = fs.enqueue(&queue, Bytes::from(vec![1u8; cap])).await.unwrap();
+    let id = fs
+        .enqueue(&queue, Bytes::from(vec![1u8; cap]))
+        .await
+        .unwrap();
     assert_eq!(id, UintN::zero(), "a refused record must consume no id");
     fs.close().await.unwrap();
 }
@@ -362,7 +367,9 @@ async fn a_record_wider_than_the_memory_bound_is_refused() {
     settings.max_memory_usage = 4 * 1024 * 1024;
     settings.mem_page_size = 2 * 1024 * 1024;
     let bound = settings.max_memory_usage;
-    let fs = NormFS::new(temp.path().to_path_buf(), settings).await.unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), settings)
+        .await
+        .unwrap();
     let queue = fs.resolve("bounded");
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
 
@@ -374,7 +381,10 @@ async fn a_record_wider_than_the_memory_bound_is_refused() {
     );
 
     // The sequence is untouched: the next record gets the first id.
-    let id = fs.enqueue(&queue, Bytes::from_static(b"fits")).await.unwrap();
+    let id = fs
+        .enqueue(&queue, Bytes::from_static(b"fits"))
+        .await
+        .unwrap();
     assert_eq!(id, UintN::zero());
     fs.close().await.unwrap();
 }

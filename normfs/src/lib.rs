@@ -75,7 +75,10 @@ pub enum Error {
     },
     /// `mem_page_size` is below the smallest page the ring's contracts allow.
     /// Refused at construction; past this check the arena panics instead.
-    PageBelowMinimum { page_size: usize, minimum: usize },
+    PageBelowMinimum {
+        page_size: usize,
+        minimum: usize,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -966,8 +969,12 @@ impl NormFS {
                 .as_ref()
                 .and_then(|pointers| pointers.last_id(queue));
             let queue_config = self.get_config_for_queue(queue);
-            self.mem
-                .start_queue(queue, last_entry_id.clone(), mode.readonly, queue_config.pool);
+            self.mem.start_queue(
+                queue,
+                last_entry_id.clone(),
+                mode.readonly,
+                queue_config.pool,
+            );
             log::info!(target: "normfs", "Memory-only queue '{}' started, last_entry_id: {:?}", queue, last_entry_id);
             return Ok(());
         }
@@ -987,8 +994,12 @@ impl NormFS {
 
         // Started first: the writer is handed this queue's page pool, so the
         // pool has to exist before it.
-        self.mem
-            .start_queue(queue, last_entry_id.clone(), mode.readonly, queue_config.pool);
+        self.mem.start_queue(
+            queue,
+            last_entry_id.clone(),
+            mode.readonly,
+            queue_config.pool,
+        );
 
         if !mode.readonly {
             let mut wal_settings = self.settings.wal_settings.clone();
@@ -1069,7 +1080,11 @@ impl NormFS {
         if self.mem.is_closed(queue) {
             return Err(Error::QueueClosed);
         }
-        check_framable(&data, self.page_size_for(queue), self.settings.max_memory_usage)?;
+        check_framable(
+            &data,
+            self.page_size_for(queue),
+            self.settings.max_memory_usage,
+        )?;
         let Some((entry_id, placement)) = self.mem.enqueue_awaiting(queue, data.clone()).await
         else {
             // A close won the race after the check above. The record took
@@ -1103,7 +1118,11 @@ impl NormFS {
         Ok(entry_id)
     }
 
-    pub async fn enqueue_batch(&self, queue: &QueueId, data: Vec<Bytes>) -> Result<Vec<UintN>, Error> {
+    pub async fn enqueue_batch(
+        &self,
+        queue: &QueueId,
+        data: Vec<Bytes>,
+    ) -> Result<Vec<UintN>, Error> {
         if data.is_empty() {
             return Ok(Vec::new());
         }
@@ -1242,7 +1261,6 @@ impl NormFS {
         if self.wal.is_some() && !self.mem.is_fully_durable(queue) {
             return Err(Error::Wal(WalError::CloseIncomplete));
         }
-
 
         std::fs::create_dir_all(&dir)?;
         let marker = std::fs::File::create(dir.join("closed"))?;

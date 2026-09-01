@@ -24,7 +24,9 @@ pub use errors::*;
 pub use page_pool::{
     MIN_PAGE_SIZE, PagePool, PendingWrite, Placement, PoolError, RotateHint, max_record_len,
 };
-pub use reader::{ReadRangeResult, WalContent, get_wal_header, read_wal_file_range, read_wal_header};
+pub use reader::{
+    ReadRangeResult, WalContent, get_wal_header, read_wal_file_range, read_wal_header,
+};
 pub use wal_arena::{POOL_FREE, SlotRange, WalArena};
 pub use wal_entry::{WAL_ENTRY_HEADER_FIXED_OVERHEAD, WalEntryHeader};
 pub use wal_entry_v1::{

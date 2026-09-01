@@ -58,7 +58,9 @@ async fn a_follow_after_a_restart_gets_the_backlog_and_then_new_entries() {
     assert_eq!(id, UintN::from(BACKLOG));
     let entry = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
-        .expect("the follow delivered its backlog and then went silent instead of staying subscribed")
+        .expect(
+            "the follow delivered its backlog and then went silent instead of staying subscribed",
+        )
         .expect("the stream ended after the backlog instead of staying subscribed");
     assert_eq!(entry.id, UintN::from(BACKLOG));
     assert_eq!(entry.data, Bytes::from_static(b"after-the-backlog"));

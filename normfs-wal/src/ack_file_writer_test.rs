@@ -340,7 +340,10 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
     pool.note_handed_over(0);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while pool.durable_before() < 1 {
-        assert!(tokio::time::Instant::now() < deadline, "entry 0 never reached the file");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "entry 0 never reached the file"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -365,7 +368,10 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
     pool.note_handed_over(2);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while pool.durable_before() < 3 {
-        assert!(tokio::time::Instant::now() < deadline, "entries 1-2 never reached the file");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "entries 1-2 never reached the file"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     writer.close().await.unwrap();
@@ -466,7 +472,9 @@ async fn a_buffered_ack_does_not_report_a_pooled_record_durable() {
 
     // Entry 0 is in a page and is deliberately never handed over, so no flush
     // may write it: `take_pending` stops at the handover bound.
-    pool.place(0, b"pooled-entry-zero".as_slice()).await.unwrap();
+    pool.place(0, b"pooled-entry-zero".as_slice())
+        .await
+        .unwrap();
     writer
         .write_maybe_pooled(queue.clone(), UintN::from(0u64), Bytes::new(), true)
         .await;
@@ -489,7 +497,10 @@ async fn a_buffered_ack_does_not_report_a_pooled_record_durable() {
         "entry 0 was never handed over, so nothing may have written it"
     );
     assert!(
-        read_file_content(&file_path).await.windows(18).any(|w| w == b"buffered-entry-one"),
+        read_file_content(&file_path)
+            .await
+            .windows(18)
+            .any(|w| w == b"buffered-entry-one"),
         "entry 1 should have been written from the buffer"
     );
     assert!(
@@ -637,7 +648,9 @@ async fn a_durable_buffered_ack_is_sent_without_another_write_or_a_close() {
     let queue = QueueIdResolver::new("test_instance").resolve("stranded");
 
     // Entry 0 in a page, not yet handed over; entry 1 through the buffer.
-    pool.place(0, b"pooled-entry-zero".as_slice()).await.unwrap();
+    pool.place(0, b"pooled-entry-zero".as_slice())
+        .await
+        .unwrap();
     writer
         .write_maybe_pooled(queue.clone(), UintN::from(0u64), Bytes::new(), true)
         .await;
@@ -698,20 +711,18 @@ async fn a_close_that_cannot_flush_says_so() {
         write_interval: Duration::from_secs(3600),
         fsync: false,
     };
-    let mut writer = AckFileWriter::new(
-        "/dev/full",
-        settings,
-        ack_sender,
-        Bytes::new(),
-        None,
-        0,
-    )
-    .await
-    .expect("an empty header has nothing to flush, so construction succeeds");
+    let mut writer = AckFileWriter::new("/dev/full", settings, ack_sender, Bytes::new(), None, 0)
+        .await
+        .expect("an empty header has nothing to flush, so construction succeeds");
 
     let queue = QueueIdResolver::new("test_instance").resolve("full");
     writer
-        .write_maybe_pooled(queue, UintN::from(0u64), Bytes::from_static(b"doomed"), false)
+        .write_maybe_pooled(
+            queue,
+            UintN::from(0u64),
+            Bytes::from_static(b"doomed"),
+            false,
+        )
         .await;
 
     assert!(

@@ -6,8 +6,8 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -151,7 +151,9 @@ async fn run(
                 "  {:>5.1}% | {:>6.1}s | {:>6.2} MB/s",
                 (i + 1) as f64 / RECORDS as f64 * 100.0,
                 start.elapsed().as_secs_f64(),
-                ((i + 1) * cfg.block_size) as f64 / (1024.0 * 1024.0) / start.elapsed().as_secs_f64()
+                ((i + 1) * cfg.block_size) as f64
+                    / (1024.0 * 1024.0)
+                    / start.elapsed().as_secs_f64()
             );
         }
     }
@@ -191,7 +193,13 @@ async fn slow_reader(
             let queue = queue.clone();
             async move {
                 normfs
-                    .read(&queue, ReadPosition::ShiftFromTail(UintN::from(BATCH)), BATCH, 1, tx)
+                    .read(
+                        &queue,
+                        ReadPosition::ShiftFromTail(UintN::from(BATCH)),
+                        BATCH,
+                        1,
+                        tx,
+                    )
                     .await
             }
         });

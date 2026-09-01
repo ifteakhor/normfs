@@ -1034,9 +1034,14 @@ async fn a_resync_waits_rather_than_discarding_unwritten_records() {
         pool.place(far, &RECORD),
     )
     .await;
-    assert!(waited.is_err(), "the pool renumbered past an unwritten record");
     assert!(
-        pool.take_pending(0).iter().any(|(w, _)| w.first_entry_id == id),
+        waited.is_err(),
+        "the pool renumbered past an unwritten record"
+    );
+    assert!(
+        pool.take_pending(0)
+            .iter()
+            .any(|(w, _)| w.first_entry_id == id),
         "the unwritten record must still be held"
     );
 
@@ -1046,12 +1051,12 @@ async fn a_resync_waits_rather_than_discarding_unwritten_records() {
         pool.commit_written(&w);
     }
     pool.mark_durable(id + 1);
-    let placed = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        pool.place(far, &RECORD),
-    )
-    .await;
-    assert!(placed.is_ok_and(|r| r.is_ok()), "a drained pool must resync");
+    let placed =
+        tokio::time::timeout(std::time::Duration::from_secs(5), pool.place(far, &RECORD)).await;
+    assert!(
+        placed.is_ok_and(|r| r.is_ok()),
+        "a drained pool must resync"
+    );
     assert_eq!(pool.next_entry_id(), far + 1);
 }
 
@@ -1088,7 +1093,10 @@ async fn a_parked_append_returns_when_the_drainer_leaves() {
         async move { pool.place(id, &record).await }
     });
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    assert!(!parked.is_finished(), "the pool must be full for this to test anything");
+    assert!(
+        !parked.is_finished(),
+        "the pool must be full for this to test anything"
+    );
 
     pool.clear_drainer();
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), parked)

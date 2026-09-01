@@ -23,7 +23,10 @@ async fn main() {
     for i in 0..QUEUES {
         let q = normfs.resolve(&format!("idle_{i}"));
         normfs.ensure_queue_exists_for_write(&q).await.unwrap();
-        normfs.enqueue(&q, Bytes::from_static(b"one")).await.unwrap();
+        normfs
+            .enqueue(&q, Bytes::from_static(b"one"))
+            .await
+            .unwrap();
     }
     tokio::time::sleep(Duration::from_secs(5)).await;
 

@@ -105,6 +105,9 @@ fn ring_survives_move() {
     ring.append(b"before-move");
     let mut moved = ring; // move
     assert_eq!(moved.get(0).unwrap(), b"before-move");
-    assert!(matches!(moved.append(b"after-move"), AppendOutcome::Cached(1)));
+    assert!(matches!(
+        moved.append(b"after-move"),
+        AppendOutcome::Cached(1)
+    ));
     assert_eq!(moved.get(1).unwrap(), b"after-move");
 }

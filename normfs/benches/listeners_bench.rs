@@ -66,7 +66,9 @@ async fn main() {
     let queue = fs.resolve("listeners");
     fs.ensure_queue_exists_for_write(&queue).await.unwrap();
     // One record so a tail read has something to land on before the run.
-    fs.enqueue(&queue, Bytes::from_static(b"warmup")).await.unwrap();
+    fs.enqueue(&queue, Bytes::from_static(b"warmup"))
+        .await
+        .unwrap();
 
     let epoch = Instant::now();
     // Publish time of each entry id, nanos since epoch; 0 = not published.
@@ -156,7 +158,9 @@ async fn main() {
         let id = i as u64 + 1;
         publish_ns[id as usize].store(epoch.elapsed().as_nanos() as u64, Ordering::Release);
         let t = Instant::now();
-        fs.enqueue(&queue, Bytes::from(format!("entry-{i}"))).await.unwrap();
+        fs.enqueue(&queue, Bytes::from(format!("entry-{i}")))
+            .await
+            .unwrap();
         enqueue_us.push(t.elapsed().as_micros() as u64);
     }
     // Grace for the last deliveries.

@@ -32,7 +32,10 @@ impl std::fmt::Display for WalError {
             WalError::SendError => write!(f, "Failed to send WAL entry"),
             WalError::WalNotFound => write!(f, "WAL file not found"),
             WalError::WriterNotFound => write!(f, "WAL writer not found"),
-            WalError::CloseIncomplete => write!(f, "Closing flush could not write everything; the file stays for recovery"),
+            WalError::CloseIncomplete => write!(
+                f,
+                "Closing flush could not write everything; the file stays for recovery"
+            ),
             WalError::WalEmpty(id) => write!(f, "WAL file {} is empty", id),
         }
     }

@@ -257,7 +257,8 @@ mod tests {
 
         buffer.wait_for_order((UintN::from(3u64), Bytes::from("3"), Placement::default()));
         buffer.wait_for_order((UintN::from(2u64), Bytes::from("2"), Placement::default()));
-        let ready = buffer.wait_for_order((UintN::from(1u64), Bytes::from("1"), Placement::default()));
+        let ready =
+            buffer.wait_for_order((UintN::from(1u64), Bytes::from("1"), Placement::default()));
 
         assert_eq!(ready.len(), 3);
         assert_eq!(ready[0].0, UintN::from(1u64));
@@ -277,13 +278,15 @@ mod tests {
             normfs_types::QueueIdResolver::new("test_instance").resolve("test_queue"),
         );
 
-        let ready1 = buffer.wait_for_order((UintN::from(1u64), Bytes::from("1"), Placement::default()));
+        let ready1 =
+            buffer.wait_for_order((UintN::from(1u64), Bytes::from("1"), Placement::default()));
         assert_eq!(ready1.len(), 1);
         assert_eq!(ready1[0].0, UintN::from(1u64));
 
         buffer.wait_for_order((UintN::from(3u64), Bytes::from("3"), Placement::default()));
         buffer.wait_for_order((UintN::from(5u64), Bytes::from("5"), Placement::default()));
-        let ready2 = buffer.wait_for_order((UintN::from(2u64), Bytes::from("2"), Placement::default()));
+        let ready2 =
+            buffer.wait_for_order((UintN::from(2u64), Bytes::from("2"), Placement::default()));
 
         assert_eq!(ready2.len(), 2);
         assert_eq!(ready2[0].0, UintN::from(2u64));
@@ -303,7 +306,8 @@ mod tests {
 
         buffer.wait_for_order((UintN::from(2u64), Bytes::from("2"), Placement::default()));
         buffer.wait_for_order((UintN::from(1u64), Bytes::from("1"), Placement::default()));
-        let ready = buffer.wait_for_order((UintN::from(0u64), Bytes::from("0"), Placement::default()));
+        let ready =
+            buffer.wait_for_order((UintN::from(0u64), Bytes::from("0"), Placement::default()));
 
         assert_eq!(ready.len(), 3);
         assert_eq!(ready[0].0, UintN::from(0u64));
@@ -320,12 +324,20 @@ mod tests {
             normfs_types::QueueIdResolver::new("test_instance").resolve("test_queue"),
         );
 
-        let ready1 = buffer.wait_for_order((UintN::from(1u64), Bytes::from("first"), Placement::default()));
+        let ready1 = buffer.wait_for_order((
+            UintN::from(1u64),
+            Bytes::from("first"),
+            Placement::default(),
+        ));
         assert_eq!(ready1.len(), 1);
         assert_eq!(ready1[0].1, Bytes::from("first"));
 
         // Duplicate ID should not be processed since last_written_id is already 1
-        let ready2 = buffer.wait_for_order((UintN::from(1u64), Bytes::from("duplicate"), Placement::default()));
+        let ready2 = buffer.wait_for_order((
+            UintN::from(1u64),
+            Bytes::from("duplicate"),
+            Placement::default(),
+        ));
         assert_eq!(ready2.len(), 0);
         assert_eq!(buffer.last_written_id, Some(UintN::from(1u64)));
         assert_eq!(buffer.pending.len(), 1);
@@ -341,14 +353,19 @@ mod tests {
 
         // Add items out of order, starting from 2
         for i in (2..=10).rev() {
-            buffer.wait_for_order((UintN::from(i as u64), Bytes::from(format!("{}", i)), Placement::default()));
+            buffer.wait_for_order((
+                UintN::from(i as u64),
+                Bytes::from(format!("{}", i)),
+                Placement::default(),
+            ));
         }
 
         assert_eq!(buffer.pending.len(), 9);
         assert_eq!(buffer.last_written_id, Some(UintN::from(0u64)));
 
         // Adding item 1 should trigger processing of 1-10
-        let ready = buffer.wait_for_order((UintN::from(1u64), Bytes::from("1"), Placement::default()));
+        let ready =
+            buffer.wait_for_order((UintN::from(1u64), Bytes::from("1"), Placement::default()));
         assert_eq!(ready.len(), 10);
 
         for i in 1..=10 {
@@ -386,7 +403,8 @@ mod tests {
         );
         let empty_data = Bytes::new();
 
-        let ready = buffer.wait_for_order((UintN::from(1u64), empty_data.clone(), Placement::default()));
+        let ready =
+            buffer.wait_for_order((UintN::from(1u64), empty_data.clone(), Placement::default()));
 
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].0, UintN::from(1u64));
@@ -403,7 +421,8 @@ mod tests {
         );
 
         let next_id = large_id.increment();
-        let ready = buffer.wait_for_order((next_id.clone(), Bytes::from("max"), Placement::default()));
+        let ready =
+            buffer.wait_for_order((next_id.clone(), Bytes::from("max"), Placement::default()));
 
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].0, next_id);

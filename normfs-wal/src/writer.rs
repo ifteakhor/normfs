@@ -240,13 +240,20 @@ impl WalWriter {
         // A pooled record's bytes reach the file from its page, so they do not
         // ride the channel: only `placement.record_len` does. Otherwise every
         // record in flight is held twice until the writer task gets to it.
-        let data = if placement.in_pool { Bytes::new() } else { data };
+        let data = if placement.in_pool {
+            Bytes::new()
+        } else {
+            data
+        };
         self.write_chan
             .send(WriteRequest::Enqueue(entry_id, data, placement))
             .map_err(|_| WalError::SendError)
     }
 
-    pub fn enqueue_batch(&self, mut entries: Vec<(UintN, Bytes, Placement)>) -> Result<(), WalError> {
+    pub fn enqueue_batch(
+        &self,
+        mut entries: Vec<(UintN, Bytes, Placement)>,
+    ) -> Result<(), WalError> {
         log::trace!(
             "WAL writer: enqueuing batch of {} entries for write",
             entries.len()
@@ -263,7 +270,8 @@ impl WalWriter {
     }
 
     pub async fn close(&self) -> Result<(), WalError> {
-        self.closing.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.closing
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.write_chan
             .send(WriteRequest::Close(tx))

@@ -50,7 +50,10 @@ async fn test_queue_paths_use_instance_id() {
         .unwrap();
 
     // Write an entry
-    normfs.enqueue(&queue_id, Bytes::from("test data")).await.unwrap();
+    normfs
+        .enqueue(&queue_id, Bytes::from("test data"))
+        .await
+        .unwrap();
     normfs.close().await.unwrap();
 
     // Verify the WAL file was created in the correct path structure: instance_id/queue_name/wal/

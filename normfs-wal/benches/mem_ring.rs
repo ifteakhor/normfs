@@ -40,7 +40,10 @@ fn filled_ring() -> WalRing {
     let mut ring = WalRing::new(PAGE_COUNT, PAGE_SIZE, 0);
     let rec = record();
     for _ in 0..N {
-        assert!(matches!(ring.append(rec.as_ref()), AppendOutcome::Cached(_)));
+        assert!(matches!(
+            ring.append(rec.as_ref()),
+            AppendOutcome::Cached(_)
+        ));
     }
     ring
 }

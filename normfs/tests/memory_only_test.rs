@@ -23,8 +23,14 @@ async fn memory_only_persists_latest_pointer_without_wal_or_store() {
         let queue = fs.resolve("rover/events");
         fs.ensure_queue_exists_for_write(&queue).await.unwrap();
 
-        let first = fs.enqueue(&queue, Bytes::from_static(b"one")).await.unwrap();
-        let second = fs.enqueue(&queue, Bytes::from_static(b"two")).await.unwrap();
+        let first = fs
+            .enqueue(&queue, Bytes::from_static(b"one"))
+            .await
+            .unwrap();
+        let second = fs
+            .enqueue(&queue, Bytes::from_static(b"two"))
+            .await
+            .unwrap();
 
         assert_eq!(first.to_u64().unwrap(), 0);
         assert_eq!(second.to_u64().unwrap(), 1);
@@ -44,7 +50,10 @@ async fn memory_only_persists_latest_pointer_without_wal_or_store() {
         fs.ensure_queue_exists_for_write(&queue).await.unwrap();
 
         assert_eq!(fs.get_last_id(&queue).unwrap().to_u64().unwrap(), 1);
-        let next = fs.enqueue(&queue, Bytes::from_static(b"three")).await.unwrap();
+        let next = fs
+            .enqueue(&queue, Bytes::from_static(b"three"))
+            .await
+            .unwrap();
         assert_eq!(next.to_u64().unwrap(), 2);
 
         fs.close().await.unwrap();
@@ -61,7 +70,9 @@ async fn memory_only_reader_does_not_fallback_to_disk_after_restart() {
         let fs = NormFS::new(root.clone(), settings.clone()).await.unwrap();
         let queue = fs.resolve("rover/events");
         fs.ensure_queue_exists_for_write(&queue).await.unwrap();
-        fs.enqueue(&queue, Bytes::from_static(b"live")).await.unwrap();
+        fs.enqueue(&queue, Bytes::from_static(b"live"))
+            .await
+            .unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let subscribed = fs

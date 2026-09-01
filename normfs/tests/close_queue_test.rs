@@ -163,7 +163,10 @@ async fn a_live_follower_ends_when_the_queue_closes() {
     let end = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("closing the queue must end the live follow, not leave it waiting");
-    assert!(end.is_none(), "no record can arrive after close, got {end:?}");
+    assert!(
+        end.is_none(),
+        "no record can arrive after close, got {end:?}"
+    );
 
     fs.close().await.unwrap();
 }
@@ -208,9 +211,15 @@ async fn a_tail_follow_on_a_closed_queue_ends_at_the_last_record() {
 
     // A follow one record back from the tail: ids 1 and 2, then the end.
     let (tx, mut rx) = mpsc::channel(16);
-    fs.read(&queue, ReadPosition::ShiftFromTail(UintN::from(1u64)), 0, 1, tx)
-        .await
-        .unwrap();
+    fs.read(
+        &queue,
+        ReadPosition::ShiftFromTail(UintN::from(1u64)),
+        0,
+        1,
+        tx,
+    )
+    .await
+    .unwrap();
     for expected in [1u64, 2] {
         let entry = timeout(Duration::from_secs(5), rx.recv())
             .await
@@ -221,7 +230,10 @@ async fn a_tail_follow_on_a_closed_queue_ends_at_the_last_record() {
     let end = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("the tail follow must end after the last record of a closed queue");
-    assert!(end.is_none(), "nothing can follow the last record, got {end:?}");
+    assert!(
+        end.is_none(),
+        "nothing can follow the last record, got {end:?}"
+    );
 
     fs.close().await.unwrap();
 }
@@ -269,7 +281,10 @@ async fn a_batch_after_close_is_refused() {
     fs.close_queue(&queue).await.unwrap();
 
     let refused = fs
-        .enqueue_batch(&queue, vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")])
+        .enqueue_batch(
+            &queue,
+            vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
+        )
         .await;
     assert!(
         matches!(refused, Err(Error::QueueClosed)),
@@ -359,13 +374,17 @@ async fn a_queue_named_like_a_marker_does_not_close_its_parent() {
     // read as parent's closed *marker*.
     let inner = fs.resolve("parent/closed");
     fs.ensure_queue_exists_for_write(&inner).await.unwrap();
-    fs.enqueue(&inner, Bytes::from_static(b"data")).await.unwrap();
+    fs.enqueue(&inner, Bytes::from_static(b"data"))
+        .await
+        .unwrap();
 
     let parent = fs.resolve("parent");
     fs.ensure_queue_exists_for_write(&parent)
         .await
         .expect("a child queue named 'closed' must not close its parent");
-    fs.enqueue(&parent, Bytes::from_static(b"alive")).await.unwrap();
+    fs.enqueue(&parent, Bytes::from_static(b"alive"))
+        .await
+        .unwrap();
 
     fs.close().await.unwrap();
 }
@@ -390,7 +409,10 @@ async fn a_zero_offset_tail_follow_on_a_closed_queue_delivers_nothing() {
     let end = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("a zero-offset tail follow on a closed queue must end at once");
-    assert!(end.is_none(), "nothing follows the tail of a closed queue, got {end:?}");
+    assert!(
+        end.is_none(),
+        "nothing follows the tail of a closed queue, got {end:?}"
+    );
 
     fs.close().await.unwrap();
 }
@@ -413,7 +435,9 @@ async fn a_close_of_an_unknown_name_is_refused_not_certified() {
     fs.ensure_queue_exists_for_write(&typo)
         .await
         .expect("a refused close must leave nothing behind");
-    fs.enqueue(&typo, Bytes::from_static(b"first")).await.unwrap();
+    fs.enqueue(&typo, Bytes::from_static(b"first"))
+        .await
+        .unwrap();
 
     fs.close().await.unwrap();
 }
@@ -427,11 +451,15 @@ async fn a_colliding_marker_path_fails_the_close_and_leaves_the_queue_writable()
 
     let child = fs.resolve("parent/closed");
     fs.ensure_queue_exists_for_write(&child).await.unwrap();
-    fs.enqueue(&child, Bytes::from_static(b"child")).await.unwrap();
+    fs.enqueue(&child, Bytes::from_static(b"child"))
+        .await
+        .unwrap();
 
     let parent = fs.resolve("parent");
     fs.ensure_queue_exists_for_write(&parent).await.unwrap();
-    fs.enqueue(&parent, Bytes::from_static(b"one")).await.unwrap();
+    fs.enqueue(&parent, Bytes::from_static(b"one"))
+        .await
+        .unwrap();
 
     let refused = fs.close_queue(&parent).await;
     assert!(

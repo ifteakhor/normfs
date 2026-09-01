@@ -33,7 +33,11 @@ async fn setup_queue_with_data(mem: &Arc<MemStore>, queue: &QueueId, count: usiz
     let mut ids = Vec::new();
 
     for d in data {
-        let id = mem.enqueue_awaiting(queue, d).await.expect("queue is open").0;
+        let id = mem
+            .enqueue_awaiting(queue, d)
+            .await
+            .expect("queue is open")
+            .0;
         ids.push(id);
     }
 
@@ -295,7 +299,11 @@ async fn test_follow_full_positive_subscribe() {
 
     // Add new entries
     let new_data = Bytes::from("new_data_1");
-    let new_id = mem.enqueue_awaiting(&queue, new_data.clone()).await.expect("queue is open").0;
+    let new_id = mem
+        .enqueue_awaiting(&queue, new_data.clone())
+        .await
+        .expect("queue is open")
+        .0;
 
     // Give subscription callback time to fire
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -354,7 +362,11 @@ async fn test_follow_full_negative_subscribe() {
 
     // Add new entry
     let new_data = Bytes::from("new_data");
-    let new_id = mem.enqueue_awaiting(&queue, new_data.clone()).await.expect("queue is open").0;
+    let new_id = mem
+        .enqueue_awaiting(&queue, new_data.clone())
+        .await
+        .expect("queue is open")
+        .0;
 
     // Give subscription callback time to fire
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -411,9 +423,19 @@ async fn test_follow_full_with_step() {
     assert_eq!(received[3].id, ids[9]);
 
     // Add 3 new entries
-    mem.enqueue_awaiting(&queue, Bytes::from("data_10")).await.expect("queue is open").0; // id[10]
-    mem.enqueue_awaiting(&queue, Bytes::from("data_11")).await.expect("queue is open").0; // id[11]
-    let id_12 = mem.enqueue_awaiting(&queue, Bytes::from("data_12")).await.expect("queue is open").0; // id[12]
+    mem.enqueue_awaiting(&queue, Bytes::from("data_10"))
+        .await
+        .expect("queue is open")
+        .0; // id[10]
+    mem.enqueue_awaiting(&queue, Bytes::from("data_11"))
+        .await
+        .expect("queue is open")
+        .0; // id[11]
+    let id_12 = mem
+        .enqueue_awaiting(&queue, Bytes::from("data_12"))
+        .await
+        .expect("queue is open")
+        .0; // id[12]
 
     // Give subscription callback time to fire
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -505,7 +527,11 @@ async fn test_follow_full_empty_queue() {
 
     // Add new entry
     let new_data = Bytes::from("first_entry");
-    let new_id = mem.enqueue_awaiting(&queue, new_data.clone()).await.expect("queue is open").0;
+    let new_id = mem
+        .enqueue_awaiting(&queue, new_data.clone())
+        .await
+        .expect("queue is open")
+        .0;
 
     // Give subscription callback time to fire
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -554,7 +580,10 @@ async fn test_channel_closed_unsubscribes() {
     drop(tx);
 
     // Add new entry - subscription callback should detect closed channel and unsubscribe
-    mem.enqueue_awaiting(&queue, Bytes::from("trigger_callback")).await.expect("queue is open").0;
+    mem.enqueue_awaiting(&queue, Bytes::from("trigger_callback"))
+        .await
+        .expect("queue is open")
+        .0;
 
     // Give callback time to fire and unsubscribe
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -576,10 +605,18 @@ async fn test_bounded_cache_drops_old_unacked_and_falls_back() {
     mem.start_queue(&queue, None, false, PoolKind::Active);
 
     let big = Bytes::from(vec![7u8; 100 * 1024]);
-    let id0 = mem.enqueue_awaiting(&queue, big.clone()).await.expect("queue is open").0;
+    let id0 = mem
+        .enqueue_awaiting(&queue, big.clone())
+        .await
+        .expect("queue is open")
+        .0;
     let mut newest = id0.clone();
     for _ in 0..7 {
-        newest = mem.enqueue_awaiting(&queue, big.clone()).await.expect("queue is open").0;
+        newest = mem
+            .enqueue_awaiting(&queue, big.clone())
+            .await
+            .expect("queue is open")
+            .0;
     }
 
     // Newest id is cached and served from memory.
@@ -607,7 +644,8 @@ async fn every_queue_holds_a_disjoint_range_of_the_one_arena() {
     // which is what makes `max_memory_usage` a total rather than a per-queue
     // allowance.
     let mem = Arc::new(
-        MemStore::with_pools(16 * 1024, 1024, 64 * 1024, 1024).expect("test budget holds a queue's floor"),
+        MemStore::with_pools(16 * 1024, 1024, 64 * 1024, 1024)
+            .expect("test budget holds a queue's floor"),
     );
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let arena = mem.arena().clone();
@@ -650,7 +688,8 @@ async fn a_busy_queue_takes_a_page_rather_than_waiting_for_the_disk() {
     // waited for its own records to reach disk however much of the arena was
     // sitting idle next to it.
     let mem = Arc::new(
-        MemStore::with_pools(16 * 1024, 1024, 64 * 1024, 1024).expect("test budget holds a queue's floor"),
+        MemStore::with_pools(16 * 1024, 1024, 64 * 1024, 1024)
+            .expect("test budget holds a queue's floor"),
     );
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("busy");
@@ -726,7 +765,8 @@ async fn a_read_only_queue_does_not_reserve_a_writers_share() {
     // a writer's share here is memory an unauthenticated caller can reserve and
     // never release. Nothing appends to such a queue, so the share sits idle.
     let mem = Arc::new(
-        MemStore::with_pools(64 * 1024, 1024, 64 * 1024, 1024).expect("test budget holds a queue's floor"),
+        MemStore::with_pools(64 * 1024, 1024, 64 * 1024, 1024)
+            .expect("test budget holds a queue's floor"),
     );
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
 
@@ -751,7 +791,8 @@ async fn a_promoted_reader_grows_rather_than_keeping_its_floor() {
     // to be cheap. A queue that starts read-only and is then written to takes
     // what it needs from the arena on its first busy moment.
     let mem = Arc::new(
-        MemStore::with_pools(16 * 1024, 1024, 64 * 1024, 1024).expect("test budget holds a queue's floor"),
+        MemStore::with_pools(16 * 1024, 1024, 64 * 1024, 1024)
+            .expect("test budget holds a queue's floor"),
     );
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("promoted");
@@ -774,7 +815,6 @@ async fn a_promoted_reader_grows_rather_than_keeping_its_floor() {
         "a promoted reader should grow into the arena, still {started_with} pages"
     );
 }
-
 
 /// A cancelled enqueue consumes nothing: the id it would have taken goes to
 /// the next caller, so the pool never has to step over or renumber a gap.

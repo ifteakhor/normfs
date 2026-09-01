@@ -23,7 +23,10 @@ async fn main() {
 }
 
 fn env_or(name: &str, default: usize) -> usize {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn cpu_seconds() -> f64 {
@@ -71,7 +74,9 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
 
     // Publish initial entry
     let initial_data = format!("entry-{}", 0);
-    normfs.enqueue(&queue_name, Bytes::from(initial_data)).await?;
+    normfs
+        .enqueue(&queue_name, Bytes::from(initial_data))
+        .await?;
 
     println!("Starting {} parallel clients...", NUM_CLIENTS);
 
@@ -189,7 +194,8 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     {
         let mut sorted = propagation_latencies.clone();
         sorted.sort();
-        let q = |p: f64| sorted[((sorted.len() as f64 - 1.0) * p).round() as usize].as_secs_f64() * 1e6;
+        let q =
+            |p: f64| sorted[((sorted.len() as f64 - 1.0) * p).round() as usize].as_secs_f64() * 1e6;
         println!(
             "RESULT clients={} publishes={} check_ms={} prop_p50_us={:.0} prop_p99_us={:.0} prop_max_us={:.0} cpu_s={:.2} wall_s={:.1}",
             NUM_CLIENTS, NUM_PUBLISHES, CHECK_MS, q(0.5), q(0.99),

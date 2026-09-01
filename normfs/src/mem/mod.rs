@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc::Sender;
 
-use bytes::Bytes;
 use crate::config::PoolKind;
+use bytes::Bytes;
 use normfs_types::{DataSource, QueueId, ReadEntry, SubscriberCallback};
 use normfs_wal::{AppendOutcome, PagePool, Placement, WalArena};
 use uintn::UintN;
@@ -289,7 +289,10 @@ impl MemQueue {
     /// The gate is taken once for the whole batch, so the ids a batch returns
     /// are contiguous — another enqueue cannot interleave into the middle of
     /// one.
-    pub async fn enqueue_batch_awaiting(&self, entries: Vec<Bytes>) -> Option<Vec<(UintN, Placement)>> {
+    pub async fn enqueue_batch_awaiting(
+        &self,
+        entries: Vec<Bytes>,
+    ) -> Option<Vec<(UintN, Placement)>> {
         let _gate = self.append_gate.lock().await;
         let mut out = Vec::with_capacity(entries.len());
         for data in entries {
@@ -482,7 +485,10 @@ impl MemQueue {
             // a page leaving the ring -- and the run then starts above
             // `start_id`. A truncated range must go to the files, not out as
             // a success.
-            if ring.min_cached_id().is_none_or(|m| UintN::from(m) > start_id) {
+            if ring
+                .min_cached_id()
+                .is_none_or(|m| UintN::from(m) > start_id)
+            {
                 return MemReadResult::fail();
             }
 
@@ -589,7 +595,10 @@ impl MemQueue {
             }
 
             // See read_full: the floor can rise between the check and the pin.
-            if ring.min_cached_id().is_none_or(|m| UintN::from(m) > start_id) {
+            if ring
+                .min_cached_id()
+                .is_none_or(|m| UintN::from(m) > start_id)
+            {
                 return MemReadResult {
                     success: false,
                     start_id: Some(start_id),
@@ -647,12 +656,8 @@ impl MemQueue {
                     // down to the start. `None` is not "no lower bound": since
                     // the cache floor it can mean "nothing servable at all",
                     // and the backlog is then on disk.
-                    let backlog = inner
-                        .last_id
-                        .as_ref()
-                        .is_some_and(|last| start_id <= *last);
-                    let covered =
-                        |m: Option<u64>| m.is_some_and(|m| start_id >= UintN::from(m));
+                    let backlog = inner.last_id.as_ref().is_some_and(|last| start_id <= *last);
+                    let covered = |m: Option<u64>| m.is_some_and(|m| start_id >= UintN::from(m));
                     if backlog && !covered(ring.min_cached_id()) {
                         return MemReadResult::fail();
                     }
@@ -685,10 +690,7 @@ impl MemQueue {
                     // recovery-style start the ids below `last_id` exist only
                     // on disk, and subscribing here would hand the client the
                     // future while silently skipping its past.
-                    let backlog = inner
-                        .last_id
-                        .as_ref()
-                        .is_some_and(|last| start_id <= *last);
+                    let backlog = inner.last_id.as_ref().is_some_and(|last| start_id <= *last);
                     if backlog {
                         return MemReadResult::fail();
                     }
@@ -843,10 +845,7 @@ impl MemQueue {
             // See follow_full: `None` can mean "nothing servable", and the
             // floor can rise between this check and the pin below, so both are
             // needed for a backlog the caller expects in full.
-            let backlog = inner
-                .last_id
-                .as_ref()
-                .is_some_and(|last| start_id <= *last);
+            let backlog = inner.last_id.as_ref().is_some_and(|last| start_id <= *last);
             let covered = |m: Option<u64>| m.is_some_and(|m| start_id >= UintN::from(m));
             if backlog && !covered(ring.min_cached_id()) {
                 return MemReadResult {
@@ -1107,7 +1106,11 @@ impl MemStore {
     }
 
     pub fn mark_closed(&self, queue: &QueueId) {
-        self.closed.write().unwrap().entry(queue.clone()).or_insert(None);
+        self.closed
+            .write()
+            .unwrap()
+            .entry(queue.clone())
+            .or_insert(None);
     }
 
     pub fn is_closed(&self, queue: &QueueId) -> bool {
@@ -1150,7 +1153,9 @@ impl MemStore {
     pub fn is_fully_durable(&self, queue: &QueueId) -> bool {
         let pool = {
             let queues = self.queues.read().unwrap();
-            queues.get(queue).and_then(|q| q.inner.read().unwrap().pool.clone())
+            queues
+                .get(queue)
+                .and_then(|q| q.inner.read().unwrap().pool.clone())
         };
         pool.is_none_or(|p| p.is_fully_durable())
     }
@@ -1177,7 +1182,11 @@ impl MemStore {
 
     /// `None` when the queue is not in the map (never started, or closed):
     /// the record took no id, so it needs no place in the sequence.
-    pub async fn enqueue_awaiting(&self, queue: &QueueId, data: Bytes) -> Option<(UintN, Placement)> {
+    pub async fn enqueue_awaiting(
+        &self,
+        queue: &QueueId,
+        data: Bytes,
+    ) -> Option<(UintN, Placement)> {
         let mem_queue = {
             let queues = self.queues.read().unwrap();
             queues.get(queue).cloned()

@@ -188,7 +188,10 @@ async fn flush_pool(
             );
             wrote = false;
         }
-        if wrote && fsync && let Err(e) = tail_guard.file.sync_all().await {
+        if wrote
+            && fsync
+            && let Err(e) = tail_guard.file.sync_all().await
+        {
             log::error!(
                 target: "normfs",
                 "Failed to sync {} (attempt {}/{}): {}",
@@ -552,7 +555,10 @@ async fn flush_buffer(
             );
             ok = false;
         }
-        if ok && fsync && let Err(e) = tail_guard.file.sync_all().await {
+        if ok
+            && fsync
+            && let Err(e) = tail_guard.file.sync_all().await
+        {
             log::error!(
                 target: "normfs",
                 "Failed to sync file (attempt {}/{}): {}",

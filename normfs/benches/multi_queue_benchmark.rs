@@ -80,7 +80,10 @@ struct Run {
 }
 
 async fn run(cfg: &BenchConfig, hot_first: bool) -> Result<Run, Box<dyn std::error::Error>> {
-    println!("--- hot queue {} ---", if hot_first { "first" } else { "last" });
+    println!(
+        "--- hot queue {} ---",
+        if hot_first { "first" } else { "last" }
+    );
     cfg.reset_dir()?;
     cfg.write_manifest()?;
 
@@ -124,7 +127,9 @@ async fn run(cfg: &BenchConfig, hot_first: bool) -> Result<Run, Box<dyn std::err
                 "  {:>5.1}% | {:>6.1}s | {:>6.2} MB/s",
                 (i + 1) as f64 / HOT_RECORDS as f64 * 100.0,
                 start.elapsed().as_secs_f64(),
-                ((i + 1) * cfg.block_size) as f64 / (1024.0 * 1024.0) / start.elapsed().as_secs_f64()
+                ((i + 1) * cfg.block_size) as f64
+                    / (1024.0 * 1024.0)
+                    / start.elapsed().as_secs_f64()
             );
         }
     }

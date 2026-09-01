@@ -29,7 +29,9 @@ async fn a_lone_record_reaches_disk_without_filling_the_buffer() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().to_path_buf();
 
-    let normfs = NormFS::new(path.clone(), normfs::NormFsSettings::all_active()).await.unwrap();
+    let normfs = NormFS::new(path.clone(), normfs::NormFsSettings::all_active())
+        .await
+        .unwrap();
     let queue = normfs.resolve("cold");
     normfs.ensure_queue_exists_for_write(&queue).await.unwrap();
 

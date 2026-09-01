@@ -838,7 +838,9 @@ async fn test_recovery_large_entries() {
 
         // Write 1MB entry
         let large_data = vec![0u8; 1024 * 1024];
-        fs.enqueue(&queue_id, Bytes::from(large_data)).await.unwrap();
+        fs.enqueue(&queue_id, Bytes::from(large_data))
+            .await
+            .unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -2816,7 +2818,9 @@ async fn test_recovery_keeps_a_latest_file_it_cannot_read() {
             .unwrap();
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
-        fs.enqueue(&queue_id, Bytes::from("new-entry")).await.unwrap();
+        fs.enqueue(&queue_id, Bytes::from("new-entry"))
+            .await
+            .unwrap();
         fs.close().await.unwrap();
     }
 

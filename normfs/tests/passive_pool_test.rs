@@ -5,8 +5,7 @@
 
 use bytes::Bytes;
 use normfs::{
-    NormFS, NormFsSettings, QueueConfig, QueueSettings, ReadPosition,
-    DEFAULT_PASSIVE_PAGE_SIZE,
+    NormFS, NormFsSettings, QueueConfig, QueueSettings, ReadPosition, DEFAULT_PASSIVE_PAGE_SIZE,
 };
 use tokio::sync::mpsc;
 use uintn::UintN;

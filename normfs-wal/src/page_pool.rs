@@ -386,7 +386,12 @@ pub(crate) fn encoded_len_of(record_len: usize) -> Option<u64> {
 ///
 /// The cost is that `max_file_size` is a threshold rather than a cap: a file
 /// overshoots it by at most the tail of one page.
-fn charge_paged(inner: &mut Inner, entry_len: u64, record_len: usize, opened_page: bool) -> Placement {
+fn charge_paged(
+    inner: &mut Inner,
+    entry_len: u64,
+    record_len: usize,
+    opened_page: bool,
+) -> Placement {
     let active = inner.ring.active_page();
     let Some(fill) = inner.fill.as_mut() else {
         // Not armed: no writer is taking pages from this pool yet, so there is
@@ -1277,9 +1282,10 @@ impl PagePool {
                     if found.len() >= PIN_PAYLOADS_PER_READ {
                         // SAFETY: copied out before the lock is released, and
                         // the page cannot be reused while the lock is held.
-                        copied.push((id, Bytes::copy_from_slice(unsafe {
-                            std::slice::from_raw_parts(ptr, len)
-                        })));
+                        copied.push((
+                            id,
+                            Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(ptr, len) }),
+                        ));
                     } else {
                         found.push((id, k, ptr, len));
                     }
