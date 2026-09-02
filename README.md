@@ -148,10 +148,11 @@ without it is not supported and faults rather than falling back.
 
 ## 📊 Status
 
-**v0.2.0-beta.4** - Active development, API may change before 1.0
+**v0.3.0** - Active development, API may change before 1.0
 
 WAL files written by 0.1 are read by 0.2 unchanged. 0.2 writes a smaller entry
-format that 0.1 cannot read, so a downgrade needs the queue drained first.
+format that 0.1 cannot read, so a downgrade needs the queue drained first. 0.3
+writes the same format as 0.2 and needs no migration in either direction.
 
 ## 📄 License
 
