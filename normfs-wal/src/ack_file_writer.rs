@@ -18,6 +18,8 @@ pub struct AckFileWriterSettings {
     pub max_file_size: u64,
     pub write_interval: Duration,
     pub fsync: bool,
+    pub max_retries: u32,
+    pub retry_delay: Duration,
 }
 
 impl Default for AckFileWriterSettings {
@@ -27,6 +29,8 @@ impl Default for AckFileWriterSettings {
             max_file_size: 128 * 1024 * 1024,   // 128MB
             write_interval: Duration::from_millis(20),
             fsync: true,
+            max_retries: 1000,
+            retry_delay: Duration::from_millis(10),
         }
     }
 }
@@ -109,6 +113,9 @@ pub struct AckFileWriter {
     /// The pool this writer drains, so `write_maybe_pooled` can tell it which
     /// entries it has taken responsibility for.
     pool: Option<Arc<PagePool>>,
+    /// Shared with the writer task, so where the file validly ends is still
+    /// answerable once that task has finished.
+    tail: Arc<Mutex<FileTail>>,
 }
 
 /// Writes out everything the pool has appended since the last flush, then
@@ -130,7 +137,7 @@ async fn flush_pool(
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: &Arc<PagePool>,
     epoch: u64,
-    fsync: bool,
+    settings: &AckFileWriterSettings,
 ) -> bool {
     let pending = pool.take_pending(epoch);
     if pending.is_empty() {
@@ -157,7 +164,7 @@ async fn flush_pool(
     // commit, take_pending hands the same runs out again by itself.
     let mut tail_guard = file.lock().await;
     let mut flushed = false;
-    for attempt in 0..MAX_RETRIES {
+    for attempt in 0..settings.max_retries {
         let mut wrote = true;
         for (write, bytes) in &pending {
             if let Err(e) = tail_guard.file.write_all(bytes).await {
@@ -168,12 +175,24 @@ async fn flush_pool(
                     write.last_entry_id,
                     path.display(),
                     attempt + 1,
-                    MAX_RETRIES,
+                    settings.max_retries,
                     e
                 );
                 wrote = false;
                 break;
             }
+        }
+        // Stands in for the bytes reaching the page cache and the sync then
+        // failing. `restore` cuts the file back either way.
+        if wrote && crate::fault::take_failure(path) {
+            log::error!(
+                target: "normfs",
+                "Injected flush failure for {} (attempt {}/{})",
+                path.display(),
+                attempt + 1,
+                settings.max_retries
+            );
+            wrote = false;
         }
         // tokio's File reports a write error one call late; flush is what
         // surfaces it before anything is committed on its strength.
@@ -183,13 +202,13 @@ async fn flush_pool(
                 "Deferred write to {} failed (attempt {}/{}): {}",
                 path.display(),
                 attempt + 1,
-                MAX_RETRIES,
+                settings.max_retries,
                 e
             );
             wrote = false;
         }
         if wrote
-            && fsync
+            && settings.fsync
             && let Err(e) = tail_guard.file.sync_all().await
         {
             log::error!(
@@ -197,7 +216,7 @@ async fn flush_pool(
                 "Failed to sync {} (attempt {}/{}): {}",
                 path.display(),
                 attempt + 1,
-                MAX_RETRIES,
+                settings.max_retries,
                 e
             );
             wrote = false;
@@ -207,8 +226,8 @@ async fn flush_pool(
             break;
         }
         tail_guard.restore(path).await;
-        if attempt < MAX_RETRIES - 1 {
-            tokio::time::sleep(RETRY_DELAY).await;
+        if attempt + 1 < settings.max_retries {
+            tokio::time::sleep(settings.retry_delay).await;
         }
     }
     if !flushed {
@@ -247,6 +266,13 @@ async fn flush_pool(
         let mut done: Vec<PendingAck> = state_guard.acks.drain(0..cut).collect();
         done.pop()
     };
+    // An ack is "durable through here" and its reader keeps the highest it has
+    // seen, so this file's fsync must not speak for an earlier one whose tail
+    // is still in a retry queue.
+    let ack = ack.filter(|a| match pool.stranded_from() {
+        Some(first) => a.entry_id.to_u64().is_ok_and(|id| id < first),
+        None => true,
+    });
     if let Some(ack) = ack
         && ack_sender.send((ack.queue_id, ack.entry_id)).is_err()
     {
@@ -258,9 +284,6 @@ async fn flush_pool(
     }
     true
 }
-
-const MAX_RETRIES: u32 = 1000;
-const RETRY_DELAY: Duration = Duration::from_millis(10);
 
 impl AckFileWriter {
     pub async fn new(
@@ -302,12 +325,13 @@ impl AckFileWriter {
         if let Some(p) = pool.as_ref() {
             p.set_flush_signal(buffer_full_notify.clone());
         }
+        let tail = Arc::new(Mutex::new(FileTail {
+            file,
+            flushed_len: initial_size,
+        }));
         let writer_handle = tokio::spawn(writer_task(
             path.clone(),
-            Arc::new(Mutex::new(FileTail {
-                file,
-                flushed_len: initial_size,
-            })),
+            tail.clone(),
             state.clone(),
             settings.clone(),
             shutdown_rx,
@@ -325,7 +349,12 @@ impl AckFileWriter {
             buffer_full_notify,
             pooled,
             pool,
+            tail,
         })
+    }
+
+    pub(crate) async fn flushed_len(&self) -> u64 {
+        self.tail.lock().await.flushed_len
     }
 
     pub async fn can_add(&self, size: usize) -> bool {
@@ -415,10 +444,10 @@ async fn writer_task(
                 // everything owed. Mid-life flushes may fail and retry, but a
                 // failure here has no next flush behind it, and `close()`
                 // must not report a file complete that is missing its tail.
-                return flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
+                return flush(&path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
             }
             _ = buffer_full_notify.notified() => {
-                let _ = flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
+                let _ = flush(&path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
             }
             // The timer is what a queue nobody writes to often depends on:
             // nothing else on this path can start a flush, so one record on an
@@ -429,7 +458,7 @@ async fn writer_task(
             // the pool lock and walking every page.
             _ = interval.tick() => {
                 if has_pending(&state, &pool).await {
-                    let _ = flush(&path, &file, &state, &ack_sender, &pool, epoch, settings.fsync).await;
+                    let _ = flush(&path, &file, &state, &ack_sender, &pool, epoch, &settings).await;
                 }
             }
         }
@@ -462,7 +491,7 @@ async fn flush(
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
     pool: &Option<Arc<PagePool>>,
     epoch: u64,
-    fsync: bool,
+    settings: &AckFileWriterSettings,
 ) -> bool {
     // Buffer first, then pages. With a pool the buffer is always empty --
     // everything the pool accepted comes out of `take_pending`, in one id
@@ -474,11 +503,11 @@ async fn flush(
     // the file; going on to write pages would put later records in front of
     // them, and V1's positional ids would hand every payload after that point
     // out under the wrong id.
-    if !flush_buffer(path, file, state, ack_sender, fsync).await {
+    if !flush_buffer(path, file, state, ack_sender, settings).await {
         return false;
     }
     if let Some(pool) = pool {
-        return flush_pool(path, file, state, ack_sender, pool, epoch, fsync).await;
+        return flush_pool(path, file, state, ack_sender, pool, epoch, settings).await;
     }
     true
 }
@@ -490,7 +519,7 @@ async fn flush_buffer(
     file: &Arc<Mutex<FileTail>>,
     state: &Arc<Mutex<WriterState>>,
     ack_sender: &mpsc::UnboundedSender<(QueueId, UintN)>,
-    fsync: bool,
+    settings: &AckFileWriterSettings,
 ) -> bool {
     let (data_to_write, ack_cut) = {
         let mut state_guard = state.lock().await;
@@ -530,7 +559,7 @@ async fn flush_buffer(
     // by rewriting the bytes rather than trusting the page cache to hold them.
     let mut write_successful = false;
     let mut tail_guard = file.lock().await;
-    for attempt in 0..MAX_RETRIES {
+    for attempt in 0..settings.max_retries {
         let mut ok = match tail_guard.file.write_all(&data_to_write).await {
             Ok(()) => true,
             Err(e) => {
@@ -538,32 +567,42 @@ async fn flush_buffer(
                     target: "normfs",
                     "Failed to write to file (attempt {}/{}): {}",
                     attempt + 1,
-                    MAX_RETRIES,
+                    settings.max_retries,
                     e
                 );
                 false
             }
         };
+        if ok && crate::fault::take_failure(path) {
+            log::error!(
+                target: "normfs",
+                "Injected flush failure for {} (attempt {}/{})",
+                path.display(),
+                attempt + 1,
+                settings.max_retries
+            );
+            ok = false;
+        }
         if ok && let Err(e) = tail_guard.file.flush().await {
             log::error!(
                 target: "normfs",
                 "Deferred write to {} failed (attempt {}/{}): {}",
                 path.display(),
                 attempt + 1,
-                MAX_RETRIES,
+                settings.max_retries,
                 e
             );
             ok = false;
         }
         if ok
-            && fsync
+            && settings.fsync
             && let Err(e) = tail_guard.file.sync_all().await
         {
             log::error!(
                 target: "normfs",
                 "Failed to sync file (attempt {}/{}): {}",
                 attempt + 1,
-                MAX_RETRIES,
+                settings.max_retries,
                 e
             );
             ok = false;
@@ -573,8 +612,8 @@ async fn flush_buffer(
             break;
         }
         tail_guard.restore(path).await;
-        if attempt < MAX_RETRIES - 1 {
-            tokio::time::sleep(RETRY_DELAY).await;
+        if attempt + 1 < settings.max_retries {
+            tokio::time::sleep(settings.retry_delay).await;
         }
     }
     if write_successful {

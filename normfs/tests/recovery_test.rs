@@ -2830,3 +2830,124 @@ async fn test_recovery_keeps_a_latest_file_it_cannot_read() {
         "a file recovery could not read must be left exactly as it was"
     );
 }
+
+/// What a crash during a rotation retry leaves behind: file M is a valid prefix
+/// missing what its closing flush could not write, and file M+1's header was
+/// stamped with the enqueue side's counter, which counted those records.
+///
+/// The records above the gap were acked normally while the retry ran, so
+/// discarding them to make the sequence contiguous would destroy acknowledged
+/// data. Recovery's job is to say so and leave it.
+#[tokio::test]
+async fn test_recovery_reports_a_gap_and_destroys_nothing() {
+    const COUNT: usize = 400;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+
+    let mut settings = NormFsSettings::all_active();
+    settings.mem_page_size = 256 * 1024;
+    settings.wal_settings.max_file_size = 1024;
+
+    let payload = |i: usize| Bytes::from(format!("entry-{i:04}-{}", "x".repeat(1500)));
+
+    let instance_id = {
+        let fs = NormFS::new(path.clone(), settings.clone()).await.unwrap();
+        let queue_id = fs.resolve("torn-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+        for i in 0..COUNT {
+            fs.enqueue(&queue_id, payload(i)).await.unwrap();
+        }
+        let instance_id = fs.get_instance_id().to_string();
+        fs.close().await.unwrap();
+        instance_id
+    };
+
+    let resolver = QueueIdResolver::new(&instance_id);
+    let queue_id = resolver.resolve("torn-queue");
+    let wal_dir = get_queue_wal_path(&path, &queue_id);
+
+    let mut ids: Vec<u64> = (1..=64)
+        .filter(|n| {
+            UintN::from(*n)
+                .to_file_path(wal_dir.to_str().unwrap(), "wal")
+                .exists()
+        })
+        .collect();
+    ids.sort_unstable();
+    let pair = ids
+        .windows(2)
+        .find(|w| w[1] == w[0] + 1)
+        .expect("the queue must have rotated into consecutive WAL files");
+    let torn = UintN::from(pair[0]).to_file_path(wal_dir.to_str().unwrap(), "wal");
+
+    let before = std::fs::read(&torn).unwrap();
+    // Enough to leave the last frame unreadable, not enough to empty the file.
+    std::fs::write(&torn, &before[..before.len() - 64]).unwrap();
+
+    let torn_bytes = std::fs::read(&torn).unwrap();
+
+    let fs = NormFS::new(path.clone(), settings).await.unwrap();
+    let queue_id = fs.resolve("torn-queue");
+    fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+
+    // A file the store worker archives and unlinks is the ordinary lifecycle
+    // and keeps the records, so this looks for quarantine, not a file count.
+    let quarantined: Vec<_> = std::fs::read_dir(&wal_dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .filter(|n| !n.ends_with(".wal"))
+        .collect();
+    assert!(
+        quarantined.is_empty(),
+        "recovery set files aside to close the gap ({quarantined:?}); the records above it \
+         were reported durable, so they must survive it"
+    );
+    if torn.exists() {
+        assert_eq!(
+            std::fs::read(&torn).unwrap(),
+            torn_bytes,
+            "recovery rewrote the torn file rather than leaving the prefix that survived"
+        );
+    }
+
+    let next = fs.enqueue(&queue_id, payload(COUNT)).await.unwrap();
+    assert!(
+        next >= UintN::from(COUNT as u64),
+        "recovery re-issued {next}, which is at or below ids already written to a file"
+    );
+
+    let (tx, mut rx) = mpsc::channel(COUNT + 16);
+    fs.read(
+        &queue_id,
+        ReadPosition::Absolute(UintN::zero()),
+        COUNT as u64,
+        1,
+        tx,
+    )
+    .await
+    .unwrap();
+    let mut entries = Vec::new();
+    while let Ok(Some(entry)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+    {
+        entries.push(entry);
+    }
+    for entry in &entries {
+        let i = entry.id.to_u64().unwrap() as usize;
+        assert_eq!(
+            entry.data,
+            payload(i),
+            "id {i} came back carrying another record's payload: the gap shifted the \
+             positional ids of everything after it"
+        );
+    }
+
+    let read_ids: Vec<u64> = entries.iter().map(|e| e.id.to_u64().unwrap()).collect();
+    assert!(
+        read_ids.windows(2).any(|w| w[1] != w[0] + 1) || read_ids.len() < COUNT,
+        "the truncation did not remove any record, so this test proves nothing"
+    );
+
+    fs.close().await.ok();
+}

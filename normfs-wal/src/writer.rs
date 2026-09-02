@@ -60,6 +60,10 @@ struct WriterState {
     // A rotation stood down for a close, so this writer has no file. Entries
     // that still arrive are dropped loudly.
     rotation_abandoned: bool,
+    // Spawned the first time a file is left owing records; outlives this task,
+    // so a close that reports itself incomplete can be followed by one that
+    // succeeds.
+    drainer: Option<mpsc::UnboundedSender<crate::drainer::DrainRequest>>,
 }
 
 impl WalWriter {
@@ -132,6 +136,7 @@ impl WalWriter {
             file_epoch: 0,
             closing: Arc::clone(&closing),
             rotation_abandoned: false,
+            drainer: None,
         };
 
         let queue_log_str = queue.to_string();
@@ -196,9 +201,13 @@ impl WalWriter {
                         // migrate: no writer will ever rotate it out. A file
                         // that lost entries stays in the WAL for recovery.
                         let closed_ok = flushed && state.buffer.pending.is_empty();
+                        // The last file has no rotation behind it to notice what
+                        // its closing flush left owed. Not awaited: this close
+                        // reports itself incomplete, and a later one succeeds.
+                        let owed = state.hand_off_stranded().await;
                         // Never a header-only file: the store worker would
                         // parse nothing and compute a last id from it.
-                        if closed_ok && state.has_written {
+                        if !owed && closed_ok && state.has_written {
                             let _ = state.wal_complete_sender.send(WalFile {
                                 queue_id: state.queue_id.clone(),
                                 file_id: state.file_id.clone(),
@@ -394,6 +403,14 @@ impl WriterState {
                     entry_id,
                     data_len
                 );
+                // The mark below the loop is too late for a rotation inside
+                // it: `wait_for_order` releases several entries at once, and
+                // the ones already handed to this file would still sit behind
+                // the pool's old bound, so the closing flush would cut them
+                // off and report the file complete without them.
+                if let (Some(pool), Some(id)) = (self.pool.as_ref(), handed_through) {
+                    pool.note_handed_over(id);
+                }
                 if !self.rotate(entry_id.clone(), data_len).await {
                     self.rotation_abandoned = true;
                     outcome = Err(WalError::IoError(std::io::Error::new(
@@ -484,6 +501,71 @@ impl WriterState {
         }
 
         outcome
+    }
+
+    /// Hands the file this writer is leaving to the retrier if it owes
+    /// anything. The answer is also "may this file be reported complete": a
+    /// file missing records must not reach the store worker, which archives it
+    /// and deletes it from the WAL.
+    ///
+    /// The evidence is the pool's, not `close()`'s verdict, which only reports
+    /// a flush that ran and gave up. A file can be left owing records without
+    /// that -- see the handover mark before the rotation above.
+    async fn hand_off_stranded(&mut self) -> bool {
+        let Some(pool) = self.pool.as_ref() else {
+            return false;
+        };
+        let Some(stranded) = pool.take_stranded(self.file_epoch) else {
+            return false;
+        };
+
+        log::error!(
+            "WAL writer: queue '{}': file {} is leaving entries {}..={} unwritten; they are \
+             held for retry rather than reported complete, and this queue cannot certify \
+             them durable until the retry lands",
+            self.queue_id,
+            self.file_id,
+            stranded.first_entry_id,
+            stranded.last_entry_id
+        );
+
+        let file = Box::new(crate::drainer::StrandedFile {
+            queue_id: self.queue_id.clone(),
+            file_id: self.file_id.clone(),
+            epoch: self.file_epoch,
+            path: self
+                .file_id
+                .to_file_path(self.queue_path.to_str().unwrap(), "wal"),
+            valid_len: self.file_writer.flushed_len().await,
+            wal_file: WalFile {
+                queue_id: self.queue_id.clone(),
+                file_id: self.file_id.clone(),
+                encryption_type: self.settings.encryption_type,
+                compression_type: self.settings.compression_type,
+            },
+            fsync: self.settings.enable_fsync,
+            stranded,
+        });
+
+        let drainer = self.drainer.get_or_insert_with(|| {
+            crate::drainer::spawn(
+                Arc::clone(pool),
+                self.wal_complete_sender.clone(),
+                self.written_sender.clone(),
+            )
+        });
+        if drainer
+            .send(crate::drainer::DrainRequest::Retry(file))
+            .is_err()
+        {
+            log::error!(
+                "WAL writer: queue '{}': the retrier for file {} is gone; its records reach \
+                 no file",
+                self.queue_id,
+                self.file_id
+            );
+        }
+        true
     }
 
     /// Checks the writer's idea of which file it is on against the enqueue
@@ -608,18 +690,18 @@ impl WriterState {
                 false
             }
         };
-        // Completion lets the store worker archive the file and delete it
-        // from the WAL. A file whose final flush failed is a valid prefix
-        // missing its tail; it stays here, where recovery and reads still
-        // see what survived.
-        if closed_ok {
+        // Withheld while anything is owed; the retrier sends it once the tail
+        // lands. Only this file's waits -- archiving is what frees WAL space,
+        // and a disk that just failed a write is the worst place to stop.
+        let owed = self.hand_off_stranded().await;
+        if !owed && closed_ok {
             let _ = self.wal_complete_sender.send(WalFile {
                 queue_id: self.queue_id.clone(),
                 file_id: self.file_id.clone(),
                 encryption_type: self.settings.encryption_type,
                 compression_type: self.settings.compression_type,
             });
-        } else {
+        } else if !owed {
             log::error!(
                 "WAL writer: queue '{}': file {} is not reported complete; it stays in the \
                  WAL for recovery and reads",
@@ -742,6 +824,8 @@ async fn new_file_writer(
             max_file_size: settings.max_file_size as u64,
             write_interval: settings.write_interval,
             fsync: settings.enable_fsync,
+            max_retries: settings.flush_max_retries,
+            retry_delay: settings.flush_retry_delay,
         },
         written_sender,
         header_buf.freeze(),

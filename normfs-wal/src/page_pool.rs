@@ -34,6 +34,7 @@
 //! responsible for never advancing the watermark on anything less than a
 //! completed sync.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -265,6 +266,15 @@ pub struct PendingWrite {
     pub last_entry_id: u64,
 }
 
+/// Owned copies, not borrows: the pages are recycled the moment
+/// [`PagePool::take_stranded`] returns.
+#[derive(Debug)]
+pub struct Stranded {
+    pub runs: Vec<(PendingWrite, Bytes)>,
+    pub first_entry_id: u64,
+    pub last_entry_id: u64,
+}
+
 struct Inner {
     ring: WalRing,
     /// Per page: how many of its bytes the file writer has taken. A page is
@@ -296,6 +306,23 @@ struct Inner {
     /// The highest id the file writer has taken responsibility for, in order.
     /// `None` until it has taken any. Nothing above it may be written.
     handed_through: Option<u64>,
+    /// Per file whose closing flush did not land: the first id a retry still
+    /// owes it. The bytes are the retry's; this is only the debt, and it is
+    /// what stops a close certifying that everything accepted is on disk.
+    stranded: BTreeMap<u64, u64>,
+}
+
+/// The offset table is only defined below `count`, which
+/// `normfs_wal_page_offset` asserts, so the walk stops there.
+fn first_id_at(inner: &Inner, k: usize, from: usize) -> Option<u64> {
+    let first = inner.ring.page_first_entry_id(k)?;
+    let count = inner.ring.page_len(k);
+    for i in 0..count {
+        if inner.ring.page_entry_offset(k, i) >= from {
+            return Some(first + i as u64);
+        }
+    }
+    None
 }
 
 impl Inner {
@@ -511,6 +538,7 @@ impl PagePool {
                 unwritten: 0,
                 cache_floor: 0,
                 handed_through: None,
+                stranded: BTreeMap::new(),
             }),
             space: Notify::new(),
             drainer: std::sync::atomic::AtomicBool::new(false),
@@ -558,6 +586,7 @@ impl PagePool {
                 unwritten: 0,
                 cache_floor: 0,
                 handed_through: None,
+                stranded: BTreeMap::new(),
             }),
             space: Notify::new(),
             drainer: std::sync::atomic::AtomicBool::new(false),
@@ -675,6 +704,11 @@ impl PagePool {
     /// know before it certifies anything.
     pub fn is_fully_durable(&self) -> bool {
         let inner = self.inner.lock().unwrap();
+        // The one case the pages cannot answer for: `take_stranded` advanced
+        // their cursors, so they look durable while a file is missing its tail.
+        if !inner.stranded.is_empty() {
+            return false;
+        }
         let essential = inner.ring.min_essential_id();
         (0..inner.ring.page_count()).all(|k| inner.ring.page_is_reusable(k, essential))
     }
@@ -1080,6 +1114,110 @@ impl PagePool {
         // a total order rather than an approximation of one.
         out.sort_by_key(|(w, _)| w.first_entry_id);
         out
+    }
+
+    /// Lifts out what file `epoch`'s closing flush did not land, so a retry can
+    /// finish that file while the queue writes the next one.
+    ///
+    /// ## Why this copies, and commits
+    ///
+    /// Leaving the bytes in their pages fails either way. Holding the pages
+    /// means holding `min_essential_id` at the hole, and that is one scalar for
+    /// the whole ring: every later page becomes unreclaimable, `place` parks,
+    /// and `begin_close` deadlocks behind the append gate that parked appender
+    /// holds. Not holding them means `arm_file_fill` — which runs on every
+    /// writer start, including the restart after an incomplete close — resets
+    /// every cursor, and the retry finds nothing and calls the file done.
+    pub fn take_stranded(&self, epoch: u64) -> Option<Stranded> {
+        let mut inner = self.inner.lock().unwrap();
+        let bound = inner.handed_through?;
+        let count = inner.ring.page_count();
+        let mut runs: Vec<(PendingWrite, Bytes)> = Vec::new();
+
+        for k in 0..count {
+            // The page that triggered the rotation is stamped with the next
+            // epoch and holds that file's first records, not this one's.
+            if inner.page_epoch[k] != epoch {
+                continue;
+            }
+            let used = inner.ring.page_bytes(k).len();
+            let from = inner.written[k];
+            if from >= used || inner.ring.page_len(k) == 0 {
+                continue;
+            }
+            let (Some(first_entry_id), Some(last_entry_id)) = (
+                inner.ring.page_first_entry_id(k),
+                inner.ring.page_last_entry_id(k),
+            ) else {
+                continue;
+            };
+            // Never above the handover bound, for `take_pending`'s reason: a
+            // record the writer was never told about has no place in this file.
+            // `close` runs with such records parked in the reorder buffer, so
+            // this is reachable rather than theoretical.
+            if first_entry_id > bound {
+                continue;
+            }
+            let (to, last_entry_id) = if last_entry_id <= bound {
+                (used, last_entry_id)
+            } else {
+                let next = (bound - first_entry_id + 1) as u32;
+                (inner.ring.page_entry_offset(k, next), bound)
+            };
+            if from >= to {
+                continue;
+            }
+            let Some(first_owed) = first_id_at(&inner, k, from) else {
+                continue;
+            };
+            runs.push((
+                PendingWrite {
+                    page: k,
+                    from,
+                    to,
+                    first_entry_id: first_owed,
+                    last_entry_id,
+                },
+                Bytes::copy_from_slice(&inner.ring.page_bytes(k)[from..to]),
+            ));
+        }
+
+        if runs.is_empty() {
+            return None;
+        }
+        runs.sort_by_key(|(w, _)| w.first_entry_id);
+
+        for (write, _) in &runs {
+            let PendingWrite { page, to, .. } = *write;
+            if to > inner.written[page] {
+                let taken = to - inner.written[page];
+                inner.written[page] = to;
+                inner.unwritten = inner.unwritten.saturating_sub(taken);
+            }
+        }
+
+        let first_entry_id = runs[0].0.first_entry_id;
+        let last_entry_id = runs[runs.len() - 1].0.last_entry_id;
+        inner.stranded.insert(epoch, first_entry_id);
+
+        Some(Stranded {
+            runs,
+            first_entry_id,
+            last_entry_id,
+        })
+    }
+
+    pub fn clear_stranded(&self, epoch: u64) {
+        self.inner.lock().unwrap().stranded.remove(&epoch);
+    }
+
+    pub fn has_stranded(&self) -> bool {
+        !self.inner.lock().unwrap().stranded.is_empty()
+    }
+
+    /// The first id this queue may not report durable.
+    pub fn stranded_from(&self) -> Option<u64> {
+        self.inner.lock().unwrap().stranded.values().min().copied()
     }
 
     /// Marks a run from [`PagePool::take_pending`] as written. Only moves the

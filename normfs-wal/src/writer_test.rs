@@ -47,6 +47,7 @@ async fn test_enqueue_and_read() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
+        ..Default::default()
     };
 
     store
@@ -118,6 +119,7 @@ async fn test_enqueue_batch_and_read() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
+        ..Default::default()
     };
 
     store
@@ -187,6 +189,7 @@ async fn test_size_based_rotation() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
+        ..Default::default()
     };
 
     store
@@ -242,6 +245,7 @@ async fn test_v1_enqueue_read_and_scan() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
+        ..Default::default()
     };
     store
         .start_writer(&queue_id, &file_id, header, settings, None)
@@ -351,6 +355,7 @@ async fn test_v1_truncated_tail_is_dropped() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
+        ..Default::default()
     };
     store
         .start_writer(&queue_id, &file_id, WalHeader::default(), settings, None)
@@ -499,6 +504,7 @@ async fn test_mixed_v0_and_v1_files_in_one_queue() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
+        ..Default::default()
     };
 
     // File 1: a legacy V0 file, entries 0 and 1, written by hand — the writer
@@ -619,6 +625,7 @@ async fn test_v1_rotates_on_file_size_not_field_width() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::Aes,
         compression_type: normfs_types::CompressionType::Zstd,
+        ..Default::default()
     };
 
     store
@@ -711,6 +718,7 @@ async fn a_rotation_that_cannot_open_its_file_waits_rather_than_desyncing() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::None,
         compression_type: normfs_types::CompressionType::None,
+        ..Default::default()
     };
 
     let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
@@ -820,6 +828,7 @@ async fn a_close_interrupts_a_rotation_that_is_stuck_retrying() {
         enable_fsync: true,
         encryption_type: normfs_types::EncryptionType::None,
         compression_type: normfs_types::CompressionType::None,
+        ..Default::default()
     };
 
     let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
@@ -858,4 +867,221 @@ async fn a_close_interrupts_a_rotation_that_is_stuck_retrying() {
         .await
         .expect("close() hung behind a rotation that can only retry")
         .expect("close() reported an error");
+}
+
+/// The handover mark used to be published only after the whole released run,
+/// so a rotation part-way through it closed the file while the pool still
+/// believed the earlier entries of that run were not the writer's. They were
+/// cut off, the file was reported complete, and the store archived it without
+/// them. No failing hardware involved.
+#[tokio::test]
+async fn a_rotation_inside_a_released_run_keeps_the_entries_before_it() {
+    use crate::page_pool::PagePool;
+    use std::sync::Arc;
+
+    init_logger();
+    let tmp_dir = tempdir().unwrap();
+    let (written_sender, _written) = mpsc::unbounded_channel();
+    let (wal_complete_sender, _complete) = mpsc::unbounded_channel();
+    let store = WalStore::new(tmp_dir.path(), written_sender, wal_complete_sender);
+
+    let resolver = QueueIdResolver::new("test_instance");
+    let queue_id = resolver.resolve("straddling_run");
+    let first_file = UintN::from(1u64);
+
+    const PAGE_SIZE: usize = 1024;
+    const COUNT: u64 = 7;
+    let record = Bytes::from(vec![b'r'; 200]);
+
+    let pool = Arc::new(PagePool::new(8, PAGE_SIZE, 0));
+    let settings = WalSettings {
+        // Crossed by the first record, so the next page to open rotates.
+        max_file_size: 256,
+        write_buffer_size: 128,
+        write_interval: Duration::from_millis(10),
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::None,
+        compression_type: normfs_types::CompressionType::None,
+        ..Default::default()
+    };
+
+    store
+        .start_writer_with_pool(
+            &queue_id,
+            &first_file,
+            WalHeader::default(),
+            settings,
+            None,
+            Some(Arc::clone(&pool)),
+        )
+        .await
+        .unwrap();
+
+    let mut placements = Vec::new();
+    for id in 0..COUNT {
+        placements.push(pool.place(id, &record).await.expect("a record fits a page"));
+    }
+
+    let rotating = placements
+        .iter()
+        .position(|p| p.rotate == crate::RotateHint::Before)
+        .expect("one of these records must open a file") as u64;
+    assert!(
+        rotating >= 2 && rotating < COUNT - 1,
+        "the rotation has to fall inside a run with an entry either side of it; it is at {rotating}"
+    );
+
+    // A released run starts at the lowest parked id, and an id that is exactly
+    // the next one expected never parks -- so `rotating - 1` must be sent while
+    // the writer is two behind, which means withholding `rotating - 2` until
+    // after it. One more id then releases them together, with an entry ahead of
+    // the rotation.
+    let held = rotating - 2;
+    let mut order: Vec<u64> = (0..held).collect();
+    order.extend([rotating - 1, rotating, held]);
+    order.extend((rotating + 1)..COUNT);
+
+    for id in order {
+        store
+            .enqueue_pooled(
+                &queue_id,
+                UintN::from(id),
+                Bytes::new(),
+                placements[id as usize].clone(),
+            )
+            .unwrap();
+    }
+
+    store.close().await.unwrap();
+
+    let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
+    let mut seen = 0u64;
+    for file in 1..=16u64 {
+        let file_id = UintN::from(file);
+        let Ok(content) = get_wal_content(&wal_dir, &file_id).await else {
+            continue;
+        };
+        assert_eq!(
+            content.entries_before,
+            UintN::from(seen),
+            "file {file} claims to start at {:?}, but the files before it hold {seen} entries: \
+             the entries released alongside the rotation reached no file",
+            content.entries_before
+        );
+        seen += content.num_entries.to_u64().unwrap();
+    }
+    assert_eq!(seen, COUNT, "{} of {COUNT} entries reached a file", seen);
+}
+
+/// The rotation cannot wait for the file it is leaving, so its unflushed
+/// records used to reach no file and were then overwritten in memory once the
+/// next file's fsync advanced the watermark past them.
+///
+/// Injected on file 1's path only and healed part-way, which is what separates
+/// "the write failed" from "the disk is gone for good".
+#[tokio::test]
+async fn a_close_that_cannot_flush_hands_its_tail_to_a_retrier() {
+    use crate::page_pool::PagePool;
+    use std::sync::Arc;
+
+    init_logger();
+    let tmp_dir = tempdir().unwrap();
+    let (written_sender, _written) = mpsc::unbounded_channel();
+    let (wal_complete_sender, mut complete) = mpsc::unbounded_channel();
+    let store = WalStore::new(tmp_dir.path(), written_sender, wal_complete_sender);
+
+    let resolver = QueueIdResolver::new("test_instance");
+    let queue_id = resolver.resolve("torn_close");
+    let first_file = UintN::from(1u64);
+    let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
+
+    const PAGE_SIZE: usize = 1024;
+    const COUNT: u64 = 12;
+    let record = Bytes::from(vec![b'r'; 200]);
+
+    let pool = Arc::new(PagePool::new(8, PAGE_SIZE, 0));
+    let settings = WalSettings {
+        max_file_size: 256,
+        write_buffer_size: 128,
+        write_interval: Duration::from_millis(10),
+        enable_fsync: true,
+        encryption_type: normfs_types::EncryptionType::None,
+        compression_type: normfs_types::CompressionType::None,
+        // Not the default thousand: watch it give up, don't wait ten seconds.
+        flush_max_retries: 2,
+        flush_retry_delay: Duration::from_millis(1),
+    };
+
+    tokio::fs::create_dir_all(&wal_dir).await.unwrap();
+    let torn = first_file.to_file_path(wal_dir.to_str().unwrap(), "wal");
+    crate::fail_flushes(&torn, u32::MAX);
+
+    store
+        .start_writer_with_pool(
+            &queue_id,
+            &first_file,
+            WalHeader::default(),
+            settings,
+            None,
+            Some(Arc::clone(&pool)),
+        )
+        .await
+        .unwrap();
+
+    for id in 0..COUNT {
+        let placement = pool.place(id, &record).await.expect("a record fits a page");
+        store
+            .enqueue_pooled(&queue_id, UintN::from(id), Bytes::new(), placement)
+            .unwrap();
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !pool.has_stranded() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "file 1's closing flush was made to fail, so it must have left records owed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !pool.is_fully_durable(),
+        "a file is still owed its tail, so nothing may certify this queue durable"
+    );
+
+    crate::fail_flushes(&torn, 0);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while pool.has_stranded() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the retrier never landed file 1's tail after the writes started working"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    store.close().await.unwrap();
+
+    let mut completed: Vec<u64> = Vec::new();
+    while let Ok(file) = complete.try_recv() {
+        completed.push(file.file_id.to_u64().unwrap());
+    }
+    assert!(
+        completed.contains(&1),
+        "file 1 landed its tail, so it must be reported complete; got {completed:?}"
+    );
+
+    let mut seen = 0u64;
+    for file in 1..=32u64 {
+        let file_id = UintN::from(file);
+        let Ok(content) = get_wal_content(&wal_dir, &file_id).await else {
+            continue;
+        };
+        assert_eq!(
+            content.entries_before,
+            UintN::from(seen),
+            "file {file} claims to start at {:?} but the files before it hold {seen} entries",
+            content.entries_before
+        );
+        seen += content.num_entries.to_u64().unwrap();
+    }
+    assert_eq!(seen, COUNT, "{seen} of {COUNT} records reached a file");
 }

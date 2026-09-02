@@ -823,6 +823,64 @@ impl NormFS {
         None
     }
 
+    /// Reports ids that no file holds, walking down from the file recovery is
+    /// resuming after.
+    ///
+    /// No entry body is read: file F's `num_entries_before` should be one past
+    /// the last id of the file below it, and the difference when it is not is
+    /// exactly what a failed closing flush lost.
+    ///
+    /// Nothing is deleted or set aside. Those records were fsynced and acked
+    /// normally while the torn file waited for a retry a crash cut short, so
+    /// discarding them would destroy acknowledged data to make the sequence
+    /// contiguous -- and would not even suffice, since `get_latest_file` merges
+    /// the WAL and the Store, the range index has no removal, and the files may
+    /// already be offloaded.
+    async fn report_id_chain_breaks(&self, queue: &QueueId, from: &UintN) {
+        // `get_file_end` on a WAL file is a full frame scan; an archived one
+        // answers from its store header, which is what the healthy case costs.
+        const MAX_LINKS: u32 = 32;
+
+        let mut upper = from.clone();
+        for link in 0..MAX_LINKS {
+            let Ok(lower) = upper.decrement() else {
+                return;
+            };
+            let Some(header) = self.get_file_header_all_sources(queue, &upper).await else {
+                return;
+            };
+            let Some(lower_last) = self.get_file_end_all_sources(queue, &lower).await else {
+                // An empty file between two full ones is ordinary.
+                upper = lower;
+                continue;
+            };
+            let expected = lower_last.increment();
+            if header.num_entries_before == expected {
+                // Keep going down: the tear is at the *bottom* of the run of
+                // files written after it, because the queue kept rotating while
+                // the retry was stuck.
+                upper = lower;
+                continue;
+            }
+            log::error!(target: "normfs",
+                "Queue '{}' - ids {}..{} reach no file: file {} ends at {} and file {} starts \
+                 at {}. A closing flush lost them and the retry did not land before the \
+                 process ended. Nothing is discarded to close the gap -- the records above it \
+                 were reported durable -- so reads for those ids find nothing.",
+                queue, expected, header.num_entries_before, lower, lower_last, upper,
+                header.num_entries_before);
+
+            if link + 1 == MAX_LINKS {
+                log::error!(target: "normfs",
+                    "Queue '{}' - stopped checking the id chain after {} links; there may be \
+                     further gaps below file {}",
+                    queue, MAX_LINKS, lower);
+                return;
+            }
+            upper = lower;
+        }
+    }
+
     /// Continue a queue by walking backward from the latest file to find the last entry.
     /// Returns (file_id, header, last_entry_id) for starting the WAL writer.
     async fn continue_queue(
@@ -921,6 +979,8 @@ impl NormFS {
                         "Queue '{}' - Starting WAL writer: file_id={}, num_entries_before={}, last_entry_id={:?}",
                         queue, next_file_id, new_header.num_entries_before, last_entry_id
                     );
+
+                    self.report_id_chain_breaks(queue, &current_file_id).await;
 
                     return Ok((next_file_id, new_header, Some(last_entry_id)));
                 }

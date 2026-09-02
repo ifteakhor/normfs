@@ -26,6 +26,7 @@ async fn test_write_single_entry_and_ack() {
         max_file_size: 10 * 1024,
         write_interval: Duration::from_millis(10),
         fsync: true,
+        ..Default::default()
     };
 
     let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None, 0)
@@ -64,6 +65,7 @@ async fn test_write_multiple_entries_and_ack() {
         max_file_size: 10 * 1024,
         write_interval: Duration::from_millis(100),
         fsync: true,
+        ..Default::default()
     };
 
     let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None, 0)
@@ -115,6 +117,7 @@ async fn test_buffer_full_triggers_write_and_ack() {
         max_file_size: 10 * 1024,
         write_interval: Duration::from_secs(5), // Long interval to ensure buffer full is the trigger
         fsync: true,
+        ..Default::default()
     };
 
     let mut writer = AckFileWriter::new(&file_path, settings, ack_sender, Bytes::new(), None, 0)
@@ -184,6 +187,7 @@ async fn test_writer_with_header() {
         max_file_size: 10 * 1024,
         write_interval: Duration::from_millis(100),
         fsync: true,
+        ..Default::default()
     };
 
     let (ack_sender, mut ack_receiver) = mpsc::unbounded_channel();
@@ -229,6 +233,7 @@ async fn pages_reach_the_file_before_the_watermark_moves() {
         max_file_size: 10 * 1024 * 1024,
         write_interval: Duration::from_millis(10),
         fsync: true,
+        ..Default::default()
     };
 
     let header = Bytes::from_static(b"HDR!");
@@ -312,6 +317,7 @@ async fn a_record_in_flight_is_not_overtaken_by_the_pages_behind_it() {
         max_file_size: 10 * 1024 * 1024,
         write_interval: Duration::from_millis(10),
         fsync: true,
+        ..Default::default()
     };
 
     let header = Bytes::from_static(b"HDR!");
@@ -456,6 +462,7 @@ async fn a_buffered_ack_does_not_report_a_pooled_record_durable() {
         max_file_size: 10 * 1024 * 1024,
         write_interval: Duration::from_millis(10),
         fsync: true,
+        ..Default::default()
     };
     let mut writer = AckFileWriter::new(
         &file_path,
@@ -548,6 +555,7 @@ async fn an_entry_buffered_during_a_flush_is_not_acked_by_it() {
         max_file_size: 10 * 1024 * 1024,
         write_interval: Duration::from_secs(3600),
         fsync: true,
+        ..Default::default()
     };
     let mut writer = AckFileWriter::new(
         &file_path,
@@ -634,6 +642,7 @@ async fn a_durable_buffered_ack_is_sent_without_another_write_or_a_close() {
         max_file_size: 10 * 1024 * 1024,
         write_interval: Duration::from_millis(10),
         fsync: true,
+        ..Default::default()
     };
     let writer = AckFileWriter::new(
         &file_path,
@@ -710,6 +719,7 @@ async fn a_close_that_cannot_flush_says_so() {
         max_file_size: 10 * 1024 * 1024,
         write_interval: Duration::from_secs(3600),
         fsync: false,
+        ..Default::default()
     };
     let mut writer = AckFileWriter::new("/dev/full", settings, ack_sender, Bytes::new(), None, 0)
         .await
@@ -729,4 +739,55 @@ async fn a_close_that_cannot_flush_says_so() {
         writer.close().await.is_err(),
         "the closing flush lost this entry's bytes, and close() must say so"
     );
+}
+
+/// The same claim as `a_close_that_cannot_flush_says_so`, on a real WAL path
+/// and on every platform: `/dev/full` is Linux only and cannot be a WAL path,
+/// so the branch the rotation-retry design keys on was never covered on a
+/// developer's machine.
+#[tokio::test]
+async fn an_injected_flush_failure_makes_a_close_fail() {
+    let tmp_dir = tempdir().unwrap();
+    let file_path = tmp_dir.path().join("injected.wal");
+    let (ack_sender, _ack_receiver) = mpsc::unbounded_channel();
+
+    let settings = AckFileWriterSettings {
+        max_buffer_size: 1024 * 1024,
+        max_file_size: 10 * 1024 * 1024,
+        write_interval: Duration::from_secs(3600),
+        fsync: false,
+        // Not the default thousand: watch it give up, don't wait ten seconds.
+        max_retries: 2,
+        retry_delay: Duration::from_millis(1),
+    };
+    crate::fail_flushes(&file_path, u32::MAX);
+
+    let mut writer = AckFileWriter::new(
+        &file_path,
+        settings,
+        ack_sender,
+        Bytes::from_static(b"hdr"),
+        None,
+        0,
+    )
+    .await
+    .unwrap();
+
+    let queue = QueueIdResolver::new("test_instance").resolve("injected");
+    writer
+        .write_maybe_pooled(
+            queue,
+            UintN::from(0u64),
+            Bytes::from_static(b"doomed"),
+            false,
+        )
+        .await;
+
+    assert!(
+        writer.close().await.is_err(),
+        "every flush attempt was made to fail, so the close owes the file bytes it never wrote"
+    );
+
+    crate::heal(&file_path);
+    assert_eq!(read_file_content(&file_path).await, b"hdr");
 }

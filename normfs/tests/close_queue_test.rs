@@ -503,3 +503,70 @@ async fn a_close_of_a_never_written_queue_migrates_nothing() {
 
     fs.close().await.unwrap();
 }
+
+/// The marker means "everything this queue accepted is on disk", which is not
+/// true while a retrier still holds a file's records -- however durable the
+/// pages look, and they do look durable, because the retry took an owned copy
+/// and let the pool recycle them.
+#[tokio::test]
+async fn a_close_waits_for_a_file_whose_flush_failed() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let path = temp.path().to_path_buf();
+
+    let mut settings = NormFsSettings::all_active();
+    settings.mem_page_size = 256 * 1024;
+    // Below one page, so every page that opens rotates the file.
+    settings.wal_settings.max_file_size = 1024;
+    // Not the default thousand: watch it give up, don't wait ten seconds.
+    settings.wal_settings.flush_max_retries = 2;
+    settings.wal_settings.flush_retry_delay = Duration::from_millis(1);
+
+    let fs = NormFS::new(path.clone(), settings).await.unwrap();
+    let queue = fs.resolve("torn");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+
+    let wal_dir = queue.to_wal_dir(&path);
+    let first = UintN::from(1u64).to_file_path(wal_dir.to_str().unwrap(), "wal");
+    normfs_wal::fail_flushes(&first, u32::MAX);
+
+    for i in 0..300u64 {
+        fs.enqueue(
+            &queue,
+            Bytes::from(format!("r-{i:04}-{}", "x".repeat(1500))),
+        )
+        .await
+        .unwrap();
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match fs.close_queue(&queue).await {
+            Err(Error::Wal(normfs_wal::WalError::CloseIncomplete)) => break,
+            other => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "file 1's flush was made to fail, so a close must not certify this \
+                     queue; got {other:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+
+    normfs_wal::heal(&first);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match fs.close_queue(&queue).await {
+            Ok(()) => break,
+            other => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the retrier never landed file 1's tail after the writes started \
+                     working, so the close never became truthful; last answer {other:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+}

@@ -8,7 +8,9 @@ use uintn::{UintN, paths};
 use writer::WalWriter;
 
 mod ack_file_writer;
+mod drainer;
 mod errors;
+mod fault;
 mod page_pool;
 mod reader;
 mod wal_arena;
@@ -21,8 +23,11 @@ mod writer;
 mod writer_buffer;
 
 pub use errors::*;
+#[cfg(any(test, feature = "fault-injection"))]
+pub use fault::{fail_flushes, heal};
 pub use page_pool::{
-    MIN_PAGE_SIZE, PagePool, PendingWrite, Placement, PoolError, RotateHint, max_record_len,
+    MIN_PAGE_SIZE, PagePool, PendingWrite, Placement, PoolError, RotateHint, Stranded,
+    max_record_len,
 };
 pub use reader::{
     ReadRangeResult, WalContent, get_wal_header, read_wal_file_range, read_wal_header,
@@ -93,6 +98,10 @@ pub struct WalSettings {
     pub enable_fsync: bool,
     pub encryption_type: normfs_types::EncryptionType,
     pub compression_type: normfs_types::CompressionType,
+    /// A setting because the default is ten seconds' worth, and a test that
+    /// wants to watch a flush fail should not sit through it.
+    pub flush_max_retries: u32,
+    pub flush_retry_delay: std::time::Duration,
 }
 
 impl Default for WalSettings {
@@ -104,6 +113,8 @@ impl Default for WalSettings {
             enable_fsync: true,
             encryption_type: normfs_types::EncryptionType::Aes,
             compression_type: normfs_types::CompressionType::Zstd,
+            flush_max_retries: 1000,
+            flush_retry_delay: std::time::Duration::from_millis(10),
         }
     }
 }

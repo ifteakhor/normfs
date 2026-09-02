@@ -1157,3 +1157,61 @@ async fn an_evicting_append_refuses_when_every_old_page_is_pinned() {
     ));
     drop(held);
 }
+
+/// `take_stranded` copies the runs out so the pool can carry on. `arm_file_fill`
+/// resets every cursor on the writer restart that follows an incomplete close,
+/// and `reseed` discards every page; a retry that re-read the pool would find
+/// nothing and call the file done.
+#[tokio::test]
+async fn a_stranded_tail_outlives_the_pages_it_came_from() {
+    let pool = armed_pool();
+
+    let id0 = pool.next_entry_id();
+    pool.place(id0, &RECORD).await.unwrap();
+    pool.note_handed_over(id0);
+
+    let stranded = pool
+        .take_stranded(0)
+        .expect("file 0 was handed a record and never wrote it");
+    assert_eq!(stranded.first_entry_id, id0);
+    assert_eq!(stranded.last_entry_id, id0);
+    let bytes: Vec<u8> = stranded.runs.iter().flat_map(|(_, b)| b.to_vec()).collect();
+    assert!(!bytes.is_empty());
+
+    assert!(pool.take_pending(0).is_empty());
+
+    pool.arm_file_fill(HEADER + record_charge(), HEADER);
+    assert!(pool.reseed(id0 + 100));
+
+    let after: Vec<u8> = stranded.runs.iter().flat_map(|(_, b)| b.to_vec()).collect();
+    assert_eq!(
+        bytes, after,
+        "the snapshot is an owned copy; recycling its pages must not reach it"
+    );
+    assert!(
+        pool.has_stranded(),
+        "the debt outlives the pages: until the retry lands, a close must not certify"
+    );
+    assert_eq!(pool.stranded_from(), Some(id0));
+    assert!(!pool.is_fully_durable());
+
+    pool.clear_stranded(0);
+    assert!(!pool.has_stranded());
+    assert!(pool.is_fully_durable());
+}
+
+/// Nothing is stranded when the closing flush landed everything.
+#[tokio::test]
+async fn a_file_that_wrote_everything_strands_nothing() {
+    let pool = armed_pool();
+
+    let id0 = pool.next_entry_id();
+    pool.place(id0, &RECORD).await.unwrap();
+    pool.note_handed_over(id0);
+    for (write, _) in pool.take_pending(0) {
+        pool.commit_written(&write);
+    }
+
+    assert!(pool.take_stranded(0).is_none());
+    assert!(!pool.has_stranded());
+}

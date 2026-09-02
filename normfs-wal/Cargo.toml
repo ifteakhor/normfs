@@ -8,6 +8,10 @@ repository.workspace = true
 homepage.workspace = true
 description = "Write-ahead log implementation for NormFS with crash recovery"
 
+[features]
+# Lets a dependent's tests make a WAL flush fail; see src/fault.rs.
+fault-injection = []
+
 [dependencies]
 log = "0.4"
 bytes = "1"
