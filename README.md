@@ -35,6 +35,52 @@ Storage engine with automatic data lifecycle management across memory, disk, and
 
 📈 **[Full TCP benchmarks →](normfs_go/bench/README.md)**
 
+## 📈 Throughput and Readers
+
+![Device throughput and reader cost](images/device-and-readers.png)
+
+Two machines, one picture: what a board's SD card holds while writing, and what
+concurrent tail readers cost on a laptop.
+
+**On the board** — rover-alpha, aarch64, class-10 SD card, zstd + AES-GCM,
+120 s per size:
+
+| Record | Records/s | MB/s in | MB/s to card | Amplification |
+|--------|-----------|---------|--------------|---------------|
+| 50 B | 138,676 | 6.93 | 12.95 | 2.16× |
+| 8 KiB | 1,659 | 13.59 | **21.73** | 1.89× |
+| 100 KiB | 124 | 12.65 | 20.23 | 1.89× |
+| 450 KiB | 23 | 10.69 | 17.44 | 1.95× |
+| 2 MiB | 5 | 10.69 | 18.78 | 1.93× |
+
+The card itself does 18–20 MB/s under `dd` at any block size from 4 KiB to
+1 MiB, so from 8 KiB records upward NormFS is running it at its limit. The
+amplification is framing, compression and encryption — the bytes that reach the
+card are not the bytes the caller wrote.
+
+Replaying three camera streams faster than real time finds the *board's* limit
+rather than the card's: at 1 Hz per stream all three keep up at 100 %, at 2 Hz
+they hold 42 % and at 3 Hz 24 %, while input stays near 2 MB/s and the card
+idles at 20. Compression is the ceiling there, not I/O.
+
+**On the laptop** — MacBook Pro M3 Max, N clients each polling
+`ShiftFromTail(0)` every 1 ms, 500 publishes per point, median of two rounds:
+
+| Readers | Read p50 | Read p99 | Publish→last reader p50 | p99 |
+|---------|----------|----------|-------------------------|-----|
+| 1 | 6µs | 29µs | 2.4ms | 4.9ms |
+| 10 | 4µs | 44µs | 4.3ms | 5.1ms |
+| 100 | 5µs | 152µs | 4.2ms | 6.0ms |
+| 500 | 7µs | 152µs | 4.1ms | 6.7ms |
+| 1000 | 4µs | 95µs | 4.1ms | 7.1ms |
+| 2000 | 5µs | 94µs | 6.5ms | 11.1ms |
+| 4000 | 5µs | 97µs | **11.9ms** | 18.3ms |
+
+An individual read stays flat from 1 to 4000 readers because it is a page
+lookup and the page is borrowed, not copied. Propagation is flat to 1000
+readers; past that the fan-out itself is the cost. Both propagation figures
+include each reader's own 1 ms poll interval.
+
 ## ✨ Features
 
 - 🗄️ **Tiered Storage**: Memory → WAL → Compressed Store → Cloud archival
