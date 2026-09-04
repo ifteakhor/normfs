@@ -98,15 +98,12 @@ if(FRAMAC)
         normfs_wal_page_unpin
         normfs_wal_page_reusable)
 
-    # try_append is excluded: its assigns includes
-    # ring->pages[ring->active].buf[0 .. page_size - 1], so re-establishing
-    # every other page's offsets_wf needs the pairwise buffer separation, and
-    # re-establishing the active page's own needs byte-level reasoning about
-    # the offset table -- a nested-quantifier frame the automatic provers do
-    # not discharge.
-    #
-    # try_append stays covered by the WalRing Rust tests; its callee
-    # page_append is proven.
+    # try_append is verified. Carrying every other page's offsets_wf across a
+    # write to one page's bytes is a frame under two quantifiers at once, which
+    # the provers do not take in that form. What they do take is the same fact
+    # at the locations offsets_wf reads, buf + cap - 4 * (i + 1), and the
+    # frame's conclusion as an equality between the two states. The body says
+    # both once, at a single merge point, which is why it has one exit.
     #
     # rotate_to is verified. It is the one place a page's contents are
     # discarded, so the durability theorem is its precondition -- and an
@@ -114,36 +111,46 @@ if(FRAMAC)
     # having it here is the difference between that theorem being a
     # specification and being a verdict.
     #
-    # shrink is here for the same reason. A page moving between queues is the
-    # other way a record can leave the queue that accepted it, and shrink is
-    # where the durability theorem stands at that boundary, so leaving it
-    # unscheduled would make that clause a comment.
+    # release_page is here for the same reason. A page moving between queues is
+    # the other way a record can leave the queue that accepted it, and
+    # release_page is where the durability theorem stands at that boundary, so
+    # leaving it unscheduled would make that clause a comment.
     #
     # skip_entry likewise. It is the one place the id sequence moves without a
     # record behind it, and its ensures is what says no page's bytes move with
     # it -- unscheduled, that would be a comment rather than a check.
     #
-    # grow is excluded, and unlike its neighbour it carries no durability
-    # clause: a free page belongs to nobody and holds nothing anyone is owed,
-    # so what it re-establishes is well-formedness and nothing more. Three of
-    # its clauses -- ring_layout, ring_pages_wf and ring_in_pool -- sit either
-    # side of a context cliff. Asserting the case split that pages_wf and
-    # in_pool need makes both go through in milliseconds and puts layout out of
-    # reach; leaving them out proves layout and loses the other two. A goal
-    # that depends on how much else is in scope is the same kind of
-    # not-a-proof as one that depends on machine load, and pinning it to
-    # whichever half happens to be green today would be worse than saying so.
+    # retain_page is scheduled with two or three of its 85 goals still open,
+    # which is deliberate: unscheduled, the rest are comments rather than
+    # checks. Which ones are open varies between runs; they are the same step
+    # either way, and none of them is the theorem. It
+    # carries no durability clause -- a free page belongs to nobody and holds
+    # nothing anyone is owed -- so what is unproved is well-formedness, not the
+    # theorem.
     #
-    # It stays covered by the WalRing Rust tests -- a ring grows into the free
-    # slot above it, will not grow into another ring's slot, and cannot grow at
-    # the top of the arena. Its callee pool_take is proven, and shrink, which
-    # is the direction that can lose a record, is proven here.
+    # That step is narrowing a \separated from the pool's whole arena to the
+    # slice this ring holds. It is the encoding and not the
+    # argument -- both provers answer "unknown" in milliseconds rather than
+    # time out, and the same narrowing against a single object rather than a
+    # range does go through. Range narrowing, pointwise membership, a
+    # per-element form, a ghost offset and \subset were each tried.
+    #
+    # What moved it from unscheduled to 83 of 85 is the unfold_* assertions at
+    # the top of the body: in_pool and pool_wf reach the prover as opaque
+    # atoms, so a separation stated inside them is not a hypothesis until an
+    # assertion asks for it.
+    #
+    # Until they close it is the WalRing Rust tests that stand behind
+    # it. Its callee pool_take is proven, and so is release_page, which is the
+    # direction that can lose a record.
     set(NORMFS_WAL_RING_WP_FCTS
         normfs_wal_ring_init
+        normfs_wal_ring_try_append
+        normfs_wal_ring_retain_page
         normfs_wal_ring_set_essential
         normfs_wal_ring_find_reusable
         normfs_wal_ring_rotate_to
-        normfs_wal_ring_shrink
+        normfs_wal_ring_release_page
         normfs_wal_ring_skip_entry
         normfs_wal_ring_seek)
 
@@ -171,6 +178,10 @@ if(FRAMAC)
                 -machdep gcc_x86_64
                 -wp-report-json ${CMAKE_CURRENT_BINARY_DIR}/${target}.json
                 -wp -wp-rte -wp-timeout ${NORMFS_WP_TIMEOUT}
+                # One goal per conjunct: otherwise a ring_wf postcondition is
+                # one formula with quantifiers nested in it. -wp-split alone
+                # does if-then-else, not conjunctions.
+                -wp-split -wp-split-conj
                 -wp-prover alt-ergo,z3
                 -wp-par ${NPROC}
                 -wp-cache none

@@ -24,11 +24,11 @@
 //! range needs none — page `k` is slot `first_slot + k`, and disjointness
 //! follows from the layout.
 //!
-//! The price is that a ring grows only into the slot directly above it, so a
+//! The price is that a ring can take only the slot directly above it, so a
 //! fragmented arena can hold free pages a given queue cannot reach. That is why
 //! [`WalArena::reserve`] places a new range at the *start of the largest free
 //! gap* rather than packing ranges back to back: packed, every queue but the
-//! last would start with no room to grow. It is a heuristic — a range cannot be
+//! last would start with no room to expand. It is a heuristic — a range cannot be
 //! moved once it holds records, so placement is decided with no knowledge of
 //! how many queues will arrive.
 
@@ -220,7 +220,7 @@ impl WalArena {
     /// `first_entry_id`. Returns the range, or `None` if no gap is that wide.
     ///
     /// The range goes in the *largest* free gap, and where in that gap is the
-    /// whole of the placement policy. A ring grows into the slot directly above
+    /// whole of the placement policy. A ring can take the slot directly above
     /// it, so free slots are only reachable by the range immediately below
     /// them: pack ranges back to back and every queue but the newest is walled
     /// in from the moment the next one starts.
@@ -294,7 +294,7 @@ impl WalArena {
     }
 
     /// Any free slot, by the proven C scan. Used only for diagnostics — a ring
-    /// can grow into the slot above it and nowhere else.
+    /// can take the slot above it and no other.
     pub fn any_free_slot(&self) -> Option<usize> {
         let _slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let r = unsafe { normfs_wal_pool_find_free(self.pool_ptr(), 1) };

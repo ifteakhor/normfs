@@ -1,8 +1,10 @@
 //! Pages moving between rings over one shared arena.
 //!
-//! These exercise the migration boundary the C proof stands on: a ring grows
-//! only into the free slot directly above it, and gives a page back only once
-//! nothing pins it and everything on it is on disk.
+//! These exercise the migration boundary the C proof stands on: a ring takes
+//! only the free slot directly above it, and gives a page back only once
+//! nothing pins it and everything on it is on disk. No page is ever allocated
+//! or freed here — the arena is whole from construction, and what these move is
+//! which ring owns which slot of it.
 
 use std::sync::Arc;
 
@@ -48,7 +50,7 @@ fn reserve_leaves_the_first_range_the_whole_arena_above_it() {
     let a = arena.reserve(2, RING_A, 0).expect("room for two pages");
 
     // Nothing below slot 0 to keep headroom for, so the range starts there and
-    // the rest of the arena is room for it to grow into.
+    // the rest of the arena is room for it to take.
     assert_eq!(a.first_slot, 0);
     assert_eq!(a.page_count, 2);
     assert_owned(&arena, 0, 2, RING_A);
@@ -63,58 +65,58 @@ fn reserve_splits_the_spare_room_with_the_range_below() {
 
     // A holds [0,1]. The gap is [2..5], two spare after B's two, so one slot
     // stays free above A and one above B. Packed back to back instead, A could
-    // never grow again.
+    // never take another page.
     assert_eq!((a.first_slot, a.page_count), (0, 2));
     assert_eq!((b.first_slot, b.page_count), (3, 2));
-    assert_eq!(arena.owner_of(2), POOL_FREE, "A must keep room to grow");
-    assert_eq!(arena.owner_of(5), POOL_FREE, "B must keep room to grow");
+    assert_eq!(arena.owner_of(2), POOL_FREE, "A must keep room to expand");
+    assert_eq!(arena.owner_of(5), POOL_FREE, "B must keep room to expand");
 }
 
 #[test]
-fn a_ring_grows_into_the_free_slot_above_it() {
+fn a_ring_takes_the_free_slot_above_it() {
     let arena = Arc::new(WalArena::new(6, PAGE));
     let range = arena.reserve(2, RING_A, 0).unwrap();
     let mut ring = WalRing::in_arena(&arena, range, RING_A, 0);
 
     assert_eq!(ring.page_count(), 2);
-    assert!(ring.grow(), "slot 2 is free");
+    assert!(ring.retain_page(), "slot 2 is free");
     assert_eq!(ring.page_count(), 3);
     assert_owned(&arena, 0, 3, RING_A);
     assert_eq!(arena.free_pages(), 3);
 }
 
 #[test]
-fn a_ring_will_not_grow_into_another_rings_slot() {
+fn a_ring_will_not_take_another_rings_slot() {
     let arena = Arc::new(WalArena::new(4, PAGE));
     let a = arena.reserve(2, RING_A, 0).unwrap();
-    // Take the slot directly above A by hand, so the only thing stopping the
-    // grow is that the page belongs to someone else.
+    // Take the slot directly above A by hand, so the only thing stopping A is
+    // that the page belongs to someone else.
     let b = arena.reserve(2, RING_B, 0).unwrap();
     assert_eq!(b.first_slot, 2, "B must sit directly above A for this test");
 
     let mut ring = WalRing::in_arena(&arena, a, RING_A, 0);
-    assert!(!ring.grow(), "slot 2 belongs to B");
+    assert!(!ring.retain_page(), "slot 2 belongs to B");
     assert_eq!(ring.page_count(), 2);
     assert_owned(&arena, 2, 2, RING_B);
 }
 
 #[test]
-fn a_ring_at_the_top_of_the_arena_cannot_grow() {
+fn a_ring_at_the_top_of_the_arena_cannot_take_a_page() {
     let arena = Arc::new(WalArena::new(2, PAGE));
     let range = arena.reserve(2, RING_A, 0).unwrap();
     let mut ring = WalRing::in_arena(&arena, range, RING_A, 0);
 
-    assert!(!ring.grow(), "there is no slot 2");
+    assert!(!ring.retain_page(), "there is no slot 2");
     assert_eq!(ring.page_count(), 2);
 }
 
 #[test]
-fn shrinking_returns_the_top_page_to_the_arena() {
+fn releasing_returns_the_top_page_to_the_arena() {
     let arena = Arc::new(WalArena::new(4, PAGE));
     let range = arena.reserve(3, RING_A, 0).unwrap();
     let mut ring = WalRing::in_arena(&arena, range, RING_A, 0);
 
-    assert!(ring.shrink(1), "an empty top page is reusable");
+    assert!(ring.release_page(1), "an empty top page is reusable");
     assert_eq!(ring.page_count(), 2);
     assert_eq!(
         arena.owner_of(range.first_slot + 2),
@@ -125,14 +127,14 @@ fn shrinking_returns_the_top_page_to_the_arena() {
 }
 
 #[test]
-fn shrinking_stops_at_the_floor() {
+fn releasing_stops_at_the_floor() {
     let arena = Arc::new(WalArena::new(4, PAGE));
     let range = arena.reserve(3, RING_A, 0).unwrap();
     let mut ring = WalRing::in_arena(&arena, range, RING_A, 0);
 
-    assert!(ring.shrink(2));
+    assert!(ring.release_page(2));
     assert_eq!(ring.page_count(), 2);
-    assert!(!ring.shrink(2), "the floor is 2 pages");
+    assert!(!ring.release_page(2), "the floor is 2 pages");
     assert_eq!(ring.page_count(), 2);
 }
 
@@ -142,15 +144,15 @@ fn a_pinned_page_does_not_leave_the_ring_that_holds_it() {
     let range = arena.reserve(3, RING_A, 0).unwrap();
     let mut ring = WalRing::in_arena(&arena, range, RING_A, 0);
 
-    // A reader is looking at the top page. `normfs_wal_ring_shrink` requires
+    // A reader is looking at the top page. `normfs_wal_ring_release_page` requires
     // normfs_wal_page_is_reusable, whose first conjunct is pin_count == 0, so
     // the page cannot be handed to another queue while the read is in flight.
     ring.pin(2);
-    assert!(!ring.shrink(1), "a pinned page must not be released");
+    assert!(!ring.release_page(1), "a pinned page must not be released");
     assert_owned(&arena, range.first_slot, 3, RING_A);
 
     ring.unpin(2);
-    assert!(ring.shrink(1), "released once the reader is done");
+    assert!(ring.release_page(1), "released once the reader is done");
     assert_eq!(arena.owner_of(range.first_slot + 2), POOL_FREE);
 }
 
@@ -180,13 +182,16 @@ fn a_page_of_records_that_are_not_on_disk_does_not_leave_the_ring() {
     let top_last = ring.page_last_entry_id(top).unwrap();
     ring.set_essential(top_last);
     assert!(
-        !ring.shrink(1),
+        !ring.release_page(1),
         "a page whose last record is not below the watermark must not be released"
     );
     assert_owned(&arena, range.first_slot, 3, RING_A);
 
     ring.set_essential(top_last + 1);
-    assert!(ring.shrink(1), "released once the records are on disk");
+    assert!(
+        ring.release_page(1),
+        "released once the records are on disk"
+    );
 }
 
 #[test]
@@ -202,8 +207,8 @@ fn two_rings_trade_a_page_without_the_total_moving() {
     let ring_b = WalRing::in_arena(&arena, b, RING_B, 0);
 
     // A takes the one slot it can reach, and stops: slot 3 is B's.
-    assert!(ring_a.grow());
-    assert!(!ring_a.grow(), "slot 3 belongs to B");
+    assert!(ring_a.retain_page());
+    assert!(!ring_a.retain_page(), "slot 3 belongs to B");
     assert_eq!(ring_a.page_count(), 3);
 
     // B goes away and hands its whole range back.
@@ -217,28 +222,28 @@ fn two_rings_trade_a_page_without_the_total_moving() {
     );
 
     // Now A can reach them, one slot at a time.
-    assert!(ring_a.grow());
-    assert!(ring_a.grow());
-    assert!(ring_a.grow());
-    assert!(!ring_a.grow(), "the arena is exhausted");
+    assert!(ring_a.retain_page());
+    assert!(ring_a.retain_page());
+    assert!(ring_a.retain_page());
+    assert!(!ring_a.retain_page(), "the arena is exhausted");
 
     assert_eq!(ring_a.page_count(), 6);
     assert_owned(&arena, 0, 6, RING_A);
     assert_eq!(
         arena.free_pages(),
         0,
-        "every page moved to A, and the arena never grew"
+        "every page moved to A, and the arena itself never changed size"
     );
 }
 
 #[test]
 fn a_taken_slot_does_not_answer_with_its_last_holders_records() {
-    // The reason `normfs_wal_ring_grow` requires the page it takes to be empty.
-    // seek scans every page in the range, so a slot still carrying another
-    // queue's entries would answer under an id of this queue's own.
+    // The reason `normfs_wal_ring_retain_page` requires the page it takes to
+    // be empty. seek scans every page in the range, so a slot still carrying
+    // another queue's entries would answer under an id of this queue's own.
     let arena = Arc::new(WalArena::new(4, PAGE));
 
-    // A sits below B, so the slot B writes to is the one A will grow into.
+    // A sits below B, so the slot B writes to is the one A will take.
     let a = arena.reserve(1, RING_A, 0).unwrap();
     let b = arena.reserve(2, RING_B, 500).unwrap();
     assert_eq!(
@@ -257,9 +262,9 @@ fn a_taken_slot_does_not_answer_with_its_last_holders_records() {
     drop(ring_b);
     arena.release(b, RING_B, held);
 
-    // A grows into the slot B wrote to. The ids overlap on purpose.
+    // A takes the slot B wrote to. The ids overlap on purpose.
     let mut ring_a = WalRing::in_arena(&arena, a, RING_A, 0);
-    assert!(ring_a.grow());
+    assert!(ring_a.retain_page());
     assert_eq!(ring_a.page_count(), 2);
 
     assert!(matches!(ring_a.append(b"from-a"), AppendOutcome::Cached(0)));

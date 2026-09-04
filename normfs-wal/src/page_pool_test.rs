@@ -1215,3 +1215,54 @@ async fn a_file_that_wrote_everything_strands_nothing() {
     assert!(pool.take_stranded(0).is_none());
     assert!(!pool.has_stranded());
 }
+
+/// A queue out of pages says so once, not once per record.
+///
+/// One queue's appends are serialised, so a queue that is a thousand records
+/// behind reaches the wait path a thousand times over one condition. The first
+/// line is the one carrying the diagnosis, and it is worth nothing if the next
+/// thousand bury it.
+#[tokio::test]
+async fn a_stalled_pool_reports_once_and_counts_the_rest() {
+    let pool = pool();
+    fill(&pool);
+
+    assert_eq!(
+        pool.stall_waits(),
+        None,
+        "not stalled before anything waits"
+    );
+
+    for _ in 0..64 {
+        pool.note_wait();
+    }
+    assert_eq!(
+        pool.stall_waits(),
+        Some(64),
+        "every wait is counted, not logged"
+    );
+
+    assert!(pool.report_stall(), "the first pass reports");
+    for _ in 0..8 {
+        assert!(
+            !pool.report_stall(),
+            "later passes stay quiet until the repeat interval is up"
+        );
+    }
+}
+
+/// Resuming clears the stall, so the next one starts from zero rather than
+/// carrying the last one's count into it.
+#[tokio::test]
+async fn resuming_ends_the_stall() {
+    let pool = pool();
+    let n = fill(&pool);
+
+    pool.note_wait();
+    assert!(pool.report_stall());
+    pool.note_resumed(n);
+    assert_eq!(pool.stall_waits(), None, "the stall is over");
+
+    pool.note_wait();
+    assert_eq!(pool.stall_waits(), Some(1), "the next stall starts at one");
+}

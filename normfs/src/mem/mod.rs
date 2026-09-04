@@ -37,9 +37,9 @@ const MEM_MIN_PAGES_PER_QUEUE: usize = 2;
 /// decremented, so a queue giving pages back was invisible to it.
 ///
 /// This number is a starting point rather than a verdict. A queue that runs out
-/// grows into a free slot above its range instead of waiting for the disk, and
-/// gives pages back once its records are durable, so a busy queue can borrow
-/// from an idle one without the process-wide total moving.
+/// takes a free slot above its range instead of waiting for the disk, and gives
+/// pages back once its records are durable, so a busy queue can borrow from an
+/// idle one without the process-wide total moving.
 fn pages_for_new_queue(free: usize, total: usize) -> usize {
     // A quarter of the arena per queue, so the first few get a useful allowance
     // and later ones still find something left. Any fixed fraction is a guess
@@ -240,8 +240,8 @@ impl MemQueue {
 
         // Forgetting the oldest page beats forgetting everything, but only
         // where no writer can ever attach; the durable pre-writer window
-        // keeps the reseed below. No grow: arena pages taken on this path
-        // are never given back.
+        // keeps the reseed below. No page is taken from the arena here:
+        // pages taken on this path are never given back.
         let first_try = if self.evicts {
             pool.try_append_evicting(data)
         } else {
@@ -1060,9 +1060,9 @@ impl MemStore {
     /// Nothing appends to it, so the share would sit idle for the life of the
     /// process — and a queue is started read-only by any client that merely
     /// *names* a path, which is what made the share an unauthenticated way to
-    /// reserve 16 MiB. Being wrong about it is cheap now: the range grows into
-    /// the arena on demand, so a queue promoted to writing takes what it needs
-    /// on its first busy moment instead of holding it in advance.
+    /// reserve 16 MiB. Being wrong about it is cheap now: the range takes more
+    /// of the arena on demand, so a queue promoted to writing takes what it
+    /// needs on its first busy moment instead of holding it in advance.
     pub fn start_queue(
         &self,
         queue: &QueueId,
@@ -1081,7 +1081,7 @@ impl MemStore {
             // divided by the queue count at this moment, which bounded nothing.
             //
             // A passive queue starts at the floor even for writing; the
-            // range still grows on demand if one bursts.
+            // range still takes more on demand if one bursts.
             let want = if readonly || pool == PoolKind::Passive {
                 MEM_MIN_PAGES_PER_QUEUE
             } else {

@@ -42,16 +42,16 @@ struct normfs_wal_ring {
 	 * A ring holds the contiguous slot range [first_slot, first_slot +
 	 * page_count). `pages` and `arena` below are that range's base
 	 * addresses, cached so every existing operation indexes exactly as it
-	 * did before pages were shared -- growing and shrinking move the top of
-	 * the range, which leaves both bases untouched.
+	 * did before pages were shared -- retaining and releasing a page move
+	 * the top of the range, which leaves both bases untouched.
 	 *
 	 * Contiguous rather than an arbitrary set of slots on purpose. A slot
 	 * array would need "no two slots name the same page", which is a
 	 * quantifier over pairs -- the shape that would not discharge before the
 	 * arena removed it. A range needs none: page k is slot first_slot + k,
 	 * and disjointness follows from the pool's own layout. The cost is that
-	 * a queue grows only into the slot above it, so a fragmented arena can
-	 * hold free pages a given queue cannot reach.
+	 * a queue can retain only the slot directly above it, so a fragmented
+	 * arena can hold free pages a given queue cannot reach.
 	 */
 	struct normfs_wal_pool *pool;
 	size_t first_slot;
@@ -124,9 +124,9 @@ struct normfs_wal_ring_seek_result {
                    r->arena + (0 .. r->page_count * r->page_size - 1));
 
       // This ring's pages are the pool's slots [first_slot, +page_count), and
-      // the pool says they belong to this ring. Only growing and shrinking
-      // need this; every other operation works off the cached bases and does
-      // not care where they came from.
+      // the pool says they belong to this ring. Only retain_page and
+      // release_page need this; every other operation works off the cached
+      // bases and does not care where they came from.
       predicate normfs_wal_ring_in_pool{L}(struct normfs_wal_ring *r,
                                            uint64_t ring_id) =
         \valid(r->pool) &&
@@ -145,10 +145,10 @@ struct normfs_wal_ring_seek_result {
         // The arena clause is for a different reason, and it is the one the
         // ring's own separation cannot supply. normfs_wal_ring_sep says the
         // ring is disjoint from `page_count * page_size` bytes -- exactly the
-        // range the ring holds *now*. Growing needs it of a range one page
-        // wider, and no hypothesis about the old range says anything about the
-        // page above it. Stated over the whole pool arena it is fixed, so
-        // growing weakens it rather than re-deriving it.
+        // range the ring holds *now*. Retaining a page needs it of a range
+        // one page wider, and no hypothesis about the old range says anything
+        // about the page above it. Stated over the whole pool arena it is
+        // fixed, so retain_page weakens it rather than re-deriving it.
         \separated(r, r->pool) &&
         \separated(r, r->pool->owner + (0 .. r->pool->page_count - 1)) &&
         \separated(r, r->pool->pages + (0 .. r->pool->page_count - 1)) &&
@@ -282,25 +282,32 @@ void normfs_wal_ring_init(struct normfs_wal_ring *ring,
  * Migration
  * =========
  *
- * A queue takes the free slot above its range, or gives its top slot back for
- * another queue to take. Between them, a busy queue can grow into memory an
+ * A queue retains the free slot above its range, or releases its top slot for
+ * another queue to retain. Between them, a busy queue can take over memory an
  * idle one has released without the process-wide total ever moving.
  *
- * Giving a page back carries the durability theorem, exactly as rotate_to
- * does: a page whose records are not yet on disk, or that a reader still
- * holds, cannot leave the queue that accepted them. Taking one needs no such
+ * Neither function allocates, and neither can: the arena, the page-descriptor
+ * array and the owner array are allocated once by the caller and handed to
+ * `normfs_wal_pool_init`, and nothing here holds an allocator. All these two
+ * do is move one slot's entry in the owner array and adjust page_count, both
+ * bounded by pool->page_count. A queue that needs a page when no free slot
+ * sits above its range does not get one -- it waits for its own pages to
+ * become reusable. That is why they are not named grow/shrink: what moves is
+ * ownership of memory that already exists, never its amount.
+ *
+ * Releasing a page carries the durability theorem, exactly as rotate_to does:
+ * a page whose records are not yet on disk, or that a reader still holds,
+ * cannot leave the queue that accepted them. Retaining one needs no such
  * clause -- a free page belongs to nobody and holds nothing anyone is owed.
  */
 
-/* This contract is the intended specification, but grow (like try_append) is
- * verified by the WalRing Rust tests rather than WP. Three of its clauses --
- * ring_layout, ring_pages_wf and ring_in_pool -- sit either side of a context
- * cliff: asserting the case split the last two need proves both in
- * milliseconds and puts layout out of reach, and leaving it out proves layout
- * and loses them. Unlike shrink it carries no durability clause -- a free page
- * belongs to nobody and holds nothing anyone is owed -- so what is unproved
- * here is well-formedness, not the theorem. Its callee pool_take is proven,
- * and so is shrink, which is the direction that can lose a record. */
+/* Scheduled with two or three of its 85 goals still open; the reason they are
+ * open, and the reason it is scheduled anyway, are in c/CMakeLists.txt.
+ * Unlike release_page it carries no durability clause -- a free page belongs to
+ * nobody and holds nothing anyone is owed -- so what is unproved is
+ * well-formedness, not the theorem. Its callee pool_take is proven, and so is
+ * release_page, which is the direction that can lose a record. Until they
+ * close it is the WalRing Rust tests that stand behind it. */
 /*@ requires normfs_wal_ring_wf(ring);
     requires normfs_wal_ring_in_pool(ring, ring_id);
     requires ring_id != NORMFS_WAL_POOL_FREE;
@@ -338,7 +345,7 @@ void normfs_wal_ring_init(struct normfs_wal_ring *ring,
     ensures ring->active == \old(ring->active);
     ensures ring->next_entry_id == \old(ring->next_entry_id);
 */
-void normfs_wal_ring_grow(struct normfs_wal_ring *ring, uint64_t ring_id);
+void normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id);
 
 /*@ requires normfs_wal_ring_wf(ring);
     requires normfs_wal_ring_in_pool(ring, ring_id);
@@ -366,13 +373,14 @@ void normfs_wal_ring_grow(struct normfs_wal_ring *ring, uint64_t ring_id);
     ensures ring->pool->owner[ring->first_slot + ring->page_count] ==
               NORMFS_WAL_POOL_FREE;
 */
-void normfs_wal_ring_shrink(struct normfs_wal_ring *ring, uint64_t ring_id);
+void normfs_wal_ring_release_page(struct normfs_wal_ring *ring, uint64_t ring_id);
 
-/* This contract is the intended specification, but try_append (like
- * rotate_to) is verified by the WalRing Rust tests rather than WP:
- * re-establishing every page's page_wf after a mutation is a nested-quantifier
- * frame over the offset tables that the automatic provers do not discharge.
- * Its callee page_append is fully proven. */
+/* Verified by WP. Re-establishing every other page's page_wf after this
+ * writes one page's bytes is a frame under two quantifiers at once -- pages,
+ * and the entries within a page -- which is why the body states the
+ * disjointness at the four bytes offsets_wf actually reads and the frame's
+ * conclusion as an equality between the two states. Its callee page_append is
+ * proven too. */
 /*@ requires normfs_wal_ring_wf(ring);
     requires ring->next_entry_id < 0xFFFFFFFFFFFFFFFF;
     requires record_size == 0 || \valid_read(record + (0 .. record_size - 1));
@@ -387,7 +395,17 @@ void normfs_wal_ring_shrink(struct normfs_wal_ring *ring, uint64_t ring_id);
             ring->pages[ring->active].count,
             ring->pages[ring->active].last_entry_id,
             ring->pages[ring->active].buf[0 .. ring->page_size - 1];
-    ensures normfs_wal_ring_wf(ring);
+    // normfs_wal_ring_wf, one conjunct at a time, as retain_page and
+    // release_page state it. As a single clause an open goal says only
+    // "well-formedness was not re-established"; named, it says which part --
+    // and here that matters more than elsewhere, because this is the one
+    // function that writes a page's bytes.
+    ensures \valid(ring);
+    ensures \valid(ring->pages + (0 .. ring->page_count - 1));
+    ensures normfs_wal_ring_scalar_wf(ring);
+    ensures normfs_wal_ring_layout(ring);
+    ensures normfs_wal_ring_sep(ring);
+    ensures normfs_wal_ring_pages_wf(ring);
     ensures \result.status == NORMFS_WAL_RING_OK ||
             \result.status == NORMFS_WAL_RING_NEEDS_ROTATE ||
             \result.status == NORMFS_WAL_RING_ERR_TOO_LARGE;

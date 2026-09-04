@@ -703,8 +703,8 @@ async fn a_busy_queue_takes_a_page_rather_than_waiting_for_the_disk() {
     );
 
     // Waiting is only allowed once a writer is draining, and this test never
-    // starts one: if the pool ever chose to wait instead of growing, it would
-    // hang here rather than fail.
+    // starts one: if the pool ever chose to wait instead of taking a page, it
+    // would hang here rather than fail.
     pool.set_drainer();
 
     let record = Bytes::from(vec![7u8; 400]);
@@ -714,7 +714,7 @@ async fn a_busy_queue_takes_a_page_rather_than_waiting_for_the_disk() {
 
     assert!(
         pool.page_count() > started_with,
-        "the queue should have grown into the arena rather than waited: still {started_with} pages"
+        "the queue should have taken arena pages rather than waited: still {started_with} pages"
     );
     let range = pool.slot_range().unwrap();
     assert_eq!(range.page_count, pool.page_count());
@@ -786,7 +786,7 @@ async fn a_read_only_queue_does_not_reserve_a_writers_share() {
 }
 
 #[tokio::test]
-async fn a_promoted_reader_grows_rather_than_keeping_its_floor() {
+async fn a_promoted_reader_takes_pages_rather_than_keeping_its_floor() {
     // The other half of starting a reader small: being wrong about the mode has
     // to be cheap. A queue that starts read-only and is then written to takes
     // what it needs from the arena on its first busy moment.
@@ -803,7 +803,8 @@ async fn a_promoted_reader_grows_rather_than_keeping_its_floor() {
     assert_eq!(started_with, 2);
 
     // Waiting is only allowed once a writer is draining, and this test never
-    // starts one: if the pool chose to wait rather than grow it would hang.
+    // starts one: if the pool chose to wait rather than take a page it would
+    // hang.
     pool.set_drainer();
     let record = Bytes::from(vec![3u8; 400]);
     for id in 0..12u64 {
@@ -812,7 +813,7 @@ async fn a_promoted_reader_grows_rather_than_keeping_its_floor() {
 
     assert!(
         pool.page_count() > started_with,
-        "a promoted reader should grow into the arena, still {started_with} pages"
+        "a promoted reader should take arena pages, still {started_with} pages"
     );
 }
 
@@ -820,7 +821,8 @@ async fn a_promoted_reader_grows_rather_than_keeping_its_floor() {
 /// the next caller, so the pool never has to step over or renumber a gap.
 #[tokio::test]
 async fn a_cancelled_enqueue_leaves_no_gap_in_the_id_sequence() {
-    // Four pages in the whole arena, so growing runs out and the pool fills.
+    // Four pages in the whole arena, so there is nothing left to take and the
+    // pool fills.
     let mem = Arc::new(mem_store(1024 * 1024));
     let resolver = QueueIdResolver::new(TEST_INSTANCE_ID);
     let queue = resolver.resolve("cancel_queue");

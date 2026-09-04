@@ -36,7 +36,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::Notify;
@@ -117,6 +117,25 @@ impl std::fmt::Debug for PageGuard {
 /// disk is behind, and back-pressure is the correct response — but an
 /// indefinite wait with no explanation is not debuggable.
 const STALL_WARN_AFTER: Duration = Duration::from_secs(5);
+
+/// How often a pool that is still out of pages repeats itself.
+///
+/// The wait loop re-arms every [`STALL_WARN_AFTER`] and every queue has its own
+/// pool, so reporting on each pass buries the first line — the one that says
+/// what is wrong.
+const STALL_REPORT_EVERY: Duration = Duration::from_secs(30);
+
+/// What the pool remembers between wait passes so it can report a stall once
+/// rather than once per append.
+#[derive(Default)]
+struct Stall {
+    /// When the current stall began, or `None` if the pool is not stalled.
+    since: Option<Instant>,
+    /// Appends that went to the wait path since the stall began.
+    waits: u64,
+    /// When the last line was emitted, so the repeat is paced.
+    reported: Option<Instant>,
+}
 
 /// The share of the pool reads may hold pinned at once, as a divisor: pages
 /// beyond `page_count / PIN_SHARE_DIVISOR` are copied out rather than borrowed.
@@ -298,7 +317,7 @@ struct Inner {
     /// Ids below this are no longer served from memory even if a page still
     /// holds them.
     ///
-    /// Raised when a page is evicted by rotation or shrink, which is what can
+    /// Raised when a page is evicted by rotation or release, which is what can
     /// put a gap in what memory can answer. Reads are a contiguous run or they
     /// are wrong -- a range that silently omits the id in the middle is worse
     /// than one that says "read it from the file".
@@ -338,7 +357,7 @@ impl Inner {
         self.unwritten = 0;
     }
 
-    /// Folds what rotation or shrink just evicted into the cache floor, so a
+    /// Folds what rotation or release just evicted into the cache floor, so a
     /// read can never be served across the gap an eviction leaves.
     fn absorb_eviction(&mut self) {
         if let Some(last) = self.ring.take_evicted() {
@@ -504,17 +523,22 @@ pub struct PagePool {
     /// interval tick is the only thing on this path that can start a flush.
     flush: Mutex<Option<Arc<Notify>>>,
     /// Fixed at construction, from the range the queue started with. A pool
-    /// that has grown flushes a little earlier than half full, which is the
-    /// harmless direction for a hint.
+    /// that has since taken more pages flushes a little earlier than half
+    /// full, which is the harmless direction for a hint.
     flush_watermark: usize,
     /// The shared arena this pool's pages come from, if any. A pool built by
-    /// [`PagePool::new`] owns its pages and can neither grow nor shrink.
+    /// [`PagePool::new`] owns its pages and can neither take one from the
+    /// arena nor give one back.
     arena: Option<Arc<WalArena>>,
-    /// The fewest pages this pool will shrink to. One to append into and one
+    /// The fewest pages this pool will release down to. One to append into and one
     /// the writer is draining; below that an appender waits for its own page to
     /// reach disk, which serialises the queue against the disk rather than
     /// merely bounding it.
     floor: usize,
+    /// Stall bookkeeping, so a queue out of pages says so once rather than on
+    /// every append. Never held across `inner`: it is taken, a decision is
+    /// read out of it, and released before anything else is locked.
+    stall: Mutex<Stall>,
 }
 
 impl PagePool {
@@ -546,6 +570,7 @@ impl PagePool {
             flush_watermark: (page_count * page_size / 2).max(page_size),
             arena: None,
             floor: page_count,
+            stall: Mutex::new(Stall::default()),
         }
     }
 
@@ -563,8 +588,8 @@ impl PagePool {
     ///
     /// Unlike [`PagePool::new`] this allocates nothing: the bytes already
     /// exist, and what the pool holds is a claim on part of them. The claim can
-    /// move — see [`PagePool::place`], which grows into a free slot rather
-    /// than waiting for one of its own pages to reach disk, and
+    /// move — see [`PagePool::place`], which takes a free slot rather than
+    /// waiting for one of its own pages to reach disk, and
     /// [`PagePool::mark_durable`], which hands the top page back once it is
     /// safe to.
     pub fn new_in(
@@ -594,18 +619,19 @@ impl PagePool {
             flush_watermark: (page_count * page_size / 2).max(page_size),
             arena: Some(Arc::clone(arena)),
             floor: floor.max(1),
+            stall: Mutex::new(Stall::default()),
         }
     }
 
     /// Takes the free arena slot above this pool's range, if there is one.
     ///
-    /// The per-page bookkeeping grows with it. `written` starts at zero because
+    /// The per-page bookkeeping widens with it. `written` starts at zero because
     /// the page is empty, and `page_epoch` at zero because nothing has been
     /// charged to it yet — the append that lands on it stamps it with the file
     /// it belongs to, exactly as `charge_paged` does for every other page.
-    fn try_grow(&self) -> bool {
+    fn try_retain_page(&self) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        if !inner.ring.grow() {
+        if !inner.ring.retain_page() {
             return false;
         }
         let pages = inner.ring.page_count();
@@ -613,7 +639,7 @@ impl PagePool {
         inner.page_epoch.resize(pages, 0);
         log::debug!(
             target: "normfs-wal",
-            "page pool grew into arena slot {}, now {pages} pages",
+            "page pool took arena slot {}, now {pages} pages",
             inner.ring.slot_range().map_or(0, |r| r.first_slot + pages - 1),
         );
         true
@@ -680,7 +706,7 @@ impl PagePool {
             return;
         };
         // One lock: the range is read and released under the same guard, so it
-        // cannot shrink between the two.
+        // cannot change width between the two.
         let inner = self.inner.lock().unwrap();
         let Some(range) = inner.ring.slot_range() else {
             return;
@@ -825,7 +851,7 @@ impl PagePool {
 
             match self.try_place(expected_id, record, entry_len) {
                 Ok(Some(placed)) => {
-                    log::debug!(target: "normfs-wal", "page pool: resumed at entry {expected_id}");
+                    self.note_resumed(expected_id);
                     return Ok(placed);
                 }
                 Ok(None) => {}
@@ -844,16 +870,17 @@ impl PagePool {
 
             // `Full` means every page this queue holds is pinned or still holds
             // records that are not on disk. Before waiting for the disk, take
-            // the free slot above the range if there is one: growing costs
-            // nothing anybody else is using, and the process-wide total does
-            // not move -- the page came from the arena, and some other queue
-            // released it.
+            // the free slot above the range if there is one: it costs nothing
+            // anybody else is using, and the process-wide total does not move
+            // -- the page came from the arena, and some other queue released
+            // it. Nothing is allocated here or anywhere below this line; when
+            // no slot is free the queue waits for its own pages instead.
             //
-            // A ring grows into the slot directly above it and nowhere else, so
-            // this fails on a fragmented arena even when free pages exist. That
-            // is the price of a contiguous range, and waiting is the correct
+            // A ring can take the slot directly above it and no other, so this
+            // fails on a fragmented arena even when free pages exist. That is
+            // the price of a contiguous range, and waiting is the correct
             // fallback rather than an error.
-            if self.try_grow() {
+            if self.try_retain_page() {
                 continue;
             }
 
@@ -862,8 +889,9 @@ impl PagePool {
             // waiting on a full pool pays a whole flush interval per page.
             self.signal_flush();
 
+            self.note_wait();
             if tokio::time::timeout(STALL_WARN_AFTER, woken).await.is_err() {
-                self.warn_stalled();
+                let _ = self.report_stall();
             }
         }
     }
@@ -935,9 +963,88 @@ impl PagePool {
         Ok(Some(placed))
     }
 
-    /// Reports which page is holding the pool up, so an indefinite wait can be
-    /// diagnosed instead of guessed at.
-    fn warn_stalled(&self) {
+    /// Records that an append went to the wait path.
+    ///
+    /// One queue's appends are serialised, so this is one wait per record: a
+    /// queue a thousand records behind would otherwise report a thousand times
+    /// about a single condition.
+    pub(crate) fn note_wait(&self) {
+        let mut stall = self.stall.lock().unwrap();
+        if stall.since.is_none() {
+            stall.since = Some(Instant::now());
+            stall.waits = 0;
+            stall.reported = None;
+        }
+        stall.waits = stall.waits.saturating_add(1);
+    }
+
+    /// Whether the pool is mid-stall, and how many appends have waited in it.
+    /// The tests rule on this; nothing else reads it.
+    #[cfg(test)]
+    pub(crate) fn stall_waits(&self) -> Option<u64> {
+        let stall = self.stall.lock().unwrap();
+        stall.since.map(|_| stall.waits)
+    }
+
+    /// Closes out a stall, and only if its start was reported. Without this the
+    /// log shows a queue going quiet without saying whether it recovered.
+    pub(crate) fn note_resumed(&self, expected_id: u64) {
+        let summary = {
+            let mut stall = self.stall.lock().unwrap();
+            match (stall.since.take(), stall.reported.take()) {
+                (Some(since), Some(_)) => {
+                    let waits = std::mem::take(&mut stall.waits);
+                    Some((since.elapsed(), waits))
+                }
+                _ => {
+                    stall.waits = 0;
+                    None
+                }
+            }
+        };
+        match summary {
+            Some((held, waits)) => log::warn!(
+                target: "normfs-wal",
+                "WAL pages available again after {:.1}s, {waits} append(s) had to wait; \
+                 resumed at entry {expected_id}",
+                held.as_secs_f64(),
+            ),
+            None => {
+                log::debug!(target: "normfs-wal", "page pool: resumed at entry {expected_id}")
+            }
+        }
+    }
+
+    /// Reports a stall at most once every [`STALL_REPORT_EVERY`], carrying the
+    /// count of appends that waited since the last line. Returns whether it
+    /// emitted, which is what the tests rule on.
+    pub(crate) fn report_stall(&self) -> bool {
+        let due = {
+            let mut stall = self.stall.lock().unwrap();
+            let first = stall.reported.is_none();
+            let elapsed = stall.reported.map(|at| at.elapsed());
+            if first || elapsed.is_some_and(|e| e >= STALL_REPORT_EVERY) {
+                stall.reported = Some(Instant::now());
+                let held = stall.since.map(|at| at.elapsed()).unwrap_or_default();
+                Some((held, stall.waits))
+            } else {
+                None
+            }
+        };
+        let Some((held, waits)) = due else {
+            return false;
+        };
+        self.warn_stalled(held, waits);
+        true
+    }
+
+    /// Reports which page is holding the pool up.
+    ///
+    /// What ran out is the first thing the line has to settle, because the two
+    /// answers need opposite actions: a moving durable watermark means the
+    /// queue has too few pages, a stuck one means more pages would only
+    /// postpone this.
+    fn warn_stalled(&self, held: Duration, waits: u64) {
         let inner = self.inner.lock().unwrap();
         let essential = inner.ring.min_essential_id();
         let pinned = (0..inner.ring.page_count())
@@ -949,33 +1056,35 @@ impl PagePool {
         match oldest {
             Some((k, last)) => log::warn!(
                 target: "normfs-wal",
-                "page pool full for over {}s: {} of {} pages pinned by readers, \
-                 durable up to {}, oldest page {} ends at entry {} (pins {})",
-                STALL_WARN_AFTER.as_secs(),
-                pinned,
+                "out of WAL pages for {:.0}s, {waits} append(s) waiting: all {} pages of \
+                 this queue are in use — {pinned} pinned by readers, durable through \
+                 entry {essential}, oldest page {k} ends at entry {last} (pins {}). \
+                 This is the page budget, not disk throughput: if `durable through` is \
+                 rising, the queue needs more pages (max_memory_usage); if it is not, \
+                 the writer is stuck and pages will not come back.",
+                held.as_secs_f64(),
                 inner.ring.page_count(),
-                essential,
-                k,
-                last,
                 inner.ring.page_pin_count(k),
             ),
             None => log::warn!(
                 target: "normfs-wal",
-                "page pool full for over {}s but every page is empty — this is a bug",
-                STALL_WARN_AFTER.as_secs(),
+                "out of WAL pages for {:.0}s but every page is empty — this is a bug",
+                held.as_secs_f64(),
             ),
         }
 
         // With one arena for the whole process, "the pool is full" is only half
-        // the story: this queue could not grow because the slot above it is
-        // taken, and what a reader wants to know is by whom. Naming the holders
+        // the story: this queue could not take a page because the slot above it
+        // is held, and what a reader wants to know is by whom. Naming the holders
         // turns a stall into something to act on rather than guess at.
         if let Some(arena) = self.arena.as_ref() {
             let holders = arena.holders();
             let free = arena.free_pages();
             log::warn!(
                 target: "normfs-wal",
-                "arena: {free} of {} pages free, held by {}",
+                "arena: {free} of {} pages free, held by {} — a queue can only take \
+                 the slot directly above its own range, so free pages elsewhere in \
+                 the arena do not reach it",
                 arena.page_count(),
                 if holders.is_empty() {
                     "nobody".to_string()
@@ -1263,16 +1372,16 @@ impl PagePool {
             // is holding more of the arena than it needs. Give the top pages
             // back while they are safe to give, down to the floor.
             //
-            // `shrink` refuses the active page, refuses to go below the floor,
-            // and checks `normfs_wal_page_reusable` -- which is the predicate
-            // `normfs_wal_ring_shrink` requires, not a restatement of it. So a
-            // page carrying records that are not yet on disk, or that a reader
-            // is holding, cannot leave this queue.
+            // `release_page` refuses the active page, refuses to go below the
+            // floor, and checks `normfs_wal_page_reusable` -- which is the
+            // predicate `normfs_wal_ring_release_page` requires, not a
+            // restatement of it. So a page carrying records that are not yet on
+            // disk, or that a reader is holding, cannot leave this queue.
             let mut released = 0usize;
-            while inner.ring.shrink(self.floor) {
+            while inner.ring.release_page(self.floor) {
                 released += 1;
             }
-            // A shrunk page can hold ids from the middle of the cached run;
+            // A released page can hold ids from the middle of the cached run;
             // the floor rises past them so memory never serves across the gap.
             inner.absorb_eviction();
             if released > 0 {

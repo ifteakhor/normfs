@@ -108,8 +108,8 @@ unsafe extern "C" {
     fn normfs_wal_ring_rotate_to(ring: *mut CWalRing, index: usize);
     fn normfs_wal_ring_seek(ring: *mut CWalRing, entry_id: u64) -> CRingSeekResult;
     fn normfs_wal_ring_set_essential(ring: *mut CWalRing, min_essential_id: u64);
-    fn normfs_wal_ring_grow(ring: *mut CWalRing, ring_id: u64);
-    fn normfs_wal_ring_shrink(ring: *mut CWalRing, ring_id: u64);
+    fn normfs_wal_ring_retain_page(ring: *mut CWalRing, ring_id: u64);
+    fn normfs_wal_ring_release_page(ring: *mut CWalRing, ring_id: u64);
     fn normfs_wal_ring_skip_entry(ring: *mut CWalRing);
 
     fn normfs_wal_entry_v1_decode(buf: *const u8, len: usize) -> CEntryDecodeResult;
@@ -130,7 +130,7 @@ pub enum AppendOutcome {
 ///
 /// `Owned` is the standalone shape: the ring allocates its own arena and holds
 /// every page in it for life. `Shared` borrows a contiguous slot range from a
-/// process-wide [`WalArena`], which is what lets a busy queue grow into memory
+/// process-wide [`WalArena`], which is what lets a busy queue take over memory
 /// an idle one has released.
 ///
 /// Nothing below this enum cares which it is. The C ring caches `pages` and
@@ -159,7 +159,7 @@ pub struct WalRing {
     /// never used — when the ring owns its pages.
     ring_id: u64,
     /// The highest id whose bytes left the ring since [`WalRing::take_evicted`]
-    /// last ran. Rotation and shrink discard a page's contents; when lower ids
+    /// last ran. Rotation and release discard a page's contents; when lower ids
     /// stay cached, memory must stop answering below the gap that leaves.
     evicted_below: Option<u64>,
 }
@@ -169,7 +169,8 @@ impl WalRing {
     /// first entry id is `first_entry_id`. `page_count` must be at least 1 and
     /// `page_size` must exceed the minimum entry framing.
     ///
-    /// The ring owns its pages outright; it cannot grow or shrink. See
+    /// The ring owns its pages outright, so it can neither retain a page from
+    /// the arena nor release one back to it. See
     /// [`WalRing::in_arena`] for a ring that borrows from the shared arena.
     pub fn new(page_count: usize, page_size: usize, first_entry_id: u64) -> Self {
         assert!(page_count >= 1, "ring needs at least one page");
@@ -294,20 +295,23 @@ impl WalRing {
         }
     }
 
-    /// Takes the free arena slot directly above this ring's range.
+    /// Takes ownership of the free arena slot directly above this ring's range.
     ///
-    /// Returns whether it grew. `false` means the ring owns its pages, the
-    /// range already ends at the arena, or the slot above belongs to another
-    /// queue — which contiguity makes a real limit, not a transient one: a ring
-    /// grows into the slot above it and nowhere else.
+    /// Nothing is allocated: the arena exists in full from startup, and this
+    /// only moves one slot from free to this ring. Returns whether it took one.
+    /// `false` means the ring owns its pages, the range already ends at the
+    /// arena, or the slot above belongs to another queue — which contiguity
+    /// makes a real limit, not a transient one: a ring can take the slot above
+    /// it and no other.
     ///
-    /// Everything `normfs_wal_ring_grow` requires is established here: the slot
-    /// is checked free under the arena's slot lock, and the page descriptor is
-    /// re-initialised so it is well-formed, empty and based at the right arena
-    /// offset. Emptiness is not bookkeeping — [`WalRing::seek`] scans every page
-    /// in range, so a slot still holding the previous holder's records would
-    /// answer this ring's seeks with a foreign payload under a colliding id.
-    pub fn grow(&mut self) -> bool {
+    /// Everything `normfs_wal_ring_retain_page` requires is established here:
+    /// the slot is checked free under the arena's slot lock, and the page
+    /// descriptor is re-initialised so it is well-formed, empty and based at
+    /// the right arena offset. Emptiness is not bookkeeping — [`WalRing::seek`]
+    /// scans every page in range, so a slot still holding the previous holder's
+    /// records would answer this ring's seeks with a foreign payload under a
+    /// colliding id.
+    pub fn retain_page(&mut self) -> bool {
         let Some(arena) = self.arena().map(Arc::clone) else {
             return false;
         };
@@ -326,23 +330,25 @@ impl WalRing {
                 slot as u64,
                 self.ring.next_entry_id,
             );
-            normfs_wal_ring_grow(self.ring.as_mut(), self.ring_id);
+            normfs_wal_ring_retain_page(self.ring.as_mut(), self.ring_id);
         }
         true
     }
 
     /// Gives the top page of this ring's range back to the arena.
     ///
-    /// Returns whether it shrank. The top page must not be the one being
+    /// Nothing is freed: the page stays part of the arena and becomes another
+    /// queue's to take. Returns whether one was released. The top page must not
+    /// be the one being
     /// appended to, the ring never drops below `floor` pages, and — the
     /// durability half — the page must be reusable: nothing pinning it, and
     /// nothing on it below the durable watermark.
     ///
     /// That last check calls `normfs_wal_page_reusable`, whose contract is
     /// `\result != 0 <==> normfs_wal_page_is_reusable(page, m)` and which is
-    /// proven, so the guard *is* the predicate `normfs_wal_ring_shrink`
+    /// proven, so the guard *is* the predicate `normfs_wal_ring_release_page`
     /// requires rather than a Rust restatement of it that could drift.
-    pub fn shrink(&mut self, floor: usize) -> bool {
+    pub fn release_page(&mut self, floor: usize) -> bool {
         let Some(arena) = self.arena().map(Arc::clone) else {
             return false;
         };
@@ -365,7 +371,7 @@ impl WalRing {
             let last = page.last_entry_id;
             self.evicted_below = Some(self.evicted_below.map_or(last, |e| e.max(last)));
         }
-        unsafe { normfs_wal_ring_shrink(self.ring.as_mut(), self.ring_id) };
+        unsafe { normfs_wal_ring_release_page(self.ring.as_mut(), self.ring_id) };
         true
     }
 
@@ -557,7 +563,7 @@ impl WalRing {
         true
     }
 
-    /// The highest id evicted by rotation or shrink since the last call.
+    /// The highest id evicted by rotation or release since the last call.
     pub fn take_evicted(&mut self) -> Option<u64> {
         self.evicted_below.take()
     }
@@ -582,7 +588,7 @@ impl WalRing {
     /// The range keeps its size and its place: this discards contents, not
     /// slots. `normfs_wal_ring_init` unbinds the pool — a ring it builds owns
     /// its pages — so a shared ring is re-bound afterwards, or the next
-    /// `grow`/`shrink` would dereference a null pool.
+    /// `retain_page`/`release_page` would dereference a null pool.
     ///
     /// False when every page is pinned, changing nothing.
     pub fn reinit(&mut self, first_entry_id: u64) -> bool {
@@ -788,9 +794,9 @@ impl WalRing {
 
     /// Number of pages in the ring.
     ///
-    /// Read from the C ring rather than from a `Vec` length: growing and
-    /// shrinking move this, and the descriptor array it indexes into belongs to
-    /// the whole arena rather than to this ring.
+    /// Read from the C ring rather than from a `Vec` length: retaining and
+    /// releasing a page move this, and the descriptor array it indexes into
+    /// belongs to the whole arena rather than to this ring.
     pub fn page_count(&self) -> usize {
         self.ring.page_count
     }
@@ -822,8 +828,8 @@ impl WalRing {
             "page {page_index} is outside this ring"
         );
         // SAFETY: the arena covers page_count * page_size bytes from this base
-        // — for a shared ring that is `normfs_wal_ring_layout`, which grow
-        // re-establishes — and the backing outlives `self`.
+        // — for a shared ring that is `normfs_wal_ring_layout`, which
+        // retain_page re-establishes — and the backing outlives `self`.
         unsafe {
             std::slice::from_raw_parts(
                 self.ring.arena.add(page_index * self.page_size),
