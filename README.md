@@ -63,8 +63,9 @@ rather than the card's: at 1 Hz per stream all three keep up at 100 %, at 2 Hz
 they hold 42 % and at 3 Hz 24 %, while input stays near 2 MB/s and the card
 idles at 20. Compression is the ceiling there, not I/O.
 
-**On the laptop** — MacBook Pro M3 Max, N clients each polling
-`ShiftFromTail(0)` every 1 ms, 500 publishes per point, median of two rounds:
+**On the laptop** — MacBook Pro, Apple M4 Pro (8P + 4E cores, 24 GB), N clients
+each polling `ShiftFromTail(0)` every 1 ms, 500 publishes per point, median of
+two rounds:
 
 | Readers | Read p50 | Read p99 | Publish→last reader p50 | p99 |
 |---------|----------|----------|-------------------------|-----|
