@@ -112,17 +112,21 @@ pub async fn find_file_with_s3(
 ) -> Result<Option<UintN>, LookupError> {
     log::debug!(target: "normfs-lookup", "Finding file for queue '{}', target ID: {}", queue, target_id);
 
-    let (store_first_id, store_last_id, wal_first_id, wal_last_id) = tokio::join!(
+    // WAL before Store: migration writes the Store file before deleting the WAL
+    // one, so this order never misses a file that migrates mid-lookup.
+    let (wal_first_id, wal_last_id) =
+        tokio::join!(wal.get_first_file_id(queue), wal.get_last_file_id(queue));
+
+    let wal_first_id = wal_first_id?;
+    let wal_last_id = wal_last_id?;
+
+    let (store_first_id, store_last_id) = tokio::join!(
         store.get_first_file_id(queue),
-        store.get_last_file_id(queue),
-        wal.get_first_file_id(queue),
-        wal.get_last_file_id(queue)
+        store.get_last_file_id(queue)
     );
 
     let store_first_id = store_first_id?;
     let store_last_id = store_last_id?;
-    let wal_first_id = wal_first_id?;
-    let wal_last_id = wal_last_id?;
 
     log::debug!(target: "normfs-lookup",
         "File IDs for queue '{}' - Store: {:?} to {:?}, WAL: {:?} to {:?}",
