@@ -58,12 +58,17 @@ if(FRAMAC)
     # both LP64, so one model covers them. Naming it still beats the default,
     # which is not the same across Frama-C versions.
 
-    # Per-goal prover budget. The slowest goal here is rotate_to
-    # re-establishing every page's well-formedness after a rotation: tens of
-    # seconds on a fast machine, several times that on a slow one. A budget
-    # sized to the fast machine turns a hardware difference into a failed
-    # proof, so it is set for the slow one.
-    set(NORMFS_WP_TIMEOUT 900 CACHE STRING "Per-goal WP prover timeout, seconds")
+    # Per-goal prover budget, sized from what goals actually take rather than
+    # from what the slowest one used to. With -wp-split-conj the goals are
+    # small: across a full CI run -- seed, store-header, wal-header, wal-entry,
+    # wal-page and wal-pool, some three thousand goals on the slow runner --
+    # the slowest one that closed took 59.7 seconds and none took over sixty.
+    #
+    # So a budget of 900 was fifteen times what any success needs, and the only
+    # thing it bought was fifteen minutes per goal that will never close. Three
+    # minutes keeps three times the headroom over the slowest observed success
+    # and lets the job finish and report instead of being killed at its limit.
+    set(NORMFS_WP_TIMEOUT 180 CACHE STRING "Per-goal WP prover timeout, seconds")
 
     set(NORMFS_WAL_HEADER_WP_FCTS
         normfs_uintn_le64_read
