@@ -301,8 +301,8 @@ void normfs_wal_ring_init(struct normfs_wal_ring *ring,
  * clause -- a free page belongs to nobody and holds nothing anyone is owed.
  */
 
-/* Scheduled with two or three of its 85 goals still open; the reason they are
- * open, and the reason it is scheduled anyway, are in c/CMakeLists.txt.
+/* 83 of this function's 85 goals discharge; why the last two do not, and why
+ * it is out of the WP schedule even so, are in c/CMakeLists.txt.
  * Unlike release_page it carries no durability clause -- a free page belongs to
  * nobody and holds nothing anyone is owed -- so what is unproved is
  * well-formedness, not the theorem. Its callee pool_take is proven, and so is
