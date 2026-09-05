@@ -111,6 +111,18 @@ struct normfs_wal_pool_take_result {
                owner[k] == NORMFS_WAL_POOL_FREE;
     assigns pool->pages, pool->arena, pool->owner, pool->page_count,
             pool->page_size;
+    // normfs_wal_pool_wf one conjunct at a time, and then the predicate itself.
+    // The parts are goals a prover can take on their own; the fold is then
+    // cheap. Stated as well as, never instead of -- dropping the whole would
+    // weaken what the ring's in_pool is built from.
+    ensures \valid(pool);
+    ensures \valid(pool->pages + (0 .. pool->page_count - 1));
+    ensures \valid(pool->owner + (0 .. pool->page_count - 1));
+    ensures \forall integer k; 0 <= k < pool->page_count ==>
+              normfs_wal_page_wf(&pool->pages[k]) &&
+              pool->pages[k].cap == pool->page_size;
+    ensures normfs_wal_pool_layout(pool);
+    ensures normfs_wal_pool_sep(pool);
     ensures normfs_wal_pool_wf(pool);
     ensures \forall integer k; 0 <= k < page_count ==>
               pool->owner[k] == NORMFS_WAL_POOL_FREE;
@@ -134,6 +146,18 @@ normfs_wal_pool_find_free(struct normfs_wal_pool *pool, uint64_t ring_id);
     requires ring_id != NORMFS_WAL_POOL_FREE;
     requires pool->owner[index] == NORMFS_WAL_POOL_FREE;
     assigns pool->owner[index];
+    // normfs_wal_pool_wf one conjunct at a time, and then the predicate itself.
+    // The parts are goals a prover can take on their own; the fold is then
+    // cheap. Stated as well as, never instead of -- dropping the whole would
+    // weaken what the ring's in_pool is built from.
+    ensures \valid(pool);
+    ensures \valid(pool->pages + (0 .. pool->page_count - 1));
+    ensures \valid(pool->owner + (0 .. pool->page_count - 1));
+    ensures \forall integer k; 0 <= k < pool->page_count ==>
+              normfs_wal_page_wf(&pool->pages[k]) &&
+              pool->pages[k].cap == pool->page_size;
+    ensures normfs_wal_pool_layout(pool);
+    ensures normfs_wal_pool_sep(pool);
     ensures normfs_wal_pool_wf(pool);
     ensures normfs_wal_pool_owns(pool, index, ring_id);
     ensures \forall integer k; 0 <= k < pool->page_count && k != index ==>
@@ -155,6 +179,18 @@ void normfs_wal_pool_take(struct normfs_wal_pool *pool, size_t index,
     // the same predicate again at its own point of use.
     requires normfs_wal_page_is_reusable(&pool->pages[index], min_essential_id);
     assigns pool->owner[index];
+    // normfs_wal_pool_wf one conjunct at a time, and then the predicate itself.
+    // The parts are goals a prover can take on their own; the fold is then
+    // cheap. Stated as well as, never instead of -- dropping the whole would
+    // weaken what the ring's in_pool is built from.
+    ensures \valid(pool);
+    ensures \valid(pool->pages + (0 .. pool->page_count - 1));
+    ensures \valid(pool->owner + (0 .. pool->page_count - 1));
+    ensures \forall integer k; 0 <= k < pool->page_count ==>
+              normfs_wal_page_wf(&pool->pages[k]) &&
+              pool->pages[k].cap == pool->page_size;
+    ensures normfs_wal_pool_layout(pool);
+    ensures normfs_wal_pool_sep(pool);
     ensures normfs_wal_pool_wf(pool);
     ensures pool->owner[index] == NORMFS_WAL_POOL_FREE;
     ensures \forall integer k; 0 <= k < pool->page_count && k != index ==>
