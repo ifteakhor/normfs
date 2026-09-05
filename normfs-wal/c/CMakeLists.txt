@@ -98,57 +98,23 @@ if(FRAMAC)
         normfs_wal_page_unpin
         normfs_wal_page_reusable)
 
-    # try_append is verified. Carrying every other page's offsets_wf across a
-    # write to one page's bytes is a frame under two quantifiers at once, which
-    # the provers do not take in that form. What they do take is the same fact
-    # at the locations offsets_wf reads, buf + cap - 4 * (i + 1), and the
-    # frame's conclusion as an equality between the two states. The body says
-    # both once, at a single merge point, which is why it has one exit.
+    # rotate_to, release_page and skip_entry are here because the durability
+    # theorem is stated on them and an unscheduled function generates no
+    # obligation anywhere: rotate_to is the one place a page's contents are
+    # discarded, release_page the one place a page crosses to another queue,
+    # and skip_entry the one place the id sequence moves without a record
+    # behind it.
     #
-    # rotate_to is verified. It is the one place a page's contents are
-    # discarded, so the durability theorem is its precondition -- and an
-    # unscheduled function generates no obligation anywhere, which is why
-    # having it here is the difference between that theorem being a
-    # specification and being a verdict.
-    #
-    # release_page is here for the same reason. A page moving between queues is
-    # the other way a record can leave the queue that accepted it, and
-    # release_page is where the durability theorem stands at that boundary, so
-    # leaving it unscheduled would make that clause a comment.
-    #
-    # skip_entry likewise. It is the one place the id sequence moves without a
-    # record behind it, and its ensures is what says no page's bytes move with
-    # it -- unscheduled, that would be a comment rather than a check.
-    #
-    # retain_page is excluded, and the reason is arithmetic rather than
-    # principle. 83 of its 85 goals discharge, but at 900s a goal that never
-    # closes costs half an hour across two provers, and the ones here that do
-    # not close outlast the job's whole budget on their own. Left scheduled it
-    # does not get itself checked -- it stops verify-wal-ring from finishing at
-    # all, so the other eight functions go unchecked with it. Excluding it buys
-    # eight verdicts today instead of one promise.
-    #
-    # The assertions stay in the body: they are what the remaining goals will
-    # be closed from, and adding the function back to this list is how to see
-    # where they stand. It carries no durability clause -- a free page belongs to nobody and holds
-    # nothing anyone is owed -- so what is unproved is well-formedness, not the
-    # theorem.
-    #
-    # That step is narrowing a \separated from the pool's whole arena to the
-    # slice this ring holds. It is the encoding and not the
-    # argument -- both provers answer "unknown" in milliseconds rather than
-    # time out, and the same narrowing against a single object rather than a
-    # range does go through. Range narrowing, pointwise membership, a
-    # per-element form, a ghost offset and \subset were each tried.
-    #
-    # What moved it from unscheduled to 83 of 85 is the unfold_* assertions at
-    # the top of the body: in_pool and pool_wf reach the prover as opaque
-    # atoms, so a separation stated inside them is not a hypothesis until an
-    # assertion asks for it.
-    #
-    # Until it is back in this list it is the WalRing Rust tests that stand behind
-    # it. Its callee pool_take is proven, and so is release_page, which is the
-    # direction that can lose a record.
+    # retain_page is excluded. It carries no durability clause -- a free page
+    # belongs to nobody and holds nothing anyone is owed -- so what is unproved
+    # is well-formedness, not the theorem. Its open goals are all one step:
+    # narrowing a \separated from the pool's whole arena to the slice one ring
+    # holds, which the provers reject outright rather than time out on. At
+    # NORMFS_WP_TIMEOUT per goal and two provers each, a handful of those
+    # outlasts the CI job's budget and takes every other function's verdict
+    # with it. Its callee pool_take is proven, and the WalRing Rust tests cover
+    # it; adding it back to this list is how to see where the proof stands.
+
     set(NORMFS_WAL_RING_WP_FCTS
         normfs_wal_ring_init
         normfs_wal_ring_try_append

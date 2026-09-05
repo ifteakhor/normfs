@@ -125,8 +125,7 @@ const STALL_WARN_AFTER: Duration = Duration::from_secs(5);
 /// what is wrong.
 const STALL_REPORT_EVERY: Duration = Duration::from_secs(30);
 
-/// What the pool remembers between wait passes so it can report a stall once
-/// rather than once per append.
+/// What the pool remembers between wait passes.
 #[derive(Default)]
 struct Stall {
     /// When the current stall began, or `None` if the pool is not stalled.
@@ -535,9 +534,8 @@ pub struct PagePool {
     /// reach disk, which serialises the queue against the disk rather than
     /// merely bounding it.
     floor: usize,
-    /// Stall bookkeeping, so a queue out of pages says so once rather than on
-    /// every append. Never held across `inner`: it is taken, a decision is
-    /// read out of it, and released before anything else is locked.
+    /// Never held across `inner`: it is taken, a decision is read out of it,
+    /// and released before anything else is locked.
     stall: Mutex<Stall>,
 }
 

@@ -61,9 +61,8 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	                 ring->pool->pages + (0 .. ring->pool->page_count - 1)); */
 
 	/* The write at the end lands on one field of the ring, and narrowing a
-	 * separation to a field is not automatic. Stated here rather than beside
-	 * the write, where the context is the whole body and it stops going
-	 * through. */
+	 * separation to a field is not automatic. Stated here, where the context
+	 * is still small, rather than beside the write. */
 	/*@ assert count_bump_vs_pool_pages:
 	      \separated(&ring->page_count,
 	                 ring->pool->pages + (0 .. ring->pool->page_count - 1)); */
@@ -127,11 +126,11 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	normfs_wal_pool_take(ring->pool, ring->first_slot + ring->page_count,
 	    ring_id);
 
-	/* Read off pool_take's postcondition, not carried across the write:
-	 * pool_wf already says every page of the pool is well-formed, and this
-	 * ring's pages are the pool's shifted by first_slot. Reproving it by
-	 * frame is the nested-quantifier problem this function was excluded
-	 * for -- page_wf reads the offset table four bytes per entry. */
+	/* Read off pool_take's postcondition rather than carried across the
+	 * write: pool_wf already says every page of the pool is well-formed, and
+	 * this ring's pages are the pool's shifted by first_slot. Reproving it by
+	 * frame means placing every byte of every offset table outside the slot
+	 * written, under two quantifiers at once. */
 	/*@ assert pages_are_pool_pages:
 	      \forall integer k; 0 <= k <= ring->page_count ==>
 	        &ring->pages[k] == &ring->pool->pages[ring->first_slot + k]; */

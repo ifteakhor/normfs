@@ -30,6 +30,23 @@ normfs_wal_pool_init(struct normfs_wal_pool *pool, struct normfs_wal_page *pages
 	/*@ assert wf_final: normfs_wal_pool_wf(pool); */
 }
 
+/*
+ * Ownership moves through one write to owner[index], and the assertions in
+ * take and give_back are what lets the frame carry pool_wf across it. Four
+ * facts the provers do not reach on their own:
+ *
+ *   - pool_wf arrives as an opaque atom, so the separations stated inside it
+ *     are not hypotheses until an assertion names them;
+ *   - a separation narrowed to a single array element, and to the four bytes
+ *     offsets_wf reads per entry, which is the shape the frame uses;
+ *   - page k's bytes lie inside the arena by monotonicity of multiplication on
+ *     the left factor, which is nonlinear;
+ *   - the frame's conclusion as an equality between the two states, so page_wf
+ *     follows by rewriting rather than by being reproved.
+ *
+ * give_back repeats the same shape; the reasons are not repeated with it.
+ */
+
 struct normfs_wal_pool_take_result
 normfs_wal_pool_find_free(struct normfs_wal_pool *pool, uint64_t ring_id)
 {
@@ -144,9 +161,6 @@ normfs_wal_pool_give_back(struct normfs_wal_pool *pool, size_t index,
 	(void)ring_id;
 	(void)min_essential_id;
 
-	/* pool_wf reaches the prover as an opaque atom: the separations stated
-	 * inside it are not hypotheses until an assertion asks for one, and every
-	 * fact needed to re-establish it after the write below is one of them. */
 	/*@ assert unfold_pool_vs_owner:
 	      \separated(pool, pool->owner + (0 .. pool->page_count - 1)); */
 	/*@ assert unfold_pool_vs_pages:
@@ -166,8 +180,6 @@ normfs_wal_pool_give_back(struct normfs_wal_pool *pool, size_t index,
 	                 pool->arena +
 	                   (0 .. pool->page_count * pool->page_size - 1)); */
 
-	/* The write lands on one element of the owner array, and narrowing a
-	 * separation to a single element is a step WP does not take on its own. */
 	/*@ assert slot_vs_pool: \separated(&pool->owner[index], pool); */
 	/*@ assert slot_vs_pages:
 	      \separated(&pool->owner[index],
@@ -179,14 +191,6 @@ normfs_wal_pool_give_back(struct normfs_wal_pool *pool, size_t index,
 	/*@ assert slot_vs_each_page:
 	      \forall integer k; 0 <= k < pool->page_count ==>
 	        \separated(&pool->owner[index], &pool->pages[k]); */
-	/* Page by page, then at the four bytes offsets_wf reads per entry, which
-	 * is the form the frame uses: given only the page-wide range, WP has to
-	 * place each read inside it while already under offsets_wf's own
-	 * quantifier over entries. */
-	/* Page k's bytes are [k * page_size, (k + 1) * page_size), and the
-	 * separation above is against the whole arena, so placing one page inside
-	 * it is monotonicity of multiplication on the left factor -- nonlinear,
-	 * and not derived from the inequality on its own. */
 	/*@ assert page_bytes_inside_arena:
 	      \forall integer k; 0 <= k < pool->page_count ==>
 	        (k + 1) * pool->page_size <=
@@ -204,9 +208,6 @@ normfs_wal_pool_give_back(struct normfs_wal_pool *pool, size_t index,
 
 	pool->owner[index] = NORMFS_WAL_POOL_FREE;
 
-	/* The frame's conclusion as an equality between the two states, which the
-	 * separations above feed directly; page_wf then follows by rewriting
-	 * rather than by being reproved. */
 	/*@ assert offsets_unchanged:
 	      \forall integer k, i;
 	        0 <= k < pool->page_count && 0 <= i < pool->pages[k].count ==>
