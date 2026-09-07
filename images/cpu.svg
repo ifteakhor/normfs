@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+<rect width="1200" height="640" fill="#FFFFFF"/>
+<text x="88" y="62" font-size="34" font-weight="700" fill="#1f2328">The CPU bill, before and after</text>
+<text x="88" y="92" font-size="14.5" fill="#3A424F">20 M records of 80 B written to a fully settled state - medians of repeated rounds, order rotated</text>
+<text x="88" y="113" font-size="14.5" fill="#626B7A">dev = norma-core/dev 5e4a34f | branch = feat/v1-page-pool 952beb3 - wall time: x86 18.8 s vs 14.0 s, Pi 5 within dev variance</text>
+<path d="M 92 146 L 118 146 L 105 172 Z" fill="#1f2328"/>
+<text x="132" y="170" font-size="27" font-weight="700" letter-spacing="1.5" fill="#1f2328">LESS IS BETTER</text>
+<text x="410" y="169" font-size="16" fill="#626B7A">the shorter bar wins, in every panel</text>
+<rect x="850" y="155" width="15" height="15" rx="2" fill="#D0453B"/>
+<text x="872" y="168" font-size="15" font-weight="600" fill="#3A424F">dev</text>
+<rect x="943" y="155" width="15" height="15" rx="2" fill="#1F5FBF"/>
+<text x="965" y="168" font-size="15" font-weight="600" fill="#3A424F">branch</text>
+<text x="88" y="242" font-size="15.5" font-weight="700" fill="#1f2328">CPU for the job, x86</text>
+<text x="88" y="261" font-size="11.5" fill="#626B7A">cpu-seconds - 20M records to settled</text>
+<rect x="114" y="290.0" width="66" height="210.0" rx="3" fill="#D0453B"/>
+<text x="147.0" y="281.0" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">34.8</text>
+<text x="147.0" y="519" font-size="12.5" text-anchor="middle" fill="#626B7A">dev</text>
+<rect x="222" y="317.8" width="66" height="182.2" rx="3" fill="#1F5FBF"/>
+<text x="255.0" y="308.8" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">30.2</text>
+<text x="255.0" y="519" font-size="12.5" text-anchor="middle" fill="#626B7A">branch</text>
+<line x1="88" y1="500" x2="314" y2="500" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="88" y="542" font-size="12" fill="#626B7A" font-style="italic">one lock and one copy fewer per record</text>
+<text x="360" y="242" font-size="15.5" font-weight="700" fill="#1f2328">CPU for the job, Pi 5</text>
+<text x="360" y="261" font-size="11.5" fill="#626B7A">cpu-seconds</text>
+<rect x="386" y="290.0" width="66" height="210.0" rx="3" fill="#D0453B"/>
+<text x="419.0" y="281.0" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">49.7</text>
+<text x="419.0" y="519" font-size="12.5" text-anchor="middle" fill="#626B7A">dev</text>
+<rect x="494" y="290.4" width="66" height="209.6" rx="3" fill="#1F5FBF"/>
+<text x="527.0" y="281.4" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">49.6</text>
+<text x="527.0" y="519" font-size="12.5" text-anchor="middle" fill="#626B7A">branch</text>
+<line x1="360" y1="500" x2="586" y2="500" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="360" y="542" font-size="12" fill="#626B7A" font-style="italic">dev's other round burned 83; the branch repeats</text>
+<text x="632" y="242" font-size="15.5" font-weight="700" fill="#1f2328">Idle, x86</text>
+<text x="632" y="261" font-size="11.5" fill="#626B7A">% of one core - 100 queues, 1 min</text>
+<rect x="658" y="290.0" width="66" height="210.0" rx="3" fill="#D0453B"/>
+<text x="691.0" y="281.0" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">6.2</text>
+<text x="691.0" y="519" font-size="12.5" text-anchor="middle" fill="#626B7A">dev</text>
+<rect x="766" y="293.4" width="66" height="206.6" rx="3" fill="#1F5FBF"/>
+<text x="799.0" y="284.4" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">6.1</text>
+<text x="799.0" y="519" font-size="12.5" text-anchor="middle" fill="#626B7A">branch</text>
+<line x1="632" y1="500" x2="858" y2="500" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="632" y="542" font-size="12" fill="#626B7A" font-style="italic">the 50 ms flush tick, unchanged</text>
+<text x="904" y="242" font-size="15.5" font-weight="700" fill="#1f2328">Idle, Pi 5</text>
+<text x="904" y="261" font-size="11.5" fill="#626B7A">% of one core</text>
+<rect x="930" y="290.0" width="66" height="210.0" rx="3" fill="#D0453B"/>
+<text x="963.0" y="281.0" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">1.07</text>
+<text x="963.0" y="519" font-size="12.5" text-anchor="middle" fill="#626B7A">dev</text>
+<rect x="1038" y="307.7" width="66" height="192.3" rx="3" fill="#1F5FBF"/>
+<text x="1071.0" y="298.7" font-size="15" font-weight="700" text-anchor="middle" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" fill="#1f2328">0.98</text>
+<text x="1071.0" y="519" font-size="12.5" text-anchor="middle" fill="#626B7A">branch</text>
+<line x1="904" y1="500" x2="1130" y2="500" stroke="#C3CAD4" stroke-width="1.5"/>
+<text x="904" y="542" font-size="12" fill="#626B7A" font-style="italic">the same tick on slower cores</text>
+<line x1="88" y1="578" x2="1112" y2="578" stroke="#DFE3E9" stroke-width="1"/>
+<text x="88" y="600" font-size="12.5" fill="#626B7A">On x86 the branch now spends 13% less CPU for the same job: user time drops (a record is no longer copied into the writer buffer, and the handover is marked</text>
+<text x="88" y="618" font-size="12.5" fill="#626B7A">once per batch, not once per record), sys rises a little from finer writes. The Pi is disk-bound, so CPU matches there. Idle cost is the flush timer on both sides.</text>
+</svg>

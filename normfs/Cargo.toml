@@ -15,12 +15,12 @@ websocket = ["fastwebsockets", "hyper", "hyper-util", "http-body-util"]
 server-bin = ["clap", "env_logger"]
 
 [dependencies]
-uintn = { version = "0.2.0-beta.3", path = "../uintn-rs" }
-normfs-types = { version = "0.2.0-beta.3", path = "../normfs-types" }
-normfs-wal = { version = "0.2.0-beta.3", path = "../normfs-wal" }
-normfs-store = { version = "0.2.0-beta.3", path = "../normfs-store" }
-normfs-cloud = { version = "0.2.0-beta.3", path = "../normfs-cloud" }
-normfs-crypto = { version = "0.2.0-beta.3", path = "../normfs-crypto" }
+uintn = { version = "0.3.0", path = "../uintn-rs" }
+normfs-types = { version = "0.3.0", path = "../normfs-types" }
+normfs-wal = { version = "0.3.0", path = "../normfs-wal" }
+normfs-store = { version = "0.3.0", path = "../normfs-store" }
+normfs-cloud = { version = "0.3.0", path = "../normfs-cloud" }
+normfs-crypto = { version = "0.3.0", path = "../normfs-crypto" }
 tokio = { workspace = true }
 bytes = { workspace = true }
 prost = { workspace = true }
@@ -40,6 +40,10 @@ hyper-util = { version = "0.1.6", optional = true, features = ["full"] }
 http-body-util = { version = "0.1", optional = true }
 
 [dev-dependencies]
+# A dependency above already; repeated only to turn on the test seam.
+normfs-wal = { version = "0.3.0", path = "../normfs-wal", features = [
+    "fault-injection",
+] }
 tempfile = { workspace = true }
 env_logger = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio"] }
@@ -77,3 +81,23 @@ harness = false
 name = "normfs-server"
 path = "src/bin/normfs-server.rs"
 required-features = ["server-bin"]
+
+[[bench]]
+name = "slow_reader_benchmark"
+harness = false
+
+[[bench]]
+name = "multi_queue_benchmark"
+harness = false
+
+[[bench]]
+name = "idle_cpu"
+harness = false
+
+[[bench]]
+name = "record_size_bench"
+harness = false
+
+[[bench]]
+name = "listeners_bench"
+harness = false

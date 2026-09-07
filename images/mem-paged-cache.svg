@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+<rect width="1200" height="630" fill="#ffffff"/>
+<text x="96" y="76" font-size="38" font-weight="700" fill="#1f2328">A paged cache: faster, and holds more per gigabyte</text>
+<text x="96" y="118" font-size="21" fill="#59636e">20 M records of 80 B, nothing acked &#8212; relative to dev, taller is better</text>
+<rect x="96" y="146" width="16" height="16" rx="3" fill="#1f77b4"/>
+<text x="122" y="160" font-size="19" font-weight="600" fill="#1f2328">this PR &#183; paged ring</text>
+<rect x="336" y="146" width="16" height="16" rx="3" fill="#d62728"/>
+<text x="362" y="160" font-size="19" fill="#59636e">dev &#183; flat Vec</text>
+<line x1="96" y1="522.0" x2="1144" y2="522.0" stroke="#eaeef2" stroke-width="1"/>
+<text x="82" y="529.0" font-size="17" fill="#59636e" text-anchor="end">0.0x</text>
+<line x1="96" y1="427.5" x2="1144" y2="427.5" stroke="#eaeef2" stroke-width="1"/>
+<text x="82" y="434.5" font-size="17" fill="#59636e" text-anchor="end">0.5x</text>
+<line x1="96" y1="332.9" x2="1144" y2="332.9" stroke="#eaeef2" stroke-width="1"/>
+<text x="82" y="339.9" font-size="17" fill="#59636e" text-anchor="end">1.0x</text>
+<line x1="96" y1="238.4" x2="1144" y2="238.4" stroke="#eaeef2" stroke-width="1"/>
+<text x="82" y="245.4" font-size="17" fill="#59636e" text-anchor="end">1.5x</text>
+<rect x="300.0" y="280.8" width="90.0" height="241.2" rx="3" fill="#1f77b4"/>
+<text x="345.0" y="266.8" font-size="20" font-weight="700" fill="#1f2328" text-anchor="middle">514 MB/s</text>
+<rect x="406.0" y="332.9" width="90.0" height="189.1" rx="3" fill="#d62728"/>
+<text x="451.0" y="318.9" font-size="20" font-weight="400" fill="#1f2328" text-anchor="middle">403 MB/s</text>
+<text x="353.0" y="558.0" font-size="23" font-weight="600" fill="#1f2328" text-anchor="middle">Write speed</text>
+<text x="353.0" y="590.0" font-size="27" font-weight="700" fill="#1f77b4" text-anchor="middle">1.28x</text>
+<rect x="700.0" y="295.9" width="90.0" height="226.1" rx="3" fill="#1f77b4"/>
+<text x="745.0" y="281.9" font-size="20" font-weight="700" fill="#1f2328" text-anchor="middle">11.9 M</text>
+<rect x="806.0" y="332.9" width="90.0" height="189.1" rx="3" fill="#d62728"/>
+<text x="851.0" y="318.9" font-size="20" font-weight="400" fill="#1f2328" text-anchor="middle">9.95 M</text>
+<text x="753.0" y="558.0" font-size="23" font-weight="600" fill="#1f2328" text-anchor="middle">Records per GiB</text>
+<text x="753.0" y="590.0" font-size="27" font-weight="700" fill="#1f77b4" text-anchor="middle">1.20x</text>
+<line x1="96" y1="522" x2="1144" y2="522" stroke="#d0d7de" stroke-width="2"/>
+</svg>

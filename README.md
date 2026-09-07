@@ -8,32 +8,28 @@ Storage engine with automatic data lifecycle management across memory, disk, and
 
 ## 📊 Latency
 
-![Fanout Scaling](images/fanout-scaling.jpg)
+![TCP fanout latency](images/fanout-latency.png)
 
-**Fanout Latency**: Time for a message to propagate from write to all N concurrent subscribers over TCP. Measures the server's ability to efficiently distribute messages to multiple clients simultaneously - critical for real-time multi-sensor coordination in robotics and distributed systems.
-
-**TCP Fanout Benchmarks** (1KB message):
-
-| Clients | P50 | P95 | P99 |
-|---------|-----|-----|-----|
-| 1 | 49µs | 65µs | 88µs |
-| 2 | 59µs | 78µs | 97µs |
-| 4 | 81µs | 109µs | 145µs |
-| 8 | 146µs | 183µs | 224µs |
-| 16 | 243µs | 305µs | 347µs |
-| 32 | 357µs | 436µs | 508µs |
-| 64 | 549µs | 656µs | 809µs |
-| 128 | 956µs | 1.1ms | 1.5ms |
-| 256 | 1.8ms | 2.0ms | 3.0ms |
-| 512 | 3.7ms | 5.0ms | 6.5ms |
-| 1024 | 7.0ms | 8.2ms | 19ms |
-| 2048 | 15.0ms | 17.9ms | 37.1ms |
-| 4096 | 35.9ms | 40.3ms | 78.5ms |
-| 8192 | 792ms | 1.08s | 1.26s |
-
-*Benchmarked on Apple M3 Max MacBook Pro. Embedded library performance is significantly faster.*
+Time until *all* N subscribers have a 1 KB message over TCP — the number that
+matters for multi-sensor coordination, where one late subscriber is a late
+system. Straight on log-log axes means a power law: past roughly 64 subscribers
+the fan-out itself is the cost, not the store.
 
 📈 **[Full TCP benchmarks →](normfs_go/bench/README.md)**
+
+## 📈 Throughput and Readers
+
+![Device throughput and reader cost](images/device-and-readers.png)
+
+Two machines. On a rover-alpha board writing to a class-10 SD card with zstd and
+AES-GCM, records of 8 KiB and up put 17–22 MB/s on the card — the card itself
+does 18–20 MB/s under `dd`, so the engine runs the medium at its limit. Replay
+three camera streams faster than real time and the board's CPU gives out long
+before the card does.
+
+On an M4 Pro, an individual tail read stays flat from 1 to 4000 concurrent
+readers, because a read is a page lookup and the page is borrowed rather than
+copied. Propagation is flat to 1000 readers and then the fan-out starts to cost.
 
 ## ✨ Features
 
@@ -148,10 +144,11 @@ without it is not supported and faults rather than falling back.
 
 ## 📊 Status
 
-**v0.2.0-beta.3** - Active development, API may change before 1.0
+**v0.3.0** - Active development, API may change before 1.0
 
 WAL files written by 0.1 are read by 0.2 unchanged. 0.2 writes a smaller entry
-format that 0.1 cannot read, so a downgrade needs the queue drained first.
+format that 0.1 cannot read, so a downgrade needs the queue drained first. 0.3
+writes the same format as 0.2 and needs no migration in either direction.
 
 ## 📄 License
 

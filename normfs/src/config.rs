@@ -13,11 +13,22 @@ impl Default for PersistenceMode {
     }
 }
 
+/// Which arena a queue draws pages from. The pool sets the page size, and
+/// with it the idle 2-page floor and the widest record the queue accepts.
+/// Passive by default: wide records are for queues somebody names in a rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoolKind {
+    Active,
+    #[default]
+    Passive,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct QueueConfig {
     pub compression_type: CompressionType,
     pub enable_fsync: bool,
     pub encryption_type: EncryptionType,
+    pub pool: PoolKind,
 }
 
 impl Default for QueueConfig {
@@ -26,6 +37,16 @@ impl Default for QueueConfig {
             compression_type: CompressionType::Zstd,
             enable_fsync: true,
             encryption_type: EncryptionType::Aes,
+            pool: PoolKind::default(),
+        }
+    }
+}
+
+impl QueueConfig {
+    pub fn active() -> Self {
+        Self {
+            pool: PoolKind::Active,
+            ..Self::default()
         }
     }
 }
@@ -61,6 +82,13 @@ impl QueueSettings {
             }
         }
         self.default_config
+    }
+
+    pub fn all_active() -> Self {
+        Self {
+            rules: Vec::new(),
+            default_config: QueueConfig::active(),
+        }
     }
 }
 

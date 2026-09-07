@@ -56,6 +56,10 @@ pub struct BenchConfig {
     /// `None` disables the cap, so nothing offloads to the store.
     pub max_queue_bytes: Option<u64>,
     pub wal_file_bytes: usize,
+    /// Memory page size, which is both the record cap and the granularity a
+    /// WAL file ends at. Part of the dataset signature for that second reason:
+    /// two runs at different page sizes do not produce comparable files.
+    pub mem_page_size: usize,
 }
 
 impl BenchConfig {
@@ -68,6 +72,7 @@ impl BenchConfig {
             encryption: EncryptionType::None,
             max_queue_bytes: None,
             wal_file_bytes: WAL_FILE_BYTES,
+            mem_page_size: NormFsSettings::all_active().mem_page_size,
         }
     }
 
@@ -82,10 +87,12 @@ impl BenchConfig {
             compression_type: self.compression,
             enable_fsync: true,
             encryption_type: self.encryption,
+            ..QueueConfig::active()
         };
 
         NormFsSettings {
             max_disk_usage_per_queue: self.max_queue_bytes,
+            mem_page_size: self.mem_page_size,
             wal_settings: WalSettings {
                 max_file_size: self.wal_file_bytes,
                 ..Default::default()
@@ -123,6 +130,11 @@ impl BenchConfig {
             "WAL file size: {:.0} MiB",
             self.wal_file_bytes as f64 / (1024.0 * 1024.0)
         );
+        println!(
+            "Memory page size: {} KiB (largest record {} B)",
+            self.mem_page_size / 1024,
+            normfs_wal::max_record_len(self.mem_page_size)
+        );
         println!("Data directory: {}", self.dir.display());
         println!();
     }
@@ -131,13 +143,15 @@ impl BenchConfig {
     /// rejected rather than silently measured.
     fn signature(&self) -> String {
         format!(
-            "blocks={} block_size={} compression={:?} encryption={:?} max_queue={:?} wal_file={}\n",
+            "blocks={} block_size={} compression={:?} encryption={:?} max_queue={:?} wal_file={} \
+             page={}\n",
             self.total_blocks,
             self.block_size,
             self.compression,
             self.encryption,
             self.max_queue_bytes,
-            self.wal_file_bytes
+            self.wal_file_bytes,
+            self.mem_page_size
         )
     }
 
@@ -198,4 +212,27 @@ pub fn dir_size(dir: &std::path::Path) -> u64 {
         }
     }
     total
+}
+
+/// Unmigrated WAL files under `dir`, and their bytes: work the run has not finished.
+pub fn wal_backlog(dir: &std::path::Path) -> (usize, u64) {
+    let mut files = 0;
+    let mut bytes = 0;
+    fn walk(dir: &std::path::Path, files: &mut usize, bytes: &mut u64) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                match e.file_type() {
+                    Ok(t) if t.is_dir() => walk(&p, files, bytes),
+                    Ok(_) if p.extension().is_some_and(|x| x == "wal") => {
+                        *files += 1;
+                        *bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    walk(dir, &mut files, &mut bytes);
+    (files, bytes)
 }

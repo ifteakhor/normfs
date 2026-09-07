@@ -15,7 +15,7 @@ fn subscribe_latency_benchmark(c: &mut Criterion) {
             rt.block_on(async {
                 let temp_dir = tempdir().unwrap();
                 let path = temp_dir.path().to_path_buf();
-                let settings = NormFsSettings::default();
+                let settings = NormFsSettings::all_active();
                 let normfs = Arc::new(NormFS::new(path, settings).await.unwrap());
                 let queue_name = normfs.resolve("test_queue");
                 normfs
@@ -46,7 +46,10 @@ fn subscribe_latency_benchmark(c: &mut Criterion) {
                     tokio::time::sleep(Duration::from_millis(10)).await;
 
                     let start_time = Instant::now();
-                    normfs.enqueue(&queue_name, Bytes::from("hello")).unwrap();
+                    normfs
+                        .enqueue(&queue_name, Bytes::from("hello"))
+                        .await
+                        .unwrap();
 
                     if let Some(_entry) = rx.recv().await {
                         let end_time = Instant::now();

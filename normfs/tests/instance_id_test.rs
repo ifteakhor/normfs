@@ -9,7 +9,7 @@ async fn test_instance_id_persists_across_restarts() {
     let temp_path = temp_dir.path().to_path_buf();
 
     // Create first NormFS instance
-    let normfs1 = NormFS::new(temp_path.clone(), NormFsSettings::default())
+    let normfs1 = NormFS::new(temp_path.clone(), NormFsSettings::all_active())
         .await
         .unwrap();
     let instance_id_1 = normfs1.get_instance_id().to_string();
@@ -17,7 +17,7 @@ async fn test_instance_id_persists_across_restarts() {
     normfs1.close().await.unwrap();
 
     // Create second NormFS instance with same path
-    let normfs2 = NormFS::new(temp_path.clone(), NormFsSettings::default())
+    let normfs2 = NormFS::new(temp_path.clone(), NormFsSettings::all_active())
         .await
         .unwrap();
     let instance_id_2 = normfs2.get_instance_id().to_string();
@@ -37,7 +37,7 @@ async fn test_queue_paths_use_instance_id() {
     let temp_path = temp_dir.path().to_path_buf();
 
     // Create NormFS and write some data
-    let normfs = NormFS::new(temp_path.clone(), NormFsSettings::default())
+    let normfs = NormFS::new(temp_path.clone(), NormFsSettings::all_active())
         .await
         .unwrap();
     let instance_id = normfs.get_instance_id().to_string();
@@ -50,7 +50,10 @@ async fn test_queue_paths_use_instance_id() {
         .unwrap();
 
     // Write an entry
-    normfs.enqueue(&queue_id, Bytes::from("test data")).unwrap();
+    normfs
+        .enqueue(&queue_id, Bytes::from("test data"))
+        .await
+        .unwrap();
     normfs.close().await.unwrap();
 
     // Verify the WAL file was created in the correct path structure: instance_id/queue_name/wal/
@@ -93,7 +96,7 @@ async fn test_queue_data_readable_after_restart() {
 
     // First session: write data
     {
-        let normfs = NormFS::new(temp_path.clone(), NormFsSettings::default())
+        let normfs = NormFS::new(temp_path.clone(), NormFsSettings::all_active())
             .await
             .unwrap();
         let queue_id = normfs.resolve("persistent-queue");
@@ -106,7 +109,7 @@ async fn test_queue_data_readable_after_restart() {
         // Write 10 entries
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            normfs.enqueue(&queue_id, data).unwrap();
+            normfs.enqueue(&queue_id, data).await.unwrap();
         }
 
         normfs.close().await.unwrap();
@@ -114,7 +117,7 @@ async fn test_queue_data_readable_after_restart() {
 
     // Second session: read data back
     {
-        let normfs = NormFS::new(temp_path.clone(), NormFsSettings::default())
+        let normfs = NormFS::new(temp_path.clone(), NormFsSettings::all_active())
             .await
             .unwrap();
         let queue_id = normfs.resolve("persistent-queue");

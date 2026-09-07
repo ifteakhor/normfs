@@ -21,6 +21,12 @@
  */
 
 /*@ axiomatic NormfsUintnLe {
+      logic integer normfs_uintn_le32_logic{L}(uint8_t *p) =
+        p[0] +
+        256 * p[1] +
+        65536 * p[2] +
+        16777216 * p[3];
+
       logic integer normfs_uintn_le64_logic{L}(uint8_t *p) =
         p[0] +
         256 * p[1] +
@@ -100,6 +106,49 @@ normfs_uintn_le64_write(uint8_t *p, uint64_t value)
 	p[5] = (uint8_t)b5;
 	p[6] = (uint8_t)b6;
 	p[7] = (uint8_t)b7;
+}
+
+/*@ requires \valid_read(p + (0 .. 3));
+    assigns \nothing;
+    ensures \result == normfs_uintn_le32_logic(p);
+*/
+NORMFS_UINTN_LE_INLINE uint32_t
+normfs_uintn_le32_read(const uint8_t *p)
+{
+	return (uint32_t)p[0] +
+	    (uint32_t)p[1] * 256u +
+	    (uint32_t)p[2] * 65536u +
+	    (uint32_t)p[3] * 16777216u;
+}
+
+/*@ requires \valid(p + (0 .. 3));
+    assigns p[0 .. 3];
+    ensures normfs_uintn_le32_logic(p) == value;
+    ensures p[0] == (uint8_t)(value % 256);
+    ensures p[1] == (uint8_t)((value / 256) % 256);
+    ensures p[2] == (uint8_t)((value / 65536) % 256);
+    ensures p[3] == (uint8_t)(value / 16777216);
+*/
+NORMFS_UINTN_LE_INLINE void
+normfs_uintn_le32_write(uint8_t *p, uint32_t value)
+{
+	uint32_t b0 = value % 256u;
+	uint32_t r0 = value / 256u;
+	uint32_t b1 = r0 % 256u;
+	uint32_t r1 = r0 / 256u;
+	uint32_t b2 = r1 % 256u;
+	uint32_t b3 = r1 / 256u;
+
+	/*@ assert value == b0 + 256 * r0; */
+	/*@ assert r0 == b1 + 256 * r1; */
+	/*@ assert r1 == b2 + 256 * b3; */
+	/*@ assert b3 < 256; */
+	/*@ assert value == b0 + 256 * b1 + 65536 * b2 + 16777216 * b3; */
+
+	p[0] = (uint8_t)b0;
+	p[1] = (uint8_t)b1;
+	p[2] = (uint8_t)b2;
+	p[3] = (uint8_t)b3;
 }
 
 #endif /* NORMFS_UINTN_LE_H */

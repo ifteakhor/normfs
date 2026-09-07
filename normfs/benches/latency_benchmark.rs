@@ -19,7 +19,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize NormFS with temporary directory
     let temp_dir = tempfile::tempdir()?;
     let temp_path = temp_dir.path().to_path_buf();
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let normfs = NormFS::new(temp_path, settings).await?;
 
     let normfs = Arc::new(normfs);
@@ -50,7 +50,7 @@ async fn run_benchmark() -> Result<(), Box<dyn std::error::Error>> {
 
             // Write timestamp to queue
             let data = Bytes::from(timestamp_ns.to_le_bytes().to_vec());
-            if let Err(e) = writer_normfs.enqueue(&writer_queue, data) {
+            if let Err(e) = writer_normfs.enqueue(&writer_queue, data).await {
                 eprintln!("Write error: {:?}", e);
                 break;
             }

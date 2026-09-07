@@ -19,7 +19,7 @@ async fn test_step_read_with_prefetch() {
     // Close and re-open between batches to force new files
     println!("Writing 10 batches of 10 entries each...");
     for batch in 0..10 {
-        let normfs = NormFS::new(temp_path.clone(), Default::default())
+        let normfs = NormFS::new(temp_path.clone(), normfs::NormFsSettings::all_active())
             .await
             .unwrap();
 
@@ -33,7 +33,10 @@ async fn test_step_read_with_prefetch() {
         for i in 0..10 {
             let entry_num = batch * 10 + i;
             let data = format!("entry_{}", entry_num);
-            normfs.enqueue(&queue_id_obj, Bytes::from(data)).unwrap();
+            normfs
+                .enqueue(&queue_id_obj, Bytes::from(data))
+                .await
+                .unwrap();
         }
         println!(
             "Wrote batch {} (entries {} to {})",
@@ -47,7 +50,7 @@ async fn test_step_read_with_prefetch() {
     }
 
     println!("Re-opening NormFS for reading...");
-    let normfs = NormFS::new(temp_path.clone(), Default::default())
+    let normfs = NormFS::new(temp_path.clone(), normfs::NormFsSettings::all_active())
         .await
         .unwrap();
 

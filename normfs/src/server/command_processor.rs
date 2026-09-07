@@ -246,9 +246,10 @@ impl CommandProcessor {
         let result = if packets.len() == 1 {
             self.normfs
                 .enqueue(&queue_id, packets[0].clone())
+                .await
                 .map(|id| vec![id])
         } else {
-            self.normfs.enqueue_batch(&queue_id, packets)
+            self.normfs.enqueue_batch(&queue_id, packets).await
         };
 
         match result {
@@ -486,11 +487,22 @@ impl CommandProcessor {
                         );
                         // No need to send response, client is already gone
                     }
+                    // RecordTooLarge and QueueClosed are write-path refusals
+                    // (a read of a closed queue completes rather than errors)
+                    // and MemoryBelowFloor is raised before the instance
+                    // exists, so none can arrive here. They are spelled out
+                    // rather than folded into a wildcard: a wildcard is what
+                    // lets the next variant added to Error reach a client as
+                    // a server error, silently.
                     Error::QueueEmpty
                     | Error::Wal(_)
                     | Error::Store(_)
                     | Error::Cloud(_)
-                    | Error::Io(_) => {
+                    | Error::Io(_)
+                    | Error::RecordTooLarge(_)
+                    | Error::QueueClosed
+                    | Error::MemoryBelowFloor { .. }
+                    | Error::PageBelowMinimum { .. } => {
                         error!(
                             "Read stream failed (client_id: {}, read_id: {}, queue_id: {}, error: {:?})",
                             sender.client_id(), read_id, queue_id, err

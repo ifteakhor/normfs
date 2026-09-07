@@ -53,7 +53,7 @@ async fn test_recovery_empty_latest_file() {
 
     // Setup: Create queue with some entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -63,7 +63,7 @@ async fn test_recovery_empty_latest_file() {
         // Write some entries to file 1
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -80,7 +80,7 @@ async fn test_recovery_empty_latest_file() {
 
     // Recovery: Start queue again
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -93,7 +93,7 @@ async fn test_recovery_empty_latest_file() {
         // Should reuse file 2 (latest file is empty)
         // Next ID after 9 should be 10
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(10u64));
 
@@ -122,7 +122,7 @@ async fn test_recovery_multiple_empty_files() {
 
     // Setup: Create queue with entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -132,7 +132,7 @@ async fn test_recovery_multiple_empty_files() {
         // Write entries
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -150,7 +150,7 @@ async fn test_recovery_multiple_empty_files() {
 
     // Recovery: Should walk back from file 4 -> 3 -> 2 -> 1 (found)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -162,7 +162,7 @@ async fn test_recovery_multiple_empty_files() {
         // Should reuse file 4 (latest empty file)
         // Wrote entries 0-4, so next should be 5
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(5u64));
 
@@ -191,7 +191,7 @@ async fn test_recovery_header_only_file() {
 
     // Setup: Create queue and write entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -199,7 +199,7 @@ async fn test_recovery_header_only_file() {
 
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -207,7 +207,7 @@ async fn test_recovery_header_only_file() {
 
     // Start again - this creates a new file with only header
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -219,7 +219,7 @@ async fn test_recovery_header_only_file() {
 
     // Recovery: Should handle file with only header
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -230,7 +230,7 @@ async fn test_recovery_header_only_file() {
 
         // Wrote entries 0-9, so next should be 10
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(10u64));
     }
@@ -245,7 +245,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
 
     // Setup: Create queue with entries in file 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -254,7 +254,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
         // Write entries 0-9 to file 1
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -262,7 +262,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
 
     // Start again - this creates file 2 with only header, no entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -274,7 +274,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
 
     // Recovery: Should reuse file 2 (header-only)
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -287,7 +287,7 @@ async fn test_recovery_reuse_header_only_latest_file() {
         // Should reuse file 2 (has header but no entries)
         // Next ID after 9 should be 10
         let new_entry = Bytes::from("new-entry-after-header-only");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(10u64), "Should continue from ID 10");
 
@@ -330,7 +330,7 @@ async fn test_recovery_multiple_header_only_files() {
 
     // Setup: Create queue with entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -339,7 +339,7 @@ async fn test_recovery_multiple_header_only_files() {
         // Write entries 0-4 to file 1
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -349,7 +349,7 @@ async fn test_recovery_multiple_header_only_files() {
     // its header-only size so the reuse check below is independent of the
     // entry format (V1 headers/entries are smaller than the old V0 ones).
     let header_only_size = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -368,7 +368,7 @@ async fn test_recovery_multiple_header_only_files() {
 
     // Recovery: Should reuse file 2 (header-only)
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -380,7 +380,7 @@ async fn test_recovery_multiple_header_only_files() {
 
         // Next ID after 4 should be 5
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(5u64), "Should continue from ID 5");
 
@@ -423,7 +423,7 @@ async fn test_recovery_all_empty_files() {
 
     // Initialize NormFS to establish instance_id
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -441,7 +441,7 @@ async fn test_recovery_all_empty_files() {
 
     // Recovery: Should start from zero
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -449,7 +449,7 @@ async fn test_recovery_all_empty_files() {
 
         // First entry should be 0 (start from zero)
         let new_entry = Bytes::from("first-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::zero());
     }
@@ -464,7 +464,7 @@ async fn test_recovery_gap_in_files() {
 
     // Setup: Create queue with entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -473,7 +473,7 @@ async fn test_recovery_gap_in_files() {
 
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -492,14 +492,14 @@ async fn test_recovery_gap_in_files() {
 
     // Recovery: Should find no entries and start from 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         println!("New ID after gap recovery: {}", new_id);
     }
 }
@@ -513,7 +513,7 @@ async fn test_recovery_old_data_different_session() {
 
     // Session 1: Write some video data
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -525,7 +525,7 @@ async fn test_recovery_old_data_different_session() {
 
         for i in 0..10 {
             let data = Bytes::from(format!("session1-video-{}", i));
-            fs.enqueue(&video_queue_id, data).unwrap();
+            fs.enqueue(&video_queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -541,7 +541,7 @@ async fn test_recovery_old_data_different_session() {
 
     // Session 2: Start queue - OLD BUG would find file 3 (empty) and derive wrong last_id
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let video_queue_id = fs.resolve("video-queue");
@@ -556,7 +556,7 @@ async fn test_recovery_old_data_different_session() {
 
         // Write new data - should get ID 10, not reuse old IDs
         let new_data = Bytes::from("session2-video-0");
-        let new_id = fs.enqueue(&video_queue_id, new_data).unwrap();
+        let new_id = fs.enqueue(&video_queue_id, new_data).await.unwrap();
         assert_eq!(new_id, UintN::from(10u64));
 
         // Note: We skip the read-back test because the manually created empty file 3
@@ -573,7 +573,7 @@ async fn test_recovery_store_files_with_empty_wal() {
 
     // Setup: Create entries and let them convert to Store
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -582,7 +582,7 @@ async fn test_recovery_store_files_with_empty_wal() {
 
         for i in 0..20 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         // Wait a bit for WAL->Store conversion
@@ -601,14 +601,14 @@ async fn test_recovery_store_files_with_empty_wal() {
 
     // Recovery: Should find entries in Store, not be confused by empty WAL
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         // Should continue from where Store left off (wrote 0-19, so next is 20)
         assert_eq!(new_id.to_u64().unwrap(), 20);
@@ -624,7 +624,7 @@ async fn test_recovery_alternating_empty_files() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -633,7 +633,7 @@ async fn test_recovery_alternating_empty_files() {
 
         for i in 0..3 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -651,14 +651,14 @@ async fn test_recovery_alternating_empty_files() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(3u64));
     }
@@ -673,7 +673,7 @@ async fn test_recovery_large_file_ids() {
 
     // Setup with normal entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -682,7 +682,7 @@ async fn test_recovery_large_file_ids() {
 
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -703,7 +703,7 @@ async fn test_recovery_large_file_ids() {
 
     // Recovery: Should handle large file ID
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -711,7 +711,7 @@ async fn test_recovery_large_file_ids() {
 
         // Should walk back from 1000000 to find file 1
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         assert_eq!(new_id, UintN::from(5u64));
     }
 }
@@ -727,7 +727,7 @@ async fn test_recovery_multiple_restarts() {
 
     // Do 5 cycles of start -> write -> close
     for cycle in 0..5 {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -742,7 +742,7 @@ async fn test_recovery_multiple_restarts() {
         // Write 2 entries per cycle
         for i in 0..2 {
             let data = Bytes::from(format!("cycle-{}-entry-{}", cycle, i));
-            let id = fs.enqueue(&queue_id, data).unwrap();
+            let id = fs.enqueue(&queue_id, data).await.unwrap();
             println!("Cycle {} Entry {}: ID = {}", cycle, i, id);
             assert_eq!(id, UintN::from(expected_id));
             expected_id += 1;
@@ -753,7 +753,7 @@ async fn test_recovery_multiple_restarts() {
 
     // Final check: Should have 10 entries total (0-9)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -779,7 +779,7 @@ async fn test_recovery_single_entry_file() {
 
     // Setup: Write exactly 1 entry
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -787,7 +787,7 @@ async fn test_recovery_single_entry_file() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let data = Bytes::from("single-entry");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -802,7 +802,7 @@ async fn test_recovery_single_entry_file() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -810,7 +810,7 @@ async fn test_recovery_single_entry_file() {
 
         // Wrote 1 entry (ID 0), so next should be 1
         let new_entry = Bytes::from("second-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -823,9 +823,13 @@ async fn test_recovery_large_entries() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    // Setup: Write large entries
+    // Setup: Write large entries. The subject is their recovery, so the page
+    // size is pinned wide enough to accept them whatever the default is.
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings {
+            mem_page_size: 4 * 1024 * 1024,
+            ..NormFsSettings::all_active()
+        };
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -834,7 +838,9 @@ async fn test_recovery_large_entries() {
 
         // Write 1MB entry
         let large_data = vec![0u8; 1024 * 1024];
-        fs.enqueue(&queue_id, Bytes::from(large_data)).unwrap();
+        fs.enqueue(&queue_id, Bytes::from(large_data))
+            .await
+            .unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -849,14 +855,17 @@ async fn test_recovery_large_entries() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings {
+            mem_page_size: 4 * 1024 * 1024,
+            ..NormFsSettings::all_active()
+        };
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("small-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -870,14 +879,14 @@ async fn test_recovery_empty_directory() {
     let path = temp_dir.path().to_path_buf();
 
     // Don't create any files, just start
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
     let queue_id = fs.resolve("test-queue");
 
     fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
     let first_entry = Bytes::from("first");
-    let first_id = fs.enqueue(&queue_id, first_entry).unwrap();
+    let first_id = fs.enqueue(&queue_id, first_entry).await.unwrap();
 
     assert_eq!(first_id, UintN::zero());
 }
@@ -891,7 +900,7 @@ async fn test_recovery_different_header_formats() {
 
     // Setup: Write entries with specific sizes
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -900,7 +909,7 @@ async fn test_recovery_different_header_formats() {
 
         // Write small entry
         let data = Bytes::from("x");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -915,14 +924,14 @@ async fn test_recovery_different_header_formats() {
 
     // Recovery: Should preserve data/id size from file 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("y");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -937,7 +946,7 @@ async fn test_recovery_readonly_queue() {
 
     // Setup: Write some entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -946,7 +955,7 @@ async fn test_recovery_readonly_queue() {
 
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -964,7 +973,7 @@ async fn test_recovery_readonly_queue() {
 
     // Recovery as readonly
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let queue_id = fs.resolve("test-queue");
 
@@ -988,7 +997,7 @@ async fn test_recovery_incomplete_write() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -997,7 +1006,7 @@ async fn test_recovery_incomplete_write() {
 
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         // Don't close cleanly - simulate crash
@@ -1013,14 +1022,14 @@ async fn test_recovery_incomplete_write() {
 
     // Recovery after "crash"
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("post-crash");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         println!("ID after crash recovery: {}", new_id);
     }
 }
@@ -1034,7 +1043,7 @@ async fn test_recovery_scattered_files() {
 
     // Setup: Create files 1, 3, 5 with data
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1043,7 +1052,7 @@ async fn test_recovery_scattered_files() {
 
         for i in 0..3 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1061,14 +1070,14 @@ async fn test_recovery_scattered_files() {
 
     // Recovery: Should walk back from 7 -> 6 -> 5 -> 4 -> 3 -> 2 -> 1 (found)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(3u64));
     }
@@ -1083,7 +1092,7 @@ async fn test_recovery_zero_byte_vs_header_only() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1091,7 +1100,7 @@ async fn test_recovery_zero_byte_vs_header_only() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let data = Bytes::from("entry");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -1099,7 +1108,7 @@ async fn test_recovery_zero_byte_vs_header_only() {
 
     // Start again to create header-only file 2
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1118,14 +1127,14 @@ async fn test_recovery_zero_byte_vs_header_only() {
 
     // Recovery: Should walk back and find file 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -1140,7 +1149,7 @@ async fn test_recovery_with_batch_writes() {
 
     // Setup: Write batches
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1151,13 +1160,13 @@ async fn test_recovery_with_batch_writes() {
         let batch1: Vec<Bytes> = (0..5)
             .map(|i| Bytes::from(format!("batch1-{}", i)))
             .collect();
-        fs.enqueue_batch(&queue_id, batch1).unwrap();
+        fs.enqueue_batch(&queue_id, batch1).await.unwrap();
 
         // Batch 2
         let batch2: Vec<Bytes> = (0..5)
             .map(|i| Bytes::from(format!("batch2-{}", i)))
             .collect();
-        fs.enqueue_batch(&queue_id, batch2).unwrap();
+        fs.enqueue_batch(&queue_id, batch2).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -1172,7 +1181,7 @@ async fn test_recovery_with_batch_writes() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1183,7 +1192,7 @@ async fn test_recovery_with_batch_writes() {
         assert_eq!(last_id, Some(UintN::from(9u64)));
 
         let new_entry = Bytes::from("after-batch");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(10u64));
     }
@@ -1198,7 +1207,7 @@ async fn test_recovery_corrupted_header() {
 
     // Setup: Write valid entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1207,7 +1216,7 @@ async fn test_recovery_corrupted_header() {
 
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1224,14 +1233,14 @@ async fn test_recovery_corrupted_header() {
 
     // Recovery: Should skip corrupted file 2 and find file 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("post-corruption");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         assert_eq!(new_id, UintN::from(5u64));
     }
 }
@@ -1245,7 +1254,7 @@ async fn test_recovery_truncated_file() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1254,7 +1263,7 @@ async fn test_recovery_truncated_file() {
 
         for i in 0..3 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1271,14 +1280,14 @@ async fn test_recovery_truncated_file() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("post-truncation");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(3u64));
     }
@@ -1293,7 +1302,7 @@ async fn test_recovery_multiple_corrupted_files() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1302,7 +1311,7 @@ async fn test_recovery_multiple_corrupted_files() {
 
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1321,14 +1330,14 @@ async fn test_recovery_multiple_corrupted_files() {
 
     // Recovery: Should walk back from 5 -> 4 -> 3 -> 2 -> 1 (valid)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("recovered");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         assert_eq!(new_id, UintN::from(5u64));
     }
 }
@@ -1342,7 +1351,7 @@ async fn test_recovery_partial_entry() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1351,7 +1360,7 @@ async fn test_recovery_partial_entry() {
 
         for i in 0..2 {
             let data = Bytes::from(format!("complete-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1377,14 +1386,14 @@ async fn test_recovery_partial_entry() {
 
     // Recovery: Should handle partial data gracefully
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("post-crash");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         println!("ID after partial entry recovery: {}", new_id);
     }
 }
@@ -1398,7 +1407,7 @@ async fn test_recovery_garbage_at_end() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1407,7 +1416,7 @@ async fn test_recovery_garbage_at_end() {
 
         for i in 0..3 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1430,14 +1439,14 @@ async fn test_recovery_garbage_at_end() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("clean-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
         println!("ID after garbage data: {}", new_id);
     }
 }
@@ -1451,7 +1460,7 @@ async fn test_recovery_corrupted_middle_file() {
 
     // Setup: Create file 1 with entries
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1460,7 +1469,7 @@ async fn test_recovery_corrupted_middle_file() {
 
         for i in 0..3 {
             let data = Bytes::from(format!("file1-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1483,14 +1492,14 @@ async fn test_recovery_corrupted_middle_file() {
 
     // Recovery: Should walk back 3 (empty) -> 2 (corrupted) -> 1 (valid)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("file4-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(3u64));
     }
@@ -1505,7 +1514,7 @@ async fn test_recovery_all_files_corrupted() {
 
     // Initialize NormFS to establish instance_id
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -1524,7 +1533,7 @@ async fn test_recovery_all_files_corrupted() {
 
     // Recovery: Should start fresh since all files are corrupted
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1532,7 +1541,7 @@ async fn test_recovery_all_files_corrupted() {
 
         // All files corrupted, should start from 0
         let first_entry = Bytes::from("fresh-start");
-        let first_id = fs.enqueue(&queue_id, first_entry).unwrap();
+        let first_id = fs.enqueue(&queue_id, first_entry).await.unwrap();
 
         assert_eq!(first_id, UintN::zero());
     }
@@ -1547,7 +1556,7 @@ async fn test_recovery_wrong_file_type() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1555,7 +1564,7 @@ async fn test_recovery_wrong_file_type() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let data = Bytes::from("valid-entry");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -1571,14 +1580,14 @@ async fn test_recovery_wrong_file_type() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("new-entry");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -1593,7 +1602,7 @@ async fn test_recovery_random_corruption() {
 
     // Setup
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1601,7 +1610,7 @@ async fn test_recovery_random_corruption() {
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let data = Bytes::from("good-data");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         fs.close().await.unwrap();
         instance_id
@@ -1617,14 +1626,14 @@ async fn test_recovery_random_corruption() {
 
     // Recovery
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         let new_entry = Bytes::from("recovered");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(new_id, UintN::from(1u64));
     }
@@ -1640,7 +1649,7 @@ async fn test_recovery_skipped_file_in_sequence() {
 
     // Setup: Create queue with entries in file 1
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1650,7 +1659,7 @@ async fn test_recovery_skipped_file_in_sequence() {
         // Write entries 0-9 to file 1
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1672,7 +1681,7 @@ async fn test_recovery_skipped_file_in_sequence() {
 
     // Recovery: Should walk backward from file 3 to file 1, skipping missing file 2
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1680,7 +1689,7 @@ async fn test_recovery_skipped_file_in_sequence() {
 
         // Should continue from entry 10 (after 0-9 in file 1)
         let new_entry = Bytes::from("entry-after-gap");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(
             new_id,
@@ -1718,7 +1727,7 @@ async fn test_recovery_multiple_skipped_files() {
 
     // Setup: Create queue with entries in file 1
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1727,7 +1736,7 @@ async fn test_recovery_multiple_skipped_files() {
         // Write entries 0-4 to file 1
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1749,7 +1758,7 @@ async fn test_recovery_multiple_skipped_files() {
 
     // Recovery: Should walk backward from file 5, skip files 4, 3, 2 (missing), find file 1
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -1757,7 +1766,7 @@ async fn test_recovery_multiple_skipped_files() {
 
         // Should continue from entry 5 (after 0-4 in file 1)
         let new_entry = Bytes::from("entry-after-large-gap");
-        let new_id = fs.enqueue(&queue_id, new_entry).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_entry).await.unwrap();
 
         assert_eq!(
             new_id,
@@ -1787,7 +1796,7 @@ async fn test_wal_async_old_file_processing() {
 
     // Setup: Create queue with entries in multiple files
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         let instance_id = fs.get_instance_id().to_string();
 
@@ -1798,7 +1807,7 @@ async fn test_wal_async_old_file_processing() {
         // Note: Actual file rotation depends on WAL size settings
         for i in 0..100 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1820,7 +1829,7 @@ async fn test_wal_async_old_file_processing() {
 
     // Recovery: Start queue again (should trigger async old file processing)
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         // Start should complete quickly without blocking on old file processing
@@ -1838,7 +1847,7 @@ async fn test_wal_async_old_file_processing() {
 
         // Write a new entry to verify queue is operational
         let new_data = Bytes::from("entry-after-recovery");
-        let new_id = fs.enqueue(&queue_id, new_data).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_data).await.unwrap();
         assert!(
             new_id >= UintN::from(100u64),
             "Should continue from where we left off"
@@ -1864,7 +1873,7 @@ async fn test_read_backward_wal_memory_boundary() {
 
     // Create resolver and queue_id once for the entire test
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -1873,14 +1882,14 @@ async fn test_read_backward_wal_memory_boundary() {
 
     // Step 1: Create queue and write 10 entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         // Write entries 0-9 to WAL
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            let id = fs.enqueue(&queue_id, data).unwrap();
+            let id = fs.enqueue(&queue_id, data).await.unwrap();
             assert_eq!(id, UintN::from(i as u64));
         }
 
@@ -1889,14 +1898,14 @@ async fn test_read_backward_wal_memory_boundary() {
 
     // Step 2: Reopen and write 1 entry (this goes to memory, WAL has entries 0-9)
     let fs = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         // Write entry 10 - this goes to memory (and WAL file 2)
         let data = Bytes::from("entry-10");
-        let id = fs.enqueue(&queue_id, data).unwrap();
+        let id = fs.enqueue(&queue_id, data).await.unwrap();
         assert_eq!(id, UintN::from(10u64), "New entry should have ID 10");
 
         fs
@@ -1965,7 +1974,7 @@ async fn test_read_backward_wal_only_after_recovery() {
 
     // Create resolver and queue_id once for the entire test
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -1974,13 +1983,13 @@ async fn test_read_backward_wal_only_after_recovery() {
 
     // Step 1: Create queue and write 10 entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         for i in 0..10 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -1988,7 +1997,7 @@ async fn test_read_backward_wal_only_after_recovery() {
 
     // Step 2: Reopen without writing anything
     let fs = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
@@ -2041,7 +2050,7 @@ async fn test_read_backward_multiple_entries_crossing_boundary() {
 
     // Create resolver and queue_id once for the entire test
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -2050,13 +2059,13 @@ async fn test_read_backward_multiple_entries_crossing_boundary() {
 
     // Step 1: Create queue and write 10 entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         for i in 0..10 {
             let data = Bytes::from(format!("wal-entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -2064,14 +2073,14 @@ async fn test_read_backward_multiple_entries_crossing_boundary() {
 
     // Step 2: Reopen and write 5 more entries
     let fs = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         for i in 10..15 {
             let data = Bytes::from(format!("mem-entry-{}", i));
-            let id = fs.enqueue(&queue_id, data).unwrap();
+            let id = fs.enqueue(&queue_id, data).await.unwrap();
             assert_eq!(id, UintN::from(i as u64));
         }
 
@@ -2146,7 +2155,7 @@ async fn test_read_completes_on_last_entry_after_recovery() {
 
     // Create resolver and queue_id once for the entire test
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -2155,13 +2164,13 @@ async fn test_read_completes_on_last_entry_after_recovery() {
 
     // Step 1: Create queue and write 100 entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         for i in 0..100 {
             let data = Bytes::from(format!("entry-{}", i));
-            let id = fs.enqueue(&queue_id, data).unwrap();
+            let id = fs.enqueue(&queue_id, data).await.unwrap();
             assert_eq!(id, UintN::from(i as u64));
         }
 
@@ -2171,7 +2180,7 @@ async fn test_read_completes_on_last_entry_after_recovery() {
 
     // Step 3: Reopen queue for write
     let fs = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
@@ -2267,7 +2276,7 @@ async fn test_read_completes_on_last_entry_after_recovery_readonly() {
 
     // Create resolver and queue_id once for the entire test
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -2276,13 +2285,13 @@ async fn test_read_completes_on_last_entry_after_recovery_readonly() {
 
     // Step 1: Create queue and write 100 entries
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
 
         for i in 0..100 {
             let data = Bytes::from(format!("entry-{}", i));
-            let id = fs.enqueue(&queue_id, data).unwrap();
+            let id = fs.enqueue(&queue_id, data).await.unwrap();
             assert_eq!(id, UintN::from(i as u64));
         }
 
@@ -2292,7 +2301,7 @@ async fn test_read_completes_on_last_entry_after_recovery_readonly() {
 
     // Step 3: Reopen queue in readonly mode
     let fs = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         fs.ensure_queue_exists_for_read(&queue_id).await.unwrap();
@@ -2366,7 +2375,7 @@ async fn test_read_range_from_memory() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
     let queue_id = fs.resolve("test-queue");
 
@@ -2375,7 +2384,7 @@ async fn test_read_range_from_memory() {
     // Write 10 entries (IDs 0-9)
     for i in 0..10 {
         let data = Bytes::from(format!("entry-{}", i));
-        let id = fs.enqueue(&queue_id, data).unwrap();
+        let id = fs.enqueue(&queue_id, data).await.unwrap();
         assert_eq!(id, UintN::from(i as u64));
     }
 
@@ -2433,7 +2442,7 @@ async fn test_read_from_memory_with_step() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
     let queue_id = fs.resolve("test-queue");
 
@@ -2442,7 +2451,7 @@ async fn test_read_from_memory_with_step() {
     // Write 10 entries (IDs 0-9)
     for i in 0..10 {
         let data = Bytes::from(format!("entry-{}", i));
-        let id = fs.enqueue(&queue_id, data).unwrap();
+        let id = fs.enqueue(&queue_id, data).await.unwrap();
         assert_eq!(id, UintN::from(i as u64));
     }
 
@@ -2499,7 +2508,7 @@ async fn test_wal_async_no_old_files() {
 
     // Setup: Create fresh queue
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -2508,7 +2517,7 @@ async fn test_wal_async_no_old_files() {
         // Write just a few entries (stay in same file)
         for i in 0..5 {
             let data = Bytes::from(format!("entry-{}", i));
-            fs.enqueue(&queue_id, data).unwrap();
+            fs.enqueue(&queue_id, data).await.unwrap();
         }
 
         fs.close().await.unwrap();
@@ -2516,7 +2525,7 @@ async fn test_wal_async_no_old_files() {
 
     // Recovery: Start queue again
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -2525,7 +2534,7 @@ async fn test_wal_async_no_old_files() {
         // Should work normally even with no old files
         // Write a new entry to verify queue is operational
         let new_data = Bytes::from("entry-after-recovery");
-        let new_id = fs.enqueue(&queue_id, new_data).unwrap();
+        let new_id = fs.enqueue(&queue_id, new_data).await.unwrap();
         assert_eq!(new_id, UintN::from(5u64), "Should continue from ID 5");
 
         fs.close().await.unwrap();
@@ -2541,7 +2550,7 @@ async fn test_wal_async_excludes_current_file() {
 
     // Initialize NormFS to establish instance_id
     let instance_id = {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
         fs.get_instance_id().to_string()
     };
@@ -2565,7 +2574,7 @@ async fn test_wal_async_excludes_current_file() {
 
     // Start queue - should recover and determine file 4 as next
     {
-        let settings = NormFsSettings::default();
+        let settings = NormFsSettings::all_active();
         let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
         let queue_id = fs.resolve("test-queue");
@@ -2573,7 +2582,7 @@ async fn test_wal_async_excludes_current_file() {
 
         // Write entry - should go to file 4 (or reuse latest depending on recovery logic)
         let data = Bytes::from("new-entry");
-        fs.enqueue(&queue_id, data).unwrap();
+        fs.enqueue(&queue_id, data).await.unwrap();
 
         // Give async processing time to run
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -2600,7 +2609,7 @@ async fn test_read_empty_queue_shift_from_tail() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
     // Create and start an empty queue
@@ -2644,7 +2653,7 @@ async fn test_read_empty_queue_absolute() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
 
-    let settings = NormFsSettings::default();
+    let settings = NormFsSettings::all_active();
     let fs = NormFS::new(path.clone(), settings).await.unwrap();
 
     // Create and start an empty queue
@@ -2679,4 +2688,266 @@ async fn test_read_empty_queue_absolute() {
     assert_eq!(count, 0, "Should receive 0 entries from empty queue");
 
     fs.close().await.unwrap();
+}
+
+/// Records written as pages must read back in id order across file rotations.
+///
+/// This is the end-to-end form of the trap the page pool was switched off for.
+/// The pool is filled at enqueue time but a file is closed later, so unless each
+/// page belongs to exactly one file -- and unless a flush takes only its own
+/// file's pages -- the record that opens a file is written into the previous one
+/// instead. V1 stores no entry id; the reader derives it from
+/// `num_entries_before + index`, so the result is not a missing record but every
+/// later record answering to the wrong id.
+///
+/// The payload is checked per id, not just the count. A count-only assertion
+/// passes under duplication-plus-truncation, which is exactly the failure this
+/// test exists to catch.
+///
+/// The volume is deliberate: a file now ends where a page ends, so the records
+/// have to fill several pages before any rotation happens at all. A small
+/// `max_file_size` alone no longer produces one.
+#[tokio::test]
+async fn pooled_rotation_reads_back_in_id_order() {
+    const COUNT: usize = 600;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+
+    let mut settings = NormFsSettings::all_active();
+    // Pinned: this test counts on records spanning several pages, so it fixes
+    // the page size rather than inheriting a default chosen for production.
+    settings.mem_page_size = 256 * 1024;
+    // Below one page, so every page that opens rotates the file.
+    settings.wal_settings.max_file_size = 1024;
+
+    // ~1.5 KiB each, so 600 records span several 256 KiB pages.
+    let payload = |i: usize| Bytes::from(format!("entry-{i:04}-{}", "x".repeat(1500)));
+
+    let instance_id = {
+        let fs = NormFS::new(path.clone(), settings.clone()).await.unwrap();
+        let queue_id = fs.resolve("rotating-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+
+        for i in 0..COUNT {
+            let id = fs.enqueue(&queue_id, payload(i)).await.unwrap();
+            assert_eq!(id, UintN::from(i as u64), "ids must be dense and in order");
+        }
+        let instance_id = fs.get_instance_id().to_string();
+        fs.close().await.unwrap();
+        instance_id
+    };
+
+    // More than one file, or the test proves nothing about rotation.
+    let resolver = QueueIdResolver::new(&instance_id);
+    let wal_dir = get_queue_wal_path(&path, &resolver.resolve("rotating-queue"));
+    let files = std::fs::read_dir(&wal_dir).unwrap().count();
+    assert!(
+        files > 1,
+        "expected the queue to have rotated, found {files} file(s) in {}",
+        wal_dir.display()
+    );
+
+    let fs = NormFS::new(path.clone(), settings).await.unwrap();
+    let queue_id = fs.resolve("rotating-queue");
+    fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+
+    let (tx, mut rx) = mpsc::channel(COUNT + 16);
+    fs.read(
+        &queue_id,
+        ReadPosition::Absolute(UintN::zero()),
+        COUNT as u64,
+        1,
+        tx,
+    )
+    .await
+    .unwrap();
+    let entries = drain_entries(&mut rx, COUNT).await;
+
+    assert_eq!(entries.len(), COUNT, "every record must read back");
+    for (i, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.id, UintN::from(i as u64), "id at position {i}");
+        assert_eq!(
+            entry.data,
+            payload(i),
+            "entry {i} carries the payload of a different record: the file boundary and the \
+             page boundary disagree"
+        );
+    }
+
+    fs.close().await.unwrap();
+}
+
+/// A latest WAL file whose header cannot be read is not an empty file, and
+/// must not be handed to a writer that opens it with `truncate(true)`.
+#[tokio::test]
+async fn test_recovery_keeps_a_latest_file_it_cannot_read() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+
+    let instance_id = {
+        let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
+            .await
+            .unwrap();
+        let instance_id = fs.get_instance_id().to_string();
+        let queue_id = fs.resolve("test-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+        for i in 0..10 {
+            fs.enqueue(&queue_id, Bytes::from(format!("entry-{}", i)))
+                .await
+                .unwrap();
+        }
+        fs.close().await.unwrap();
+        instance_id
+    };
+
+    let resolver = QueueIdResolver::new(&instance_id);
+    let queue_id = resolver.resolve("test-queue");
+    let wal_path = get_queue_wal_path(&path, &queue_id);
+    let file_1 = UintN::from(1u64).to_file_path(wal_path.to_str().unwrap(), "wal");
+    let file_2 = UintN::from(2u64).to_file_path(wal_path.to_str().unwrap(), "wal");
+
+    // A second file with real records, whose header has one bad byte.
+    let mut bytes = tokio::fs::read(&file_1).await.unwrap();
+    bytes[8] ^= 0xFF;
+    tokio::fs::write(&file_2, &bytes).await.unwrap();
+
+    {
+        let fs = NormFS::new(path.clone(), NormFsSettings::all_active())
+            .await
+            .unwrap();
+        let queue_id = fs.resolve("test-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+        fs.enqueue(&queue_id, Bytes::from("new-entry"))
+            .await
+            .unwrap();
+        fs.close().await.unwrap();
+    }
+
+    assert_eq!(
+        tokio::fs::read(&file_2).await.unwrap(),
+        bytes,
+        "a file recovery could not read must be left exactly as it was"
+    );
+}
+
+/// What a crash during a rotation retry leaves behind: file M is a valid prefix
+/// missing what its closing flush could not write, and file M+1's header was
+/// stamped with the enqueue side's counter, which counted those records.
+///
+/// The records above the gap were acked normally while the retry ran, so
+/// discarding them to make the sequence contiguous would destroy acknowledged
+/// data. Recovery's job is to say so and leave it.
+#[tokio::test]
+async fn test_recovery_reports_a_gap_and_destroys_nothing() {
+    const COUNT: usize = 400;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+
+    let mut settings = NormFsSettings::all_active();
+    settings.mem_page_size = 256 * 1024;
+    settings.wal_settings.max_file_size = 1024;
+
+    let payload = |i: usize| Bytes::from(format!("entry-{i:04}-{}", "x".repeat(1500)));
+
+    let instance_id = {
+        let fs = NormFS::new(path.clone(), settings.clone()).await.unwrap();
+        let queue_id = fs.resolve("torn-queue");
+        fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+        for i in 0..COUNT {
+            fs.enqueue(&queue_id, payload(i)).await.unwrap();
+        }
+        let instance_id = fs.get_instance_id().to_string();
+        fs.close().await.unwrap();
+        instance_id
+    };
+
+    let resolver = QueueIdResolver::new(&instance_id);
+    let queue_id = resolver.resolve("torn-queue");
+    let wal_dir = get_queue_wal_path(&path, &queue_id);
+
+    let mut ids: Vec<u64> = (1..=64)
+        .filter(|n| {
+            UintN::from(*n)
+                .to_file_path(wal_dir.to_str().unwrap(), "wal")
+                .exists()
+        })
+        .collect();
+    ids.sort_unstable();
+    let pair = ids
+        .windows(2)
+        .find(|w| w[1] == w[0] + 1)
+        .expect("the queue must have rotated into consecutive WAL files");
+    let torn = UintN::from(pair[0]).to_file_path(wal_dir.to_str().unwrap(), "wal");
+
+    let before = std::fs::read(&torn).unwrap();
+    // Enough to leave the last frame unreadable, not enough to empty the file.
+    std::fs::write(&torn, &before[..before.len() - 64]).unwrap();
+
+    let torn_bytes = std::fs::read(&torn).unwrap();
+
+    let fs = NormFS::new(path.clone(), settings).await.unwrap();
+    let queue_id = fs.resolve("torn-queue");
+    fs.ensure_queue_exists_for_write(&queue_id).await.unwrap();
+
+    // A file the store worker archives and unlinks is the ordinary lifecycle
+    // and keeps the records, so this looks for quarantine, not a file count.
+    let quarantined: Vec<_> = std::fs::read_dir(&wal_dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .filter(|n| !n.ends_with(".wal"))
+        .collect();
+    assert!(
+        quarantined.is_empty(),
+        "recovery set files aside to close the gap ({quarantined:?}); the records above it \
+         were reported durable, so they must survive it"
+    );
+    if torn.exists() {
+        assert_eq!(
+            std::fs::read(&torn).unwrap(),
+            torn_bytes,
+            "recovery rewrote the torn file rather than leaving the prefix that survived"
+        );
+    }
+
+    let next = fs.enqueue(&queue_id, payload(COUNT)).await.unwrap();
+    assert!(
+        next >= UintN::from(COUNT as u64),
+        "recovery re-issued {next}, which is at or below ids already written to a file"
+    );
+
+    let (tx, mut rx) = mpsc::channel(COUNT + 16);
+    fs.read(
+        &queue_id,
+        ReadPosition::Absolute(UintN::zero()),
+        COUNT as u64,
+        1,
+        tx,
+    )
+    .await
+    .unwrap();
+    let mut entries = Vec::new();
+    while let Ok(Some(entry)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+    {
+        entries.push(entry);
+    }
+    for entry in &entries {
+        let i = entry.id.to_u64().unwrap() as usize;
+        assert_eq!(
+            entry.data,
+            payload(i),
+            "id {i} came back carrying another record's payload: the gap shifted the \
+             positional ids of everything after it"
+        );
+    }
+
+    let read_ids: Vec<u64> = entries.iter().map(|e| e.id.to_u64().unwrap()).collect();
+    assert!(
+        read_ids.windows(2).any(|w| w[1] != w[0] + 1) || read_ids.len() < COUNT,
+        "the truncation did not remove any record, so this test proves nothing"
+    );
+
+    fs.close().await.ok();
 }

@@ -8,17 +8,31 @@ use uintn::{UintN, paths};
 use writer::WalWriter;
 
 mod ack_file_writer;
+mod drainer;
 mod errors;
+mod fault;
+mod page_pool;
 mod reader;
+mod wal_arena;
 mod wal_entry;
 mod wal_entry_v1;
 mod wal_header;
 mod wal_header_v1;
+mod wal_ring_v1;
 mod writer;
 mod writer_buffer;
 
 pub use errors::*;
-pub use reader::{ReadRangeResult, WalContent, get_wal_header};
+#[cfg(any(test, feature = "fault-injection"))]
+pub use fault::{fail_flushes, heal};
+pub use page_pool::{
+    MIN_PAGE_SIZE, PagePool, PendingWrite, Placement, PoolError, RotateHint, Stranded,
+    max_record_len,
+};
+pub use reader::{
+    ReadRangeResult, WalContent, get_wal_header, read_wal_file_range, read_wal_header,
+};
+pub use wal_arena::{POOL_FREE, SlotRange, WalArena};
 pub use wal_entry::{WAL_ENTRY_HEADER_FIXED_OVERHEAD, WalEntryHeader};
 pub use wal_entry_v1::{
     WAL_ENTRY_V1_CRC_SIZE, WAL_ENTRY_V1_MAX_OVERHEAD, WAL_ENTRY_V1_MIN_SIZE, WalEntryV1,
@@ -30,6 +44,7 @@ pub use wal_header_v1::{
     WAL_HEADER_V1_MIN_SIZE, WAL_HEADER_V1_VERSION, WAL_HEADER_VERSION_SIZE, WalHeaderV1,
     WalHeaderV1Error, peek_version as peek_wal_header_version,
 };
+pub use wal_ring_v1::{AppendOutcome, WalRing};
 
 #[cfg(test)]
 mod wal_header_test;
@@ -39,6 +54,15 @@ mod wal_header_v1_test;
 
 #[cfg(test)]
 mod wal_entry_v1_test;
+
+#[cfg(test)]
+mod page_pool_test;
+
+#[cfg(test)]
+mod wal_ring_v1_test;
+
+#[cfg(test)]
+mod wal_arena_test;
 
 #[cfg(test)]
 mod wal_entry_test;
@@ -61,9 +85,23 @@ mod writer_test;
 pub struct WalSettings {
     pub max_file_size: usize,
     pub write_buffer_size: usize,
+    /// How long a record may sit in memory before a flush is started for it,
+    /// whatever else is going on.
+    ///
+    /// This is the only trigger a quiet queue has. The others -- the pool's
+    /// unwritten-bytes watermark and the buffer filling -- are reached by
+    /// volume, so a queue written to once a week never reaches either, and its
+    /// one record would wait for the next one to arrive. It is therefore an
+    /// upper bound on how long an accepted record can be only in memory, and
+    /// that is what it should be tuned against.
+    pub write_interval: std::time::Duration,
     pub enable_fsync: bool,
     pub encryption_type: normfs_types::EncryptionType,
     pub compression_type: normfs_types::CompressionType,
+    /// A setting because the default is ten seconds' worth, and a test that
+    /// wants to watch a flush fail should not sit through it.
+    pub flush_max_retries: u32,
+    pub flush_retry_delay: std::time::Duration,
 }
 
 impl Default for WalSettings {
@@ -71,9 +109,12 @@ impl Default for WalSettings {
         Self {
             max_file_size: 128 * 1024 * 1024,     // 128MB
             write_buffer_size: 128 * 1024 * 1024, // 128MB
+            write_interval: std::time::Duration::from_millis(50),
             enable_fsync: true,
             encryption_type: normfs_types::EncryptionType::Aes,
             compression_type: normfs_types::CompressionType::Zstd,
+            flush_max_retries: 1000,
+            flush_retry_delay: std::time::Duration::from_millis(10),
         }
     }
 }
@@ -244,6 +285,16 @@ impl WalStore {
         writers.contains_key(queue_id)
     }
 
+    /// Flushes, fsyncs, and completes one queue's file. No writer means
+    /// nothing to do, not an error.
+    pub async fn close_writer(&self, queue_id: &QueueId) -> Result<(), WalError> {
+        let writer = self.writers.write().unwrap().remove(queue_id);
+        match writer {
+            Some(writer) => writer.close().await,
+            None => Ok(()),
+        }
+    }
+
     pub async fn start_writer(
         &self,
         queue: &QueueId,
@@ -251,6 +302,25 @@ impl WalStore {
         header: wal_header::WalHeader,
         settings: WalSettings,
         last_entry_id: Option<UintN>,
+    ) -> Result<(), WalError> {
+        self.start_writer_with_pool(queue, file_id, header, settings, last_entry_id, None)
+            .await
+    }
+
+    /// As [`WalStore::start_writer`], but the writer takes its bytes from this
+    /// queue's page pool rather than from entries copied into a buffer.
+    ///
+    /// `start_writer` keeps its five-argument shape on purpose: `wal_sweep` is
+    /// compiled against released revisions of this crate to compare them, and a
+    /// changed signature would stop that benchmark building against 0.1.
+    pub async fn start_writer_with_pool(
+        &self,
+        queue: &QueueId,
+        file_id: &UintN,
+        header: wal_header::WalHeader,
+        settings: WalSettings,
+        last_entry_id: Option<UintN>,
+        pool: Option<std::sync::Arc<PagePool>>,
     ) -> Result<(), WalError> {
         log::info!(
             "WalStore: starting writer for queue '{}', file: {}, last_entry_id: {:?}, data size = {} bytes, id size = {} bytes",
@@ -280,6 +350,7 @@ impl WalStore {
             self.written_sender.clone(),
             self.wal_complete_sender.clone(),
             last_entry_id,
+            pool,
         )
         .await?;
 
@@ -362,6 +433,24 @@ impl WalStore {
     }
 
     pub fn enqueue(&self, queue: &QueueId, entry_id: UintN, data: Bytes) -> Result<(), WalError> {
+        self.enqueue_pooled(queue, entry_id, data, Placement::legacy())
+    }
+
+    /// `placement` says whether the record is already in a page of this queue's
+    /// pool — so its bytes reach the file from there and must not be buffered
+    /// again — and what the enqueue side decided about rotation.
+    /// [`Placement::legacy`] leaves both to the writer, which is what `enqueue`
+    /// passes and what the unpooled path has always done.
+    ///
+    /// `enqueue` keeps its three-argument shape so `wal_sweep` still builds
+    /// against released revisions of this crate.
+    pub fn enqueue_pooled(
+        &self,
+        queue: &QueueId,
+        entry_id: UintN,
+        data: Bytes,
+        placement: Placement,
+    ) -> Result<(), WalError> {
         log::trace!(
             "WalStore: enqueuing entry {} for queue '{}', data size: {} bytes",
             entry_id,
@@ -373,7 +462,7 @@ impl WalStore {
         match writers.get(queue) {
             Some(writer) => {
                 let entry_id_clone = entry_id.clone();
-                writer.enqueue(entry_id, data)?;
+                writer.enqueue(entry_id, data, placement)?;
                 log::trace!(
                     "WalStore: entry {} enqueued for queue '{}'",
                     entry_id_clone,
@@ -391,7 +480,7 @@ impl WalStore {
     pub fn enqueue_batch(
         &self,
         queue: &QueueId,
-        entries: Vec<(UintN, Bytes)>,
+        entries: Vec<(UintN, Bytes, Placement)>,
     ) -> Result<(), WalError> {
         log::trace!(
             "WalStore: enqueuing batch of {} entries for queue '{}'",

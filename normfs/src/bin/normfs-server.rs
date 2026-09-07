@@ -96,6 +96,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&args.data_dir)?;
 
+    // All-active until the server grows a way to declare per-queue pool
+    // rules: a passive default without that knob would silently cap every
+    // record at a passive page with no recourse from the command line.
     let mut settings = NormFsSettings {
         max_disk_usage_per_queue: if args.memory_only {
             None
@@ -107,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             PersistenceMode::Durable
         },
-        ..Default::default()
+        ..NormFsSettings::all_active()
     };
 
     // Configure S3 cloud offloading if provided
