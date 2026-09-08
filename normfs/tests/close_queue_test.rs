@@ -1,11 +1,12 @@
-//! Close is a promise with three parts: no write is ever accepted again,
-//! everything written stays readable, and a follower is told "that was the
-//! last record" instead of waiting forever. Each test pins one part.
+//! Close is a promise with three parts: no write is accepted until the queue
+//! is started for write again, everything written stays readable, and a
+//! follower is told "that was the last record" instead of waiting forever.
+//! Each test pins one part.
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use normfs::{Error, NormFS, NormFsSettings, ReadPosition};
+use normfs::{Error, NormFS, NormFsSettings, PersistenceMode, ReadPosition};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use uintn::UintN;
@@ -52,7 +53,89 @@ async fn a_closed_queue_refuses_writes_and_keeps_its_data_readable() {
 }
 
 #[tokio::test]
-async fn a_close_survives_a_restart() {
+async fn a_closed_queue_starts_again_and_continues_its_ids() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
+        .await
+        .unwrap();
+    let queue = fs.resolve("device");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write_records(&fs, &queue, 3).await;
+    fs.close_queue(&queue).await.unwrap();
+    let marker = queue.to_fs_path(temp.path()).join("closed");
+    assert!(marker.is_file(), "close must leave its marker");
+
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    assert!(!marker.exists(), "a reopen must remove the marker");
+    let id = fs
+        .enqueue(&queue, Bytes::from_static(b"record-3"))
+        .await
+        .unwrap();
+    assert_eq!(
+        id,
+        UintN::from(3u64),
+        "ids must continue where the close left them"
+    );
+
+    let (tx, mut rx) = mpsc::channel(16);
+    fs.read(&queue, ReadPosition::Absolute(UintN::zero()), 4, 1, tx)
+        .await
+        .unwrap();
+    for i in 0..4u64 {
+        let entry = timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("record {i} never arrived"))
+            .expect("the stream ended early");
+        assert_eq!(entry.id, UintN::from(i));
+        assert_eq!(entry.data, Bytes::from(format!("record-{i}")));
+    }
+
+    fs.close_queue(&queue).await.unwrap();
+    assert!(
+        marker.is_file(),
+        "a second close must leave its marker again"
+    );
+    let refused = fs.enqueue(&queue, Bytes::from_static(b"late")).await;
+    assert!(
+        matches!(refused, Err(Error::QueueClosed)),
+        "got {refused:?}"
+    );
+
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_memory_only_queue_starts_again_after_a_close() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let settings = NormFsSettings {
+        persistence_mode: PersistenceMode::MemoryOnly,
+        max_disk_usage_per_queue: None,
+        ..NormFsSettings::all_active()
+    };
+    let fs = NormFS::new(temp.path().to_path_buf(), settings)
+        .await
+        .unwrap();
+    let queue = fs.resolve("device");
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write_records(&fs, &queue, 2).await;
+    fs.close_queue(&queue).await.unwrap();
+
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let id = fs
+        .enqueue(&queue, Bytes::from_static(b"record-2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        id,
+        UintN::from(2u64),
+        "ids must continue where the close left them"
+    );
+
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_close_survives_a_restart_until_the_next_write_start() {
     let temp = tempfile::TempDir::new().unwrap();
     {
         let fs = NormFS::new(temp.path().to_path_buf(), NormFsSettings::all_active())
@@ -70,13 +153,12 @@ async fn a_close_survives_a_restart() {
         .unwrap();
     let queue = fs.resolve("doomed");
 
-    let reopened = fs.ensure_queue_exists_for_write(&queue).await;
-    assert!(
-        matches!(reopened, Err(Error::QueueClosed)),
-        "a restart must not resurrect a closed queue, got {reopened:?}"
-    );
-
     fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    let refused = fs.enqueue(&queue, Bytes::from_static(b"late")).await;
+    assert!(
+        matches!(refused, Err(Error::QueueClosed)),
+        "a restart must not resurrect a closed queue on its own, got {refused:?}"
+    );
     let (tx, mut rx) = mpsc::channel(16);
     fs.read(&queue, ReadPosition::Absolute(UintN::zero()), 3, 1, tx)
         .await
@@ -88,6 +170,17 @@ async fn a_close_survives_a_restart() {
             .expect("the stream ended early");
         assert_eq!(entry.data, Bytes::from(format!("record-{i}")));
     }
+
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    let id = fs
+        .enqueue(&queue, Bytes::from_static(b"record-3"))
+        .await
+        .unwrap();
+    assert_eq!(
+        id,
+        UintN::from(3u64),
+        "ids must continue across the restart and the reopen"
+    );
 
     fs.close().await.unwrap();
 }

@@ -65,8 +65,8 @@ pub enum Error {
     /// No page could take the record and the caller would not wait
     /// ([`NormFS::try_enqueue`]).
     WouldBlock,
-    /// The queue was closed for good ([`NormFS::close_queue`]); a later
-    /// write is an error. The data stays readable.
+    /// The queue is closed ([`NormFS::close_queue`]): writes are refused
+    /// until it is started for write again. The data stays readable.
     QueueClosed,
     /// `max_memory_usage` cannot hold the two pages a single queue needs to
     /// work. Refused at construction rather than rounded up: rounding up would
@@ -535,7 +535,7 @@ impl NormFS {
         let _guard = queue_lock.lock().await;
 
         if self.queue_closed_durably(queue) {
-            return Err(Error::QueueClosed);
+            self.reopen_queue(queue)?;
         }
 
         let queue_exists = self.mem.get_last_id(queue).is_some();
@@ -566,6 +566,22 @@ impl NormFS {
         }
 
         self.start_queue(queue, QueueMode { readonly: false }).await
+    }
+
+    /// Undoes a close so the queue can be started for write. The marker goes
+    /// first and is synced, so a crash here leaves the queue closed rather
+    /// than half-open; the start that follows recovers the last id from the
+    /// files the close completed.
+    fn reopen_queue(&self, queue: &QueueId) -> Result<(), Error> {
+        log::info!(target: "normfs", "Reopening closed queue '{}' for write", queue);
+        let dir = queue.to_fs_path(&self.path);
+        match std::fs::remove_file(dir.join("closed")) {
+            Ok(()) => std::fs::File::open(&dir)?.sync_all()?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        self.mem.reopen(queue);
+        Ok(())
     }
 
     fn get_config_for_queue(&self, queue: &QueueId) -> QueueConfig {
@@ -1325,15 +1341,16 @@ impl NormFS {
             .await
     }
 
-    /// Closes a queue for good: no write is ever accepted again, reads stay,
-    /// a follow ends at the last record. The order is the safety argument:
-    /// refuse writes, flush and complete the file, then the marker, so a
-    /// marker on disk implies the data reached it. Memory is released last.
+    /// Closes a queue: writes are refused until the next start for write,
+    /// reads stay, a follow ends at the last record, and the memory goes back
+    /// to the arena. The order is the safety argument: refuse writes, flush
+    /// and complete the file, then the marker, so a marker on disk implies
+    /// the data reached it. Memory is released last.
     pub async fn close_queue(&self, queue: &QueueId) -> Result<(), Error> {
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
 
-        log::info!(target: "normfs", "Closing queue '{}' for good", queue);
+        log::info!(target: "normfs", "Closing queue '{}'", queue);
         let dir = queue.to_fs_path(&self.path);
 
         // Checks that change nothing come first, so a refused close leaves
