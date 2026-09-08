@@ -97,10 +97,10 @@ pub struct MemStore {
     /// queue and never reused while a queue is alive. Shared across both
     /// arenas so a ring id names one queue no matter where its pages live.
     next_ring_id: AtomicU64,
-    /// Queues closed for good, mapped to the last id each had at close
-    /// (`None` when only the durable marker is known). Recorded here because
-    /// close removes the queue from the map above, and a later follow still
-    /// needs to know where the sequence ended.
+    /// Closed queues, mapped to the last id each had at close (`None` when
+    /// only the durable marker is known). Recorded here because close removes
+    /// the queue from the map above, and a later follow still needs to know
+    /// where the sequence ended. A reopen removes the entry.
     closed: RwLock<HashMap<QueueId, Option<UintN>>>,
     /// Whether a full cache page may be forgotten to admit new records. Only
     /// set when nothing ever drains these pools to disk (memory-only mode):
@@ -1175,6 +1175,10 @@ impl MemStore {
 
     pub fn is_closed(&self, queue: &QueueId) -> bool {
         self.closed.read().unwrap().contains_key(queue)
+    }
+
+    pub fn reopen(&self, queue: &QueueId) {
+        self.closed.write().unwrap().remove(queue);
     }
 
     /// The last id a closed queue ever assigned; `None` means it never
