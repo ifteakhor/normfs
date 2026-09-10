@@ -1,0 +1,107 @@
+name: verify
+
+# Split from ci so the two larger-runner jobs can be gated on what WP reads.
+# verify/Makefile globs */c/CMakeLists.txt, so */c/** covers a module added
+# later; **.c/**.h catch one placed outside that layout.
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - '*/c/**'
+      - '**.c'
+      - '**.h'
+      - 'verify/**'
+      - '.github/workflows/verify.yml'
+  pull_request:
+    paths:
+      - '*/c/**'
+      - '**.c'
+      - '**.h'
+      - 'verify/**'
+      - '.github/workflows/verify.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: toolchain image
+    # Larger runner: a cold run builds Frama-C from source, ~10 minutes.
+    runs-on: ubuntu-latest-m
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: /tmp/verify-image
+          key: verify-image-${{ hashFiles('verify/Dockerfile') }}
+      # if/then, not `&&`: under bash -e a short-circuit fails the step on
+      # exactly the cold-cache path this handles.
+      - name: Build if not cached
+        run: |
+          if [ ! -f /tmp/verify-image/image.tar ]; then
+            docker build -t normfs-verify:pinned -f verify/Dockerfile verify
+            mkdir -p /tmp/verify-image
+            docker save normfs-verify:pinned -o /tmp/verify-image/image.tar
+          fi
+
+  proofs:
+    name: WP
+    # Larger runner: WP is the long pole, the only wall clock anyone waits on.
+    runs-on: ubuntu-latest-m
+    needs: image
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore the pinned toolchain image
+        uses: actions/cache@v6
+        with:
+          path: /tmp/verify-image
+          key: verify-image-${{ hashFiles('verify/Dockerfile') }}
+
+      - name: Load the pinned toolchain image
+        run: docker load -i /tmp/verify-image/image.tar
+
+      # Separate restore and save: the post step is skipped when the timeout
+      # cancels the job, losing every target already proved. The key is unique
+      # per attempt because entries are immutable, and carries the image hash so
+      # a toolchain bump starts fresh rather than accumulating dead entries.
+      - name: Restore the proof cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .wp-cache
+          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: wp-cache-${{ hashFiles('verify/Dockerfile') }}-
+
+      # pipefail: the container's status is the signal, tee's is always 0.
+      - name: Prove
+        shell: bash
+        run: |
+          set -o pipefail
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e FRAMAC_WP_CACHE=update -e FRAMAC_WP_CACHEDIR=/work/.wp-cache \
+            normfs-verify:pinned \
+            make -f verify/Makefile verify 2>&1 | tee wp.log
+
+      - name: Save the proof cache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: .wp-cache
+          key: wp-cache-${{ hashFiles('verify/Dockerfile') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Summarise
+        if: always()
+        run: ./verify/summarize.sh build-verify/logs >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wp-log
+          path: wp.log
