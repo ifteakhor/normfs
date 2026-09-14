@@ -149,10 +149,12 @@ impl QueueMonitor {
                 .await
                 .map_err(|e| Error::Store(StoreError::Io(e)))?
             {
-                let metadata = entry
-                    .metadata()
-                    .await
-                    .map_err(|e| Error::Store(StoreError::Io(e)))?;
+                // The store worker and the cleanup delete files while this walks.
+                let metadata = match entry.metadata().await {
+                    Ok(metadata) => metadata,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(Error::Store(StoreError::Io(e))),
+                };
 
                 if metadata.is_file() {
                     total_size += metadata.len() as usize;
@@ -404,6 +406,8 @@ impl DiskMonitor {
         let handle = tokio::spawn(async move {
             let mut interval = time::interval(CHECK_INTERVAL);
             let mut ticks: u64 = 0;
+            // The first tick is immediate; add_queue already checked.
+            interval.tick().await;
 
             loop {
                 tokio::select! {
