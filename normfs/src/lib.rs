@@ -396,9 +396,21 @@ impl NormFS {
             };
 
         // Initialize disk monitor if enabled
+        let store_arc = Arc::new(store);
+
         let disk_monitor = if settings.max_disk_usage_per_queue.is_some() {
             log::debug!(target: "normfs", "Disk monitor enabled, creating disk monitor instance");
-            match DiskMonitor::new(&path, cloud_client.clone(), cloud_prefix.clone()).await {
+            let store = store_arc.clone();
+            let forget_range: offload::disk_monitor::ForgetRange =
+                Arc::new(move |queue, file_id| store.forget_file_range(queue, file_id));
+            match DiskMonitor::new(
+                &path,
+                cloud_client.clone(),
+                cloud_prefix.clone(),
+                Some(forget_range),
+            )
+            .await
+            {
                 Ok(monitor) => Some(Arc::new(monitor)),
                 Err(e) => {
                     log::error!(target: "normfs", "Failed to create disk monitor: {}", e);
@@ -421,13 +433,9 @@ impl NormFS {
                         "Received store completion for queue: {}, file_id: {:?}",
                         queue_id, file_id);
 
-                    // Forward to offload queue
-                    if let Err(e) = monitor
-                        .enqueue_for_offload(&queue_id, file_id.clone())
-                        .await
-                    {
+                    if let Err(e) = monitor.store_file_done(&queue_id, file_id.clone()).await {
                         log::error!(target: "normfs",
-                            "Failed to enqueue file for offload: queue={}, file_id={:?}, error={}",
+                            "Failed to account store file: queue={}, file_id={:?}, error={}",
                             queue_id, file_id, e);
                     }
                 }
@@ -439,7 +447,6 @@ impl NormFS {
             if settings.max_disk_usage_per_queue.is_some() { "enabled" } else { "disabled" },
             if cloud_downloader.is_some() { "enabled" } else { "disabled" });
 
-        let store_arc = Arc::new(store);
         let reader_fsm = reader_fsm::ReaderFSM::new(
             Some(wal.clone()),
             Some(store_arc.clone()),

@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time;
@@ -39,12 +39,23 @@ impl DiskMonitorConfig {
     }
 }
 
-#[derive(Debug)]
+/// Called with every store file the monitor deletes.
+pub type ForgetRange = Arc<dyn Fn(&QueueId, &UintN) + Send + Sync>;
+
+const CHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// Store bytes are tracked from completions and deletions; a full walk this
+/// often catches anything else that touched the directory.
+const RESCAN_EVERY_TICKS: u64 = 60;
+
 struct QueueMonitor {
     queue_id: QueueId,
     config: DiskMonitorConfig,
     root_path: PathBuf,
     offloader: Option<QueueOffloader>,
+    /// Bytes under store/, kept without walking it: the directory holds
+    /// thousands of files and a walk stats every one.
+    store_bytes: Mutex<usize>,
+    forget_range: Option<ForgetRange>,
 }
 
 impl QueueMonitor {
@@ -54,34 +65,76 @@ impl QueueMonitor {
         root_path: PathBuf,
         client: Option<Arc<S3Client>>,
         prefix: Option<&str>,
-    ) -> Self {
+        forget_range: Option<ForgetRange>,
+    ) -> Result<Self, Error> {
         let offloader = if let (Some(client), Some(prefix)) = (client, prefix) {
             Some(QueueOffloader::new(queue_id.clone(), root_path.clone(), client, prefix).await)
         } else {
             None
         };
 
-        Self {
+        let store_bytes = Self::scan_store(&queue_id, &root_path).await?;
+
+        Ok(Self {
             queue_id,
             config,
             root_path,
             offloader,
+            store_bytes: Mutex::new(store_bytes),
+            forget_range,
+        })
+    }
+
+    async fn scan_store(queue_id: &QueueId, root_path: &Path) -> Result<usize, Error> {
+        let store_path = queue_id.to_store_dir(root_path);
+        if store_path.exists() {
+            Self::get_directory_size(&store_path).await
+        } else {
+            Ok(0)
         }
     }
 
-    async fn get_queue_size(&self) -> Result<usize, Error> {
-        let mut total_size = 0;
+    async fn rescan_store(&self) -> Result<(), Error> {
+        let scanned = Self::scan_store(&self.queue_id, &self.root_path).await?;
+        let mut tracked = self.store_bytes.lock().unwrap();
+        if *tracked != scanned {
+            log::info!(
+                target: "normfs::disk_monitor",
+                "Queue '{}' store size corrected from {} to {} bytes",
+                self.queue_id,
+                *tracked,
+                scanned
+            );
+            *tracked = scanned;
+        }
+        Ok(())
+    }
 
-        // Calculate WAL folder size
+    /// Adds a completed store file to the tracked size.
+    async fn store_file_done(&self, file_id: &UintN) {
+        let path = self.queue_id.to_store_path(&self.root_path, file_id);
+        match tokio::fs::metadata(&path).await {
+            Ok(metadata) => {
+                *self.store_bytes.lock().unwrap() += metadata.len() as usize;
+            }
+            Err(e) => log::warn!(
+                target: "normfs::disk_monitor",
+                "Completed store file {} of queue '{}' cannot be sized: {}",
+                file_id,
+                self.queue_id,
+                e
+            ),
+        }
+    }
+
+    /// WAL bytes are walked each time: the directory holds the files still
+    /// being written, a handful at most.
+    async fn get_queue_size(&self) -> Result<usize, Error> {
+        let mut total_size = *self.store_bytes.lock().unwrap();
+
         let wal_path = self.queue_id.to_wal_dir(&self.root_path);
         if wal_path.exists() {
             total_size += Self::get_directory_size(&wal_path).await?;
-        }
-
-        // Calculate store folder size
-        let store_path = self.queue_id.to_store_dir(&self.root_path);
-        if store_path.exists() {
-            total_size += Self::get_directory_size(&store_path).await?;
         }
 
         Ok(total_size)
@@ -221,6 +274,13 @@ impl QueueMonitor {
 
                         match tokio::fs::remove_file(&store_file_path).await {
                             Ok(_) => {
+                                {
+                                    let mut tracked = self.store_bytes.lock().unwrap();
+                                    *tracked = tracked.saturating_sub(file_size);
+                                }
+                                if let Some(forget) = &self.forget_range {
+                                    forget(&self.queue_id, &current_id);
+                                }
                                 size_to_free = size_to_free.saturating_sub(file_size);
                                 total_freed += file_size;
                                 let remaining_size = current_size.saturating_sub(total_freed);
@@ -305,13 +365,16 @@ impl QueueMonitor {
         Ok(())
     }
 
-    async fn check_and_cleanup(&self) -> Result<(), Error> {
+    async fn check_and_cleanup(&self, rescan: bool) -> Result<(), Error> {
+        if rescan {
+            self.rescan_store().await?;
+        }
         let current_size = self.get_queue_size().await?;
 
         if current_size > self.config.max_size {
             self.cleanup_oldest_files(current_size).await?;
         } else {
-            log::info!(
+            log::debug!(
                 target: "normfs::disk_monitor",
                 "Queue '{}' size {} is within limit {}",
                 self.queue_id,
@@ -330,6 +393,7 @@ pub struct DiskMonitor {
     _handle: Option<tokio::task::JoinHandle<()>>,
     client: Option<Arc<S3Client>>,
     prefix: Option<String>,
+    forget_range: Option<ForgetRange>,
 }
 
 impl DiskMonitor {
@@ -337,20 +401,24 @@ impl DiskMonitor {
         root_path: impl AsRef<Path>,
         client: Option<Arc<S3Client>>,
         prefix: Option<String>,
+        forget_range: Option<ForgetRange>,
     ) -> Result<Self, Error> {
         let monitors: Arc<RwLock<std::collections::HashMap<QueueId, QueueMonitor>>> =
             Arc::new(RwLock::new(std::collections::HashMap::new()));
         let monitors_clone = monitors.clone();
 
         let handle = tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_secs(60));
+            let mut interval = time::interval(CHECK_INTERVAL);
+            let mut ticks: u64 = 0;
 
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
+                        ticks += 1;
+                        let rescan = ticks.is_multiple_of(RESCAN_EVERY_TICKS);
                         let monitors = monitors_clone.read().await;
                         for (queue_id, monitor) in monitors.iter() {
-                            if let Err(e) = monitor.check_and_cleanup().await {
+                            if let Err(e) = monitor.check_and_cleanup(rescan).await {
                                 log::error!(
                                     target: "normfs::disk_monitor",
                                     "Error checking queue '{}': {}",
@@ -370,16 +438,15 @@ impl DiskMonitor {
             _handle: Some(handle),
             client,
             prefix,
+            forget_range,
         })
     }
 
-    pub async fn enqueue_for_offload(
-        &self,
-        queue_id: &QueueId,
-        file_id: UintN,
-    ) -> Result<(), Error> {
+    /// A store file is complete: count its bytes and offer it for offload.
+    pub async fn store_file_done(&self, queue_id: &QueueId, file_id: UintN) -> Result<(), Error> {
         let monitors = self.monitors.read().await;
         if let Some(monitor) = monitors.get(queue_id) {
+            monitor.store_file_done(&file_id).await;
             if let Some(ref offloader) = monitor.offloader {
                 if let Err(e) = offloader.enqueue_file(file_id.clone()).await {
                     log::error!(
@@ -420,11 +487,11 @@ impl DiskMonitor {
             self.root_path.clone(),
             self.client.clone(),
             self.prefix.as_deref(),
+            self.forget_range.clone(),
         )
-        .await;
+        .await?;
 
-        // Do an initial check
-        monitor.check_and_cleanup().await?;
+        monitor.check_and_cleanup(false).await?;
 
         let mut monitors = self.monitors.write().await;
         let has_offloader = monitor.offloader.is_some();
@@ -441,3 +508,7 @@ impl DiskMonitor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "disk_monitor_test.rs"]
+mod disk_monitor_test;
