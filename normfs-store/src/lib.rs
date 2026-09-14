@@ -20,6 +20,8 @@ mod writer;
 
 #[cfg(test)]
 mod header_test;
+#[cfg(test)]
+mod ranges_test;
 
 #[cfg(test)]
 mod store_header_v1_test;
@@ -280,6 +282,11 @@ impl PersistStore {
         }
 
         Ok(result)
+    }
+
+    /// Drops the cached range of a deleted file.
+    pub fn forget_file_range(&self, queue: &QueueId, file_id: &UintN) {
+        self.range_store.forget(queue, file_id);
     }
 
     /// Get the last entry ID in a specific Store file.
