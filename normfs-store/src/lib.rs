@@ -284,7 +284,6 @@ impl PersistStore {
         Ok(result)
     }
 
-    /// Drops the cached range of a deleted file.
     pub fn forget_file_range(&self, queue: &QueueId, file_id: &UintN) {
         self.range_store.forget(queue, file_id);
     }

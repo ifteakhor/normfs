@@ -8,8 +8,6 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use uintn::{Error as UintNError, UintN, paths};
 
-/// One entry per file, so the cache is capped: a miss costs one 256-byte
-/// header read, and a rover holds far more files than are ever re-read.
 const RANGE_CACHE_CAP: usize = 4096;
 
 pub struct RangeStore {
@@ -249,7 +247,6 @@ impl RangeStore {
         Ok(())
     }
 
-    /// Drops the cached range of a file that no longer exists on disk.
     pub fn forget(&self, queue_id: &QueueId, file_id: &UintN) {
         self.ranges
             .write()

@@ -39,7 +39,6 @@ impl DiskMonitorConfig {
     }
 }
 
-/// Called with every store file the monitor deletes.
 pub type ForgetRange = Arc<dyn Fn(&QueueId, &UintN) + Send + Sync>;
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(60);
@@ -52,8 +51,6 @@ struct QueueMonitor {
     config: DiskMonitorConfig,
     root_path: PathBuf,
     offloader: Option<QueueOffloader>,
-    /// Bytes under store/, kept without walking it: the directory holds
-    /// thousands of files and a walk stats every one.
     store_bytes: Mutex<usize>,
     forget_range: Option<ForgetRange>,
 }
@@ -110,7 +107,6 @@ impl QueueMonitor {
         Ok(())
     }
 
-    /// Adds a completed store file to the tracked size.
     async fn store_file_done(&self, file_id: &UintN) {
         let path = self.queue_id.to_store_path(&self.root_path, file_id);
         match tokio::fs::metadata(&path).await {
@@ -127,8 +123,6 @@ impl QueueMonitor {
         }
     }
 
-    /// WAL bytes are walked each time: the directory holds the files still
-    /// being written, a handful at most.
     async fn get_queue_size(&self) -> Result<usize, Error> {
         let mut total_size = *self.store_bytes.lock().unwrap();
 
@@ -442,7 +436,6 @@ impl DiskMonitor {
         })
     }
 
-    /// A store file is complete: count its bytes and offer it for offload.
     pub async fn store_file_done(&self, queue_id: &QueueId, file_id: UintN) -> Result<(), Error> {
         let monitors = self.monitors.read().await;
         if let Some(monitor) = monitors.get(queue_id) {

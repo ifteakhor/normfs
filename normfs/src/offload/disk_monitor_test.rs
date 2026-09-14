@@ -39,8 +39,6 @@ async fn the_tracked_size_follows_completions_and_deletions() {
     };
     monitor.add_queue(&queue, config).await.unwrap();
 
-    // 400 bytes over a 250 limit: the two oldest files go, and the range
-    // cache hears about each.
     assert!(!store_file_exists(root, &queue, 1));
     assert!(!store_file_exists(root, &queue, 2));
     assert!(store_file_exists(root, &queue, 3));

@@ -32,7 +32,6 @@ impl<K: Hash + Eq + Clone, V> BoundedMap<K, V> {
             let Some(oldest) = self.order.pop_front() else {
                 break;
             };
-            // A removed key can still sit in `order`; skip it.
             if self.map.remove(&oldest).is_none() {
                 continue;
             }
