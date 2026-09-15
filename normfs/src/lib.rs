@@ -866,8 +866,9 @@ impl NormFS {
 
         let mut upper = from.clone();
         for link in 0..MAX_LINKS {
-            let Ok(lower) = upper.decrement() else {
-                return;
+            let lower = match upper.decrement() {
+                Ok(lower) if !lower.is_zero() => lower,
+                _ => return,
             };
             let Some(header) = self.get_file_header_all_sources(queue, &upper).await else {
                 return;
