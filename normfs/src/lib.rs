@@ -62,8 +62,8 @@ pub enum Error {
     /// The record does not fit a page, framing included, so no page can hold
     /// it. Refused before an id is taken — see [`NormFS::enqueue`].
     RecordTooLarge(usize),
-    /// No page could take the record and the caller would not wait
-    /// ([`NormFS::try_enqueue`]).
+    /// No page could take the record within the wait the caller allowed
+    /// ([`NormFS::try_enqueue`], [`NormFS::enqueue_timeout`]). It took no id.
     WouldBlock,
     /// The queue is closed ([`NormFS::close_queue`]): writes are refused
     /// until it is started for write again. The data stays readable.
@@ -99,7 +99,9 @@ impl std::fmt::Display for Error {
                 f,
                 "Record of {n} bytes does not fit a memory page once framed"
             ),
-            Error::WouldBlock => write!(f, "No page is free and the caller would not wait"),
+            Error::WouldBlock => {
+                write!(f, "No page became free within the wait the caller allowed")
+            }
             Error::QueueClosed => write!(f, "Queue is closed and accepts no more writes"),
             Error::MemoryBelowFloor {
                 max_memory_usage,
@@ -1236,6 +1238,20 @@ impl NormFS {
             .enqueue_pooled(queue, entry_id.clone(), data, placement)?;
 
         Ok(entry_id)
+    }
+
+    /// [`NormFS::enqueue`] that gives up after `wait` with [`Error::WouldBlock`].
+    /// The refused record took no id: a dropped `enqueue` consumes nothing.
+    pub async fn enqueue_timeout(
+        &self,
+        queue: &QueueId,
+        data: Bytes,
+        wait: Duration,
+    ) -> Result<UintN, Error> {
+        match tokio::time::timeout(wait, self.enqueue(queue, data)).await {
+            Ok(outcome) => outcome,
+            Err(_elapsed) => Err(Error::WouldBlock),
+        }
     }
 
     pub async fn enqueue_batch(
