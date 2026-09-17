@@ -1,6 +1,7 @@
 use normfs_crypto::CryptoContext;
 use normfs_types::QueueId;
-use normfs_wal::{AnyWalHeaderError, WalError, WalFile, WalStore};
+use normfs_wal::{AnyWalHeaderError, PagePool, WalError, WalFile, WalHeader, WalStore};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::{path::Path, sync::Arc};
 use tokio::fs;
@@ -13,10 +14,20 @@ use crate::ranges::RangeStoreError;
 
 mod compression;
 pub mod header;
+pub mod page_writer;
 pub mod parser;
 mod ranges;
+pub mod sink;
+pub mod store_file;
 pub mod store_header_v1;
 mod writer;
+
+pub use page_writer::{PageStoreWriter, PageWriterSettings};
+pub use sink::{LocalStoreSink, SealedFileSink};
+pub use store_file::SealedFile;
+
+#[cfg(test)]
+mod page_writer_test;
 
 #[cfg(test)]
 mod header_test;
@@ -148,7 +159,13 @@ pub struct PersistStore {
 
     writer_handles: Mutex<Option<Vec<JoinHandle<()>>>>,
     shutdown_tx: Mutex<Option<broadcast::Sender<()>>>,
-    store_done_tx: Option<mpsc::UnboundedSender<(QueueId, UintN)>>,
+    store_done_tx: mpsc::UnboundedSender<(QueueId, UintN)>,
+    store_done_rx: Mutex<Option<mpsc::UnboundedReceiver<(QueueId, UintN)>>>,
+    /// The ack channel the WAL writers report on; page writers report on the
+    /// same one, so the memory store hears about a landed file the same way it
+    /// hears about a synced one.
+    written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
+    page_writers: std::sync::RwLock<HashMap<QueueId, PageStoreWriter>>,
 }
 
 impl PersistStore {
@@ -157,8 +174,10 @@ impl PersistStore {
         config: StoreWriteConfig,
         crypto_ctx: Arc<CryptoContext>,
         wal_store: Arc<WalStore>,
+        written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     ) -> Self {
         let root_path = root.as_ref().to_path_buf();
+        let (store_done_tx, store_done_rx) = mpsc::unbounded_channel();
 
         let tmp_dir = root_path.join("tmp");
         std::fs::create_dir_all(&tmp_dir).unwrap_or_else(|e| {
@@ -174,15 +193,20 @@ impl PersistStore {
             )),
             writer_handles: Mutex::new(None),
             shutdown_tx: Mutex::new(None),
-            store_done_tx: None,
+            store_done_tx,
+            store_done_rx: Mutex::new(Some(store_done_rx)),
+            written_sender,
+            page_writers: std::sync::RwLock::new(HashMap::new()),
             config,
             crypto_ctx,
             wal_store,
         }
     }
 
+    /// Starts the WAL migration workers and hands out the completion channel
+    /// every landed store file, from any road, is announced on. Once.
     pub async fn start_writers(
-        &mut self,
+        &self,
         wal_done_chan: mpsc::UnboundedReceiver<WalFile>,
     ) -> mpsc::UnboundedReceiver<(QueueId, UintN)> {
         log::debug!(target: "normfs-store", "Starting {} writer workers", self.config.num_workers);
@@ -192,8 +216,13 @@ impl PersistStore {
 
         let wal_done_chan = Arc::new(Mutex::new(wal_done_chan));
 
-        let (store_done_tx, store_done_rx) = mpsc::unbounded_channel();
-        self.store_done_tx = Some(store_done_tx.clone());
+        let store_done_tx = self.store_done_tx.clone();
+        let store_done_rx = self
+            .store_done_rx
+            .lock()
+            .await
+            .take()
+            .expect("start_writers is called once");
 
         let worker = Arc::new(writer::StoreWriteWorker::new(
             self.root.clone(),
@@ -223,8 +252,89 @@ impl PersistStore {
         store_done_rx
     }
 
+    /// The sink a page writer lands local store files through.
+    pub fn local_sink(&self, fsync: bool) -> Arc<LocalStoreSink> {
+        Arc::new(LocalStoreSink::new(
+            self.root.clone(),
+            self.range_store.clone(),
+            self.store_done_tx.clone(),
+            fsync,
+        ))
+    }
+
+    /// Starts a page-per-file writer for `queue`: its sealed pages become
+    /// store files through `sink`, with no `.wal` in between.
+    pub fn start_page_writer(
+        &self,
+        queue: &QueueId,
+        file_id: &UintN,
+        header: WalHeader,
+        settings: PageWriterSettings,
+        pool: Arc<PagePool>,
+        sink: Arc<dyn SealedFileSink>,
+    ) {
+        let writer = PageStoreWriter::start(
+            queue,
+            file_id,
+            header,
+            settings,
+            pool,
+            sink,
+            self.crypto_ctx.clone(),
+            self.written_sender.clone(),
+        );
+        self.page_writers
+            .write()
+            .unwrap()
+            .insert(queue.clone(), writer);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn written_sender_for_tests(&self) -> mpsc::UnboundedSender<(QueueId, UintN)> {
+        self.written_sender.clone()
+    }
+
+    pub fn has_page_writer(&self, queue: &QueueId) -> bool {
+        self.page_writers.read().unwrap().contains_key(queue)
+    }
+
+    /// Lands everything `queue` has accepted, the open page included. No
+    /// writer means nothing to flush.
+    pub async fn flush_page_writer(&self, queue: &QueueId) -> Result<(), StoreError> {
+        let writer = self.page_writers.read().unwrap().get(queue).cloned();
+        match writer {
+            Some(writer) if !writer.flush().await => Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "page writer stopped",
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// Flushes and stops `queue`'s page writer. `false` when its last file did
+    /// not land within the close budget; the pool reports the gap until it
+    /// does. No writer is `true`: nothing was owed.
+    pub async fn close_page_writer(&self, queue: &QueueId) -> bool {
+        let writer = self.page_writers.write().unwrap().remove(queue);
+        match writer {
+            Some(writer) => writer.close().await,
+            None => true,
+        }
+    }
+
     pub async fn close(&self) {
         log::debug!(target: "normfs-store", "Closing PersistStore, shutting down workers");
+
+        // Page writers first: their tails are files the workers never see, so
+        // nothing below depends on them, and they must land before the
+        // instance reports itself closed.
+        let page_writers: Vec<_> = self.page_writers.write().unwrap().drain().collect();
+        for (queue, writer) in page_writers {
+            if !writer.close().await {
+                log::error!(target: "normfs-store",
+                    "queue {queue}: the last store file did not land within the close budget");
+            }
+        }
 
         if let Some(shutdown_tx) = self.shutdown_tx.lock().await.take() {
             let _ = shutdown_tx.send(());
@@ -254,7 +364,12 @@ impl PersistStore {
     /// Get the latest Store file ID for a queue.
     pub async fn find_last_file_id(&self, queue: &QueueId) -> Result<UintN, StoreError> {
         let queue_path = queue.to_store_dir(&self.root);
-        tokio::fs::create_dir_all(&queue_path).await?;
+        // A lookup creates nothing: a queue that never wrote a store file has
+        // no store directory, and that absence is what tells a restart it was
+        // a memory or cloud queue.
+        if !queue_path.is_dir() {
+            return Err(StoreError::Path(paths::PathError::NoFilesFound));
+        }
 
         paths::find_max_id(&queue_path, "store").map_err(StoreError::Path)
     }
@@ -370,7 +485,9 @@ impl PersistStore {
         log::debug!(target: "normfs-store", "Getting first file ID for queue: {}", queue);
 
         let queue_fs_path = queue.to_store_dir(&self.root);
-        tokio::fs::create_dir_all(&queue_fs_path).await?;
+        if !queue_fs_path.is_dir() {
+            return Ok(None);
+        }
 
         match paths::find_min_id(&queue_fs_path, "store") {
             Ok(id) => {
@@ -392,7 +509,9 @@ impl PersistStore {
         log::debug!(target: "normfs-store", "Getting last file ID for queue: {}", queue);
 
         let queue_fs_path = queue.to_store_dir(&self.root);
-        tokio::fs::create_dir_all(&queue_fs_path).await?;
+        if !queue_fs_path.is_dir() {
+            return Ok(None);
+        }
 
         let last_file = match paths::find_max_id(&queue_fs_path, "store") {
             Err(paths::PathError::NoFilesFound) => {

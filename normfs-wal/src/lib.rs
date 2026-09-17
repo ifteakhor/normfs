@@ -160,7 +160,12 @@ impl WalStore {
     /// Get the latest WAL file ID for a queue.
     pub async fn find_last_file_id(&self, queue: &QueueId) -> Result<UintN, WalError> {
         let queue_path = queue.to_wal_dir(&self.root);
-        tokio::fs::create_dir_all(&queue_path).await?;
+        // A lookup creates nothing: a queue that never wrote a WAL file has no
+        // WAL directory, and that absence is what tells a restart it was a
+        // memory, store or cloud queue.
+        if !queue_path.is_dir() {
+            return Err(WalError::PathError(paths::PathError::NoFilesFound));
+        }
 
         paths::find_max_id(&queue_path, "wal").map_err(WalError::PathError)
     }
@@ -641,7 +646,9 @@ impl WalStore {
         log::debug!("WalStore: getting first file ID for queue '{}'", queue_id);
 
         let queue_path = queue_id.to_wal_dir(&self.root);
-        tokio::fs::create_dir_all(&queue_path).await?;
+        if !queue_path.is_dir() {
+            return Ok(None);
+        }
 
         match paths::find_min_id(&queue_path, "wal") {
             Ok(id) => {
@@ -660,7 +667,9 @@ impl WalStore {
         log::debug!("WalStore: getting last file ID for queue '{}'", queue_id);
 
         let queue_path = queue_id.to_wal_dir(&self.root);
-        tokio::fs::create_dir_all(&queue_path).await?;
+        if !queue_path.is_dir() {
+            return Ok(None);
+        }
 
         let last_file = match paths::find_max_id(&queue_path, "wal") {
             Err(paths::PathError::NoFilesFound) => {

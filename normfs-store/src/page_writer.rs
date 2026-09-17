@@ -1,0 +1,301 @@
+use bytes::BytesMut;
+use normfs_crypto::CryptoContext;
+use normfs_types::QueueId;
+use normfs_wal::{FileRuns, PagePool, WAL_HEADER_V1_MAX_SIZE, WalHeader, WalHeaderV1};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Notify, mpsc, oneshot};
+use uintn::UintN;
+
+use crate::header::{CompressionType, EncryptionType};
+use crate::sink::SealedFileSink;
+use crate::store_file::{self, SealedFile};
+
+/// Attempts between complaints while a file will not land, so a stuck queue
+/// says so about every five seconds at the default delay.
+const LAND_WARN_EVERY: u32 = 500;
+
+/// The backoff between attempts stops growing here.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone)]
+pub struct PageWriterSettings {
+    pub compression: CompressionType,
+    pub encryption: EncryptionType,
+    /// First delay between attempts to land a file; doubles up to thirty
+    /// seconds. Landing retries without bound: the pool fills behind it and
+    /// appenders wait, which is back-pressure rather than loss.
+    pub retry_delay: Duration,
+    /// A close cannot wait forever, so its last file gets this many attempts
+    /// before the close reports itself incomplete. The file keeps retrying in
+    /// the background after that.
+    pub close_max_attempts: u32,
+}
+
+enum Request {
+    Flush(oneshot::Sender<()>),
+    Close(oneshot::Sender<bool>),
+}
+
+/// One queue's page-per-file writer: every sealed page of the pool becomes one
+/// store file through the sink, with no `.wal` and no timer in between.
+///
+/// A file is born when its page fills, on [`PageStoreWriter::flush`], and on
+/// close. Nothing else moves bytes, so a crash loses at most the open page.
+#[derive(Clone)]
+pub struct PageStoreWriter {
+    tx: mpsc::UnboundedSender<Request>,
+}
+
+impl PageStoreWriter {
+    #[allow(clippy::too_many_arguments)]
+    pub fn start(
+        queue: &QueueId,
+        file_id: &UintN,
+        header: WalHeader,
+        settings: PageWriterSettings,
+        pool: Arc<PagePool>,
+        sink: Arc<dyn SealedFileSink>,
+        crypto: Arc<CryptoContext>,
+        written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
+    ) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let flush = Arc::new(Notify::new());
+        pool.set_flush_signal(flush.clone());
+        // From here this task drains the pool, so an appender may wait for a
+        // page: a landed file ends the wait.
+        pool.set_drainer();
+        pool.arm_page_files(WAL_HEADER_V1_MAX_SIZE as u64);
+
+        let task = Task {
+            queue: queue.clone(),
+            file_id: file_id.clone(),
+            header,
+            next_epoch: 0,
+            settings,
+            pool,
+            sink,
+            crypto,
+            written_sender,
+        };
+        tokio::spawn(task.run(rx, flush));
+        Self { tx }
+    }
+
+    /// Lands everything accepted so far, the open page included. `false` if
+    /// the writer is gone.
+    pub async fn flush(&self) -> bool {
+        let (reply, done) = oneshot::channel();
+        if self.tx.send(Request::Flush(reply)).is_err() {
+            return false;
+        }
+        done.await.is_ok()
+    }
+
+    /// As [`PageStoreWriter::flush`], then stops. `false` when the last file
+    /// did not land within the close budget; it keeps trying in the
+    /// background, and the pool reports the gap until it does.
+    pub async fn close(self) -> bool {
+        let (reply, done) = oneshot::channel();
+        if self.tx.send(Request::Close(reply)).is_err() {
+            return false;
+        }
+        done.await.unwrap_or(false)
+    }
+}
+
+struct Task {
+    queue: QueueId,
+    file_id: UintN,
+    /// The open file's header. `num_entries_before` follows the last landed id.
+    header: WalHeader,
+    /// The next epoch to land; everything below it is on its way or done.
+    next_epoch: u64,
+    settings: PageWriterSettings,
+    pool: Arc<PagePool>,
+    sink: Arc<dyn SealedFileSink>,
+    crypto: Arc<CryptoContext>,
+    written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
+}
+
+/// A file built from the pool but not yet landed. The pool's cursors have
+/// already moved past its bytes, so this is the only copy.
+struct Built {
+    sealed: SealedFile,
+    header: WalHeader,
+    first_entry_id: u64,
+    last_entry_id: u64,
+}
+
+impl Task {
+    async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Request>, flush: Arc<Notify>) {
+        loop {
+            tokio::select! {
+                _ = flush.notified() => self.catch_up().await,
+                req = rx.recv() => match req {
+                    Some(Request::Flush(reply)) => {
+                        self.catch_up().await;
+                        if let Some(runs) = self.seal() {
+                            self.land(runs).await;
+                        }
+                        let _ = reply.send(());
+                    }
+                    Some(Request::Close(reply)) => {
+                        self.catch_up().await;
+                        self.seal_and_close(reply).await;
+                        self.pool.clear_drainer();
+                        return;
+                    }
+                    None => {
+                        self.pool.clear_drainer();
+                        return;
+                    }
+                },
+            }
+        }
+    }
+
+    /// Lands every closed epoch. The open one is still being appended to.
+    async fn catch_up(&mut self) {
+        while self.next_epoch < self.pool.epoch() {
+            let epoch = self.next_epoch;
+            if let Some(runs) = self.pool.take_file(epoch) {
+                self.land(runs).await;
+            }
+            self.next_epoch = epoch + 1;
+        }
+    }
+
+    /// Ends the open file where it stands.
+    fn seal(&mut self) -> Option<FileRuns> {
+        let (epoch, runs) = self.pool.seal_open_file()?;
+        debug_assert_eq!(
+            epoch, self.next_epoch,
+            "sealed an epoch the writer had not reached"
+        );
+        self.next_epoch = epoch + 1;
+        Some(runs)
+    }
+
+    /// Lands one file, however long it takes.
+    async fn land(&mut self, runs: FileRuns) {
+        if let Some(built) = self.build(runs) {
+            self.try_land(&built.sealed, None).await;
+            self.finish(built);
+        }
+    }
+
+    /// Ends the open file and lands it within the close budget, replying
+    /// `true` once it is safe. Past the budget the reply is `false` and the
+    /// file keeps trying without bound: the pool reports the gap until then.
+    async fn seal_and_close(&mut self, reply: oneshot::Sender<bool>) {
+        let Some(runs) = self.seal() else {
+            let _ = reply.send(true);
+            return;
+        };
+        let Some(built) = self.build(runs) else {
+            let _ = reply.send(false);
+            return;
+        };
+        if self
+            .try_land(&built.sealed, Some(self.settings.close_max_attempts))
+            .await
+        {
+            self.finish(built);
+            let _ = reply.send(true);
+            return;
+        }
+        let _ = reply.send(false);
+        self.try_land(&built.sealed, None).await;
+        self.finish(built);
+    }
+
+    fn build(&self, runs: FileRuns) -> Option<Built> {
+        let first = UintN::from(runs.first_entry_id);
+        let last = UintN::from(runs.last_entry_id);
+        let num_entries = UintN::from(runs.last_entry_id - runs.first_entry_id + 1);
+
+        let mut header = self.header.resize(&last, self.pool.page_size());
+        header.num_entries_before = first.clone();
+
+        let mut wal_bytes = BytesMut::new();
+        let written = WalHeaderV1::from_v0(&header)
+            .and_then(|h| h.write_to_bytes(&mut wal_bytes))
+            .map_err(|e| e.to_string());
+        for (_, bytes) in &runs.runs {
+            wal_bytes.extend_from_slice(bytes);
+        }
+
+        let sealed = written.and_then(|_| {
+            store_file::build(
+                &self.queue,
+                &self.file_id,
+                self.settings.compression,
+                self.settings.encryption,
+                first,
+                num_entries,
+                &wal_bytes.freeze(),
+                &self.crypto,
+            )
+            .map_err(|e| e.to_string())
+        });
+        match sealed {
+            Ok(sealed) => Some(Built {
+                sealed,
+                header,
+                first_entry_id: runs.first_entry_id,
+                last_entry_id: runs.last_entry_id,
+            }),
+            Err(e) => {
+                // Deterministic, so a retry would fail the same way; the
+                // records stay in memory, unreported as durable, until evicted.
+                log::error!(target: "normfs-store",
+                    "cannot build store file {} for queue {} (entries {}..={}): {e}; \
+                     these records reach no file",
+                    self.file_id, self.queue, runs.first_entry_id, runs.last_entry_id);
+                None
+            }
+        }
+    }
+
+    async fn try_land(&self, sealed: &SealedFile, max_attempts: Option<u32>) -> bool {
+        let mut delay = self.settings.retry_delay;
+        let mut attempt: u32 = 0;
+        loop {
+            match self.sink.land(&self.queue, &self.file_id, sealed).await {
+                Ok(()) => return true,
+                Err(e) => {
+                    attempt = attempt.saturating_add(1);
+                    if max_attempts.is_some_and(|max| attempt >= max) {
+                        log::error!(target: "normfs-store",
+                            "store file {} for queue {} did not land in {attempt} attempts: {e}",
+                            self.file_id, self.queue);
+                        return false;
+                    }
+                    if attempt == 1 || attempt.is_multiple_of(LAND_WARN_EVERY) {
+                        log::warn!(target: "normfs-store",
+                            "store file {} for queue {} did not land (attempt {attempt}): {e}",
+                            self.file_id, self.queue);
+                    }
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(MAX_RETRY_DELAY);
+                }
+            }
+        }
+    }
+
+    /// The file is safe: report it so, and move on to the next.
+    fn finish(&mut self, built: Built) {
+        self.pool
+            .mark_durable(built.last_entry_id.saturating_add(1));
+        let _ = self
+            .written_sender
+            .send((self.queue.clone(), UintN::from(built.last_entry_id)));
+        self.file_id = self.file_id.increment();
+        self.header = built.header;
+        self.header.num_entries_before = UintN::from(built.last_entry_id).increment();
+        log::debug!(target: "normfs-store",
+            "queue {}: entries {}..={} landed as store file {}",
+            self.queue, built.first_entry_id, built.last_entry_id, self.file_id);
+    }
+}

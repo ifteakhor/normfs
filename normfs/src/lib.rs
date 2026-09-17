@@ -332,13 +332,18 @@ impl NormFS {
             tokio::sync::mpsc::UnboundedReceiver<WalFile>,
         ) = tokio::sync::mpsc::unbounded_channel();
 
-        let wal = Arc::new(WalStore::new(&path, wal_entry_send, wal_complete_send));
+        let wal = Arc::new(WalStore::new(
+            &path,
+            wal_entry_send.clone(),
+            wal_complete_send,
+        ));
 
-        let mut store = PersistStore::new(
+        let store = PersistStore::new(
             &path,
             settings.store_cfg.clone(),
             crypto_ctx.clone(),
             wal.clone(),
+            wal_entry_send.clone(),
         );
 
         store.recover().await?;

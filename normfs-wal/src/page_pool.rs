@@ -750,6 +750,12 @@ impl PagePool {
         self.inner.lock().unwrap().ring.page_count()
     }
 
+    /// Bytes per page, which on the page-per-file path is also how wide a
+    /// file's data can get.
+    pub fn page_size(&self) -> usize {
+        self.inner.lock().unwrap().ring.page_size()
+    }
+
     /// This pool's slot range in the shared arena, if it has one.
     pub fn slot_range(&self) -> Option<SlotRange> {
         self.inner.lock().unwrap().ring.slot_range()
