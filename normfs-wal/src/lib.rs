@@ -26,7 +26,7 @@ pub use errors::*;
 #[cfg(any(test, feature = "fault-injection"))]
 pub use fault::{fail_flushes, heal};
 pub use page_pool::{
-    MIN_PAGE_SIZE, PagePool, PendingWrite, Placement, PoolError, RotateHint, Stranded,
+    FileRuns, MIN_PAGE_SIZE, PagePool, PendingWrite, Placement, PoolError, RotateHint, Stranded,
     max_record_len,
 };
 pub use reader::{

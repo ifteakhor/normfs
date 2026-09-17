@@ -293,6 +293,20 @@ pub struct Stranded {
     pub last_entry_id: u64,
 }
 
+/// Every unwritten byte a file has, taken in one go and owned by the taker.
+///
+/// The page-per-file path has no per-record channel and no handover bound:
+/// the append gate orders the records, and a file's pages stop receiving
+/// records the moment the next page opens. So a file is taken whole, once,
+/// and the cursors move with the take -- the sink owns the copy and retries
+/// from it, as [`PagePool::take_stranded`] does for the WAL path.
+#[derive(Debug)]
+pub struct FileRuns {
+    pub runs: Vec<(PendingWrite, Bytes)>,
+    pub first_entry_id: u64,
+    pub last_entry_id: u64,
+}
+
 struct Inner {
     ring: WalRing,
     /// Per page: how many of its bytes the file writer has taken. A page is
@@ -335,6 +349,58 @@ fn first_id_at(inner: &Inner, k: usize, from: usize) -> Option<u64> {
     let first = inner.ring.page_first_entry_id(k)?;
     let index = inner.ring.page_first_index_from(k, from)?;
     Some(first + index as u64)
+}
+
+/// Copies out every unwritten run stamped `epoch` and commits the cursors past
+/// them. `None` when nothing is owed.
+fn take_file_locked(inner: &mut Inner, epoch: u64) -> Option<FileRuns> {
+    let count = inner.ring.page_count();
+    let mut runs: Vec<(PendingWrite, Bytes)> = Vec::new();
+
+    for k in 0..count {
+        if inner.page_epoch[k] != epoch {
+            continue;
+        }
+        let used = inner.ring.page_bytes(k).len();
+        let from = inner.written[k];
+        if from >= used || inner.ring.page_len(k) == 0 {
+            continue;
+        }
+        let (Some(first_entry_id), Some(last_entry_id)) = (
+            first_id_at(inner, k, from),
+            inner.ring.page_last_entry_id(k),
+        ) else {
+            continue;
+        };
+        runs.push((
+            PendingWrite {
+                page: k,
+                from,
+                to: used,
+                first_entry_id,
+                last_entry_id,
+            },
+            Bytes::copy_from_slice(&inner.ring.page_bytes(k)[from..used]),
+        ));
+    }
+
+    if runs.is_empty() {
+        return None;
+    }
+    runs.sort_by_key(|(w, _)| w.first_entry_id);
+
+    for (write, _) in &runs {
+        let PendingWrite { page, to, .. } = *write;
+        let taken = to - inner.written[page];
+        inner.written[page] = to;
+        inner.unwritten = inner.unwritten.saturating_sub(taken);
+    }
+
+    Some(FileRuns {
+        first_entry_id: runs[0].0.first_entry_id,
+        last_entry_id: runs[runs.len() - 1].0.last_entry_id,
+        runs,
+    })
 }
 
 impl Inner {
@@ -795,6 +861,41 @@ impl PagePool {
         inner.handed_through = None;
     }
 
+    /// Arms the pool so that every page is its own file: a `max_file_size` of
+    /// zero is crossed by any record, so the file ends at the next page to open.
+    /// The zero is spelled out here so no caller has to know it is magic.
+    pub fn arm_page_files(&self, header_len: u64) {
+        self.arm_file_fill(0, header_len);
+    }
+
+    /// Takes file `epoch` whole: every unwritten byte on a page stamped with
+    /// it. Cursors advance with the take, so a second call finds nothing.
+    ///
+    /// Meant for a closed epoch, one below [`PagePool::epoch`]; the open one
+    /// is still being appended to, and what this returns for it is a prefix.
+    pub fn take_file(&self, epoch: u64) -> Option<FileRuns> {
+        let mut inner = self.inner.lock().unwrap();
+        take_file_locked(&mut inner, epoch)
+    }
+
+    /// Ends the open file where it stands and takes it, under one lock.
+    ///
+    /// The two have to be one step: the next append re-stamps the active page
+    /// with the new epoch, and a take that came after it would find the old
+    /// file's tail filed under the new one. `None` when the open file has no
+    /// unwritten bytes, in which case the epoch does not move either -- a file
+    /// is never a header alone.
+    pub fn seal_open_file(&self) -> Option<(u64, FileRuns)> {
+        let mut inner = self.inner.lock().unwrap();
+        let epoch = inner.fill.as_ref()?.epoch;
+        let runs = take_file_locked(&mut inner, epoch)?;
+        let fill = inner.fill.as_mut().expect("checked above");
+        fill.epoch += 1;
+        fill.used = fill.header_len;
+        fill.has_written = false;
+        Some((epoch, runs))
+    }
+
     /// Bytes charged to the open file so far, including its header. For tests.
     pub fn fill_used(&self) -> Option<u64> {
         self.inner.lock().unwrap().fill.as_ref().map(|f| f.used)
@@ -968,7 +1069,10 @@ impl PagePool {
                 AppendOutcome::Full => return Ok(None),
             }
         };
-        if over_watermark {
+        // A rotation is a file ready to be taken, which on the page-per-file
+        // path is the only event that ever completes one; the WAL writer gets
+        // a spare wakeup out of it, which costs one idle flush check.
+        if over_watermark || placed.rotate == RotateHint::Before {
             self.signal_flush();
         }
         Ok(Some(placed))
