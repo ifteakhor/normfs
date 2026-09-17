@@ -91,9 +91,8 @@ pub enum ConfigError {
     WalWithoutStore {
         pattern: String,
     },
-    /// A rule asks for cloud and the instance has no cloud settings. An
-    /// error rather than a warning: a queue that quietly stopped offloading
-    /// would be found out by the disk monitor deleting what it never sent.
+    /// A rule asks for cloud and the instance has none. An error, not a
+    /// warning: the disk monitor would delete what was never sent.
     CloudWithoutSettings {
         pattern: String,
     },

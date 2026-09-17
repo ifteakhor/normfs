@@ -17,7 +17,6 @@ fn path_to_id(path: &str, extension: &str) -> Result<UintN, CloudError> {
     Ok(UintN::from_hex_digits(&hex_string)?)
 }
 
-/// Which end of the id range a search is after.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum End {
     Min,
@@ -44,11 +43,10 @@ impl End {
     }
 }
 
-/// One level of the nibble-split layout: files at this level are the ids
-/// with exactly this many digits, directories hold the longer ones. So the
-/// smallest id is a file here if there is one, and the largest is in a
-/// directory if there is one -- which is why the two ends look at the level's
-/// files and directories in opposite orders.
+/// Files at a level are the ids with exactly this many digits; directories
+/// hold longer ones. So the smallest id is a file here if there is one, the
+/// largest is in a directory if there is one, and the two ends scan a level
+/// in opposite orders.
 fn find_id_recursive<'a>(
     client: &'a Arc<S3Client>,
     current_prefix: &'a str,
@@ -192,8 +190,8 @@ pub async fn find_min_id(
     Ok(id)
 }
 
-/// The highest file id under `prefix`: the same descent as `find_min_id`,
-/// directories first and in the other order, so it is one LIST per level too.
+/// The highest file id under `prefix`: `find_min_id`'s descent, directories
+/// first and the digits reversed. One LIST per level, like it.
 pub async fn find_max_id(
     client: &Arc<S3Client>,
     prefix: &str,

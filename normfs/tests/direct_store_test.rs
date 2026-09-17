@@ -84,7 +84,6 @@ async fn wait_for_store_files(dir: &Path, want: usize) {
     );
 }
 
-/// Every record from `from` for `count`, in order, with where each came from.
 async fn read_all(fs: &NormFS, queue: &normfs::QueueId, from: u64, count: u64) -> Vec<DataSource> {
     // `read` delivers before it returns, so the channel must hold the lot.
     let (tx, mut rx) = mpsc::channel(count as usize + 1);

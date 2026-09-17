@@ -52,7 +52,6 @@ impl CloudDownloader {
         }
     }
 
-    /// The object key store file `file_id` of `queue` lives under.
     pub fn key(&self, queue: &QueueId, file_id: &UintN) -> String {
         queue.to_cloud_key(&self.base_prefix, file_id)
     }

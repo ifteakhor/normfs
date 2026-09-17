@@ -13,9 +13,8 @@ use crate::store_header_v1::StoreHeaderV1;
 
 /// A store file's bytes before they go anywhere: `auth ++ header ++ body`.
 ///
-/// Built the same way whether the WAL bytes were read back from a `.wal` file
-/// or taken straight from a memory page, so the format has one origin and the
-/// readers, recovery and offload never learn which road a file came by.
+/// One builder whether the WAL bytes came from a `.wal` file or straight from
+/// a memory page, so readers, recovery and offload never learn which.
 pub struct SealedFile {
     pub auth: Bytes,
     pub header: Bytes,
@@ -41,7 +40,6 @@ impl SealedFile {
         out.freeze()
     }
 
-    /// `None` for a file that holds no entries.
     pub fn last_entry_id(&self) -> Option<UintN> {
         if self.num_entries.is_zero() {
             return None;
@@ -135,9 +133,8 @@ fn compress_and_encrypt(
     Ok(out)
 }
 
-/// Writes `file` under `root` as `queue`'s store file `file_id`: a temp file
-/// in `root/tmp`, synced, then renamed into place, then the directory synced
-/// so the name survives a crash too.
+/// Writes `file` under `root` as `queue`'s store file `file_id`: temp file,
+/// sync, rename, then the directory synced so the name survives a crash too.
 pub async fn land_local(
     root: &Path,
     queue: &QueueId,

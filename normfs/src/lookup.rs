@@ -110,9 +110,8 @@ async fn find_valid_file_backward(
     }
 }
 
-/// `cloud_last` is the last file a cloud-direct queue landed, from its
-/// pointer: such a queue has no local file to bound the walk with, and a
-/// LIST of the bucket on every read is not a price a read should pay.
+/// `cloud_last` bounds the walk for a cloud-direct queue, which has no local
+/// file to do it and should not pay for a LIST on every read.
 pub async fn find_file_with_s3(
     queue: &QueueId,
     target_id: &UintN,

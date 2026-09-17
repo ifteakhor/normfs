@@ -12,11 +12,10 @@ use crate::store_file::{self, SealedFile};
 
 /// Where a sealed file goes.
 ///
-/// `Ok` from `land` is the sink saying the bytes are safe where they were
-/// sent, and it is the only thing the caller reports durability from: the
-/// pages the file came from are handed back for reuse right after. So an
-/// implementation returns only once its own fsync, or its own upload
-/// verification, has returned -- never on the strength of a queued write.
+/// `Ok` from `land` means the bytes are safe where they were sent: the caller
+/// marks them durable and hands their pages back right after. So an
+/// implementation returns only after its own fsync or upload verification,
+/// never on a queued write.
 pub trait SealedFileSink: Send + Sync {
     fn land<'a>(
         &'a self,
@@ -26,8 +25,8 @@ pub trait SealedFileSink: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
-/// The local store directory, exactly as the WAL migration lands a file: temp,
-/// sync, rename, range recorded, offload told.
+/// The local store directory, as the WAL migration lands a file: temp, sync,
+/// rename, range recorded, offload told.
 pub struct LocalStoreSink {
     root: PathBuf,
     range_store: Arc<RangeStore>,

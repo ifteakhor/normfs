@@ -161,9 +161,8 @@ pub struct PersistStore {
     shutdown_tx: Mutex<Option<broadcast::Sender<()>>>,
     store_done_tx: mpsc::UnboundedSender<(QueueId, UintN)>,
     store_done_rx: Mutex<Option<mpsc::UnboundedReceiver<(QueueId, UintN)>>>,
-    /// The ack channel the WAL writers report on; page writers report on the
-    /// same one, so the memory store hears about a landed file the same way it
-    /// hears about a synced one.
+    /// The ack channel the WAL writers report on. Page writers use the same
+    /// one, so a landed file and a synced file reach memory the same way.
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     page_writers: std::sync::RwLock<HashMap<QueueId, PageStoreWriter>>,
 }
@@ -203,8 +202,8 @@ impl PersistStore {
         }
     }
 
-    /// Starts the WAL migration workers and hands out the completion channel
-    /// every landed store file, from any road, is announced on. Once.
+    /// Starts the WAL migration workers and hands out the channel every landed
+    /// store file is announced on. Once.
     pub async fn start_writers(
         &self,
         wal_done_chan: mpsc::UnboundedReceiver<WalFile>,
@@ -252,7 +251,6 @@ impl PersistStore {
         store_done_rx
     }
 
-    /// The sink a page writer lands local store files through.
     pub fn local_sink(&self, fsync: bool) -> Arc<LocalStoreSink> {
         Arc::new(LocalStoreSink::new(
             self.root.clone(),
@@ -298,8 +296,6 @@ impl PersistStore {
         self.page_writers.read().unwrap().contains_key(queue)
     }
 
-    /// Lands everything `queue` has accepted, the open page included. No
-    /// writer means nothing to flush.
     pub async fn flush_page_writer(&self, queue: &QueueId) -> Result<(), StoreError> {
         let writer = self.page_writers.read().unwrap().get(queue).cloned();
         match writer {
@@ -312,8 +308,8 @@ impl PersistStore {
     }
 
     /// Flushes and stops `queue`'s page writer. `false` when its last file did
-    /// not land within the close budget; the pool reports the gap until it
-    /// does. No writer is `true`: nothing was owed.
+    /// not land within the close budget; it keeps trying, and the pool reports
+    /// the gap until it does.
     pub async fn close_page_writer(&self, queue: &QueueId) -> bool {
         let writer = self.page_writers.write().unwrap().remove(queue);
         match writer {
@@ -325,9 +321,8 @@ impl PersistStore {
     pub async fn close(&self) {
         log::debug!(target: "normfs-store", "Closing PersistStore, shutting down workers");
 
-        // Page writers first: their tails are files the workers never see, so
-        // nothing below depends on them, and they must land before the
-        // instance reports itself closed.
+        // Page writers first: their tails must land before the instance
+        // reports itself closed, and nothing below depends on them.
         let page_writers: Vec<_> = self.page_writers.write().unwrap().drain().collect();
         for (queue, writer) in page_writers {
             if !writer.close().await {
@@ -365,8 +360,7 @@ impl PersistStore {
     pub async fn find_last_file_id(&self, queue: &QueueId) -> Result<UintN, StoreError> {
         let queue_path = queue.to_store_dir(&self.root);
         // A lookup creates nothing: a queue that never wrote a store file has
-        // no store directory, and that absence is what tells a restart it was
-        // a memory or cloud queue.
+        // no store directory, and a restart reads that absence.
         if !queue_path.is_dir() {
             return Err(StoreError::Path(paths::PathError::NoFilesFound));
         }

@@ -119,7 +119,6 @@ async fn settle() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 }
 
-/// The next id announced on `rx`, or a panic after a second.
 async fn next_id(rx: &mut mpsc::UnboundedReceiver<(QueueId, UintN)>) -> UintN {
     tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await

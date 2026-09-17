@@ -11,11 +11,10 @@ use crate::header::{CompressionType, EncryptionType};
 use crate::sink::SealedFileSink;
 use crate::store_file::{self, SealedFile};
 
-/// Attempts between complaints while a file will not land, so a stuck queue
-/// says so about every five seconds at the default delay.
+/// Attempts between complaints while a file will not land: about every five
+/// seconds at the default delay.
 const LAND_WARN_EVERY: u32 = 500;
 
-/// The backoff between attempts stops growing here.
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -23,12 +22,11 @@ pub struct PageWriterSettings {
     pub compression: CompressionType,
     pub encryption: EncryptionType,
     /// First delay between attempts to land a file; doubles up to thirty
-    /// seconds. Landing retries without bound: the pool fills behind it and
-    /// appenders wait, which is back-pressure rather than loss.
+    /// seconds. Attempts are unbounded: the pool fills behind a file that will
+    /// not land and appenders wait, which is back-pressure rather than loss.
     pub retry_delay: Duration,
-    /// A close cannot wait forever, so its last file gets this many attempts
-    /// before the close reports itself incomplete. The file keeps retrying in
-    /// the background after that.
+    /// Attempts a close gives its last file before reporting itself
+    /// incomplete. The file keeps retrying after that.
     pub close_max_attempts: u32,
 }
 
@@ -37,10 +35,10 @@ enum Request {
     Close(oneshot::Sender<bool>),
 }
 
-/// One queue's page-per-file writer: every sealed page of the pool becomes one
-/// store file through the sink, with no `.wal` and no timer in between.
+/// One queue's page-per-file writer: each sealed page becomes one store file
+/// through the sink, with no `.wal` and no timer in between.
 ///
-/// A file is born when its page fills, on [`PageStoreWriter::flush`], and on
+/// A file is born when its page fills, on [`PageStoreWriter::flush`] and on
 /// close. Nothing else moves bytes, so a crash loses at most the open page.
 #[derive(Clone)]
 pub struct PageStoreWriter {
@@ -93,8 +91,8 @@ impl PageStoreWriter {
     }
 
     /// As [`PageStoreWriter::flush`], then stops. `false` when the last file
-    /// did not land within the close budget; it keeps trying in the
-    /// background, and the pool reports the gap until it does.
+    /// did not land within the close budget; it keeps trying, and the pool
+    /// reports the gap until it does.
     pub async fn close(self) -> bool {
         let (reply, done) = oneshot::channel();
         if self.tx.send(Request::Close(reply)).is_err() {
@@ -107,9 +105,7 @@ impl PageStoreWriter {
 struct Task {
     queue: QueueId,
     file_id: UintN,
-    /// The open file's header. `num_entries_before` follows the last landed id.
     header: WalHeader,
-    /// The next epoch to land; everything below it is on its way or done.
     next_epoch: u64,
     settings: PageWriterSettings,
     pool: Arc<PagePool>,
@@ -155,7 +151,6 @@ impl Task {
         }
     }
 
-    /// Lands every closed epoch. The open one is still being appended to.
     async fn catch_up(&mut self) {
         while self.next_epoch < self.pool.epoch() {
             let epoch = self.next_epoch;
@@ -166,7 +161,6 @@ impl Task {
         }
     }
 
-    /// Ends the open file where it stands.
     fn seal(&mut self) -> Option<FileRuns> {
         let (epoch, runs) = self.pool.seal_open_file()?;
         debug_assert_eq!(
@@ -177,7 +171,6 @@ impl Task {
         Some(runs)
     }
 
-    /// Lands one file, however long it takes.
     async fn land(&mut self, runs: FileRuns) {
         if let Some(built) = self.build(runs) {
             self.try_land(&built.sealed, None).await;
@@ -185,9 +178,6 @@ impl Task {
         }
     }
 
-    /// Ends the open file and lands it within the close budget, replying
-    /// `true` once it is safe. Past the budget the reply is `false` and the
-    /// file keeps trying without bound: the pool reports the gap until then.
     async fn seal_and_close(&mut self, reply: oneshot::Sender<bool>) {
         let Some(runs) = self.seal() else {
             let _ = reply.send(true);
@@ -284,7 +274,6 @@ impl Task {
         }
     }
 
-    /// The file is safe: report it so, and move on to the next.
     fn finish(&mut self, built: Built) {
         self.pool
             .mark_durable(built.last_entry_id.saturating_add(1));

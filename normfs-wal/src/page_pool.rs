@@ -295,11 +295,10 @@ pub struct Stranded {
 
 /// Every unwritten byte a file has, taken in one go and owned by the taker.
 ///
-/// The page-per-file path has no per-record channel and no handover bound:
-/// the append gate orders the records, and a file's pages stop receiving
-/// records the moment the next page opens. So a file is taken whole, once,
-/// and the cursors move with the take -- the sink owns the copy and retries
-/// from it, as [`PagePool::take_stranded`] does for the WAL path.
+/// The page-per-file path has no handover bound: the append gate orders the
+/// records and a file's pages stop changing when the next page opens. So a
+/// file is taken whole, once, cursors moving with the take, and the sink
+/// retries from its own copy -- as [`PagePool::take_stranded`] already does.
 #[derive(Debug)]
 pub struct FileRuns {
     pub runs: Vec<(PendingWrite, Bytes)>,
@@ -344,15 +343,12 @@ struct Inner {
     stranded: BTreeMap<u64, u64>,
 }
 
-/// The id of the first entry of page `k` that begins at or after byte `from`.
 fn first_id_at(inner: &Inner, k: usize, from: usize) -> Option<u64> {
     let first = inner.ring.page_first_entry_id(k)?;
     let index = inner.ring.page_first_index_from(k, from)?;
     Some(first + index as u64)
 }
 
-/// Copies out every unwritten run stamped `epoch` and commits the cursors past
-/// them. `None` when nothing is owed.
 fn take_file_locked(inner: &mut Inner, epoch: u64) -> Option<FileRuns> {
     let count = inner.ring.page_count();
     let mut runs: Vec<(PendingWrite, Bytes)> = Vec::new();
@@ -867,30 +863,24 @@ impl PagePool {
         inner.handed_through = None;
     }
 
-    /// Arms the pool so that every page is its own file: a `max_file_size` of
-    /// zero is crossed by any record, so the file ends at the next page to open.
-    /// The zero is spelled out here so no caller has to know it is magic.
+    /// Arms the pool so that every page is its own file: a zero threshold is
+    /// crossed by any record, so a file ends at the next page to open.
     pub fn arm_page_files(&self, header_len: u64) {
         self.arm_file_fill(0, header_len);
     }
 
     /// Takes file `epoch` whole: every unwritten byte on a page stamped with
     /// it. Cursors advance with the take, so a second call finds nothing.
-    ///
-    /// Meant for a closed epoch, one below [`PagePool::epoch`]; the open one
-    /// is still being appended to, and what this returns for it is a prefix.
+    /// For a closed epoch; the open one is still growing.
     pub fn take_file(&self, epoch: u64) -> Option<FileRuns> {
         let mut inner = self.inner.lock().unwrap();
         take_file_locked(&mut inner, epoch)
     }
 
-    /// Ends the open file where it stands and takes it, under one lock.
-    ///
-    /// The two have to be one step: the next append re-stamps the active page
-    /// with the new epoch, and a take that came after it would find the old
-    /// file's tail filed under the new one. `None` when the open file has no
-    /// unwritten bytes, in which case the epoch does not move either -- a file
-    /// is never a header alone.
+    /// Ends the open file where it stands and takes it, under one lock: the
+    /// next append re-stamps the active page with the new epoch, and a take
+    /// after it would file the old tail under the new file. `None`, and no
+    /// epoch move, when nothing is owed -- a file is never a header alone.
     pub fn seal_open_file(&self) -> Option<(u64, FileRuns)> {
         let mut inner = self.inner.lock().unwrap();
         let epoch = inner.fill.as_ref()?.epoch;
@@ -1075,9 +1065,8 @@ impl PagePool {
                 AppendOutcome::Full => return Ok(None),
             }
         };
-        // A rotation is a file ready to be taken, which on the page-per-file
-        // path is the only event that ever completes one; the WAL writer gets
-        // a spare wakeup out of it, which costs one idle flush check.
+        // A rotation completes a file on the page-per-file path; the WAL
+        // writer gets a spare wakeup out of it, one idle check.
         if over_watermark || placed.rotate == RotateHint::Before {
             self.signal_flush();
         }

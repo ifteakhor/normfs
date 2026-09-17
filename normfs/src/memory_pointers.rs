@@ -55,7 +55,6 @@ impl MemoryPointers {
         self.pointer(queue).map(|p| UintN::from(p.id))
     }
 
-    /// The last store file a cloud-direct queue landed, with its last id.
     pub(crate) fn last_landed(&self, queue: &QueueId) -> Option<(UintN, UintN)> {
         let p = self.pointer(queue)?;
         Some((UintN::from(p.id), UintN::from(p.file?)))
@@ -73,8 +72,8 @@ impl MemoryPointers {
     }
 
     /// Records that `file_id` holding ids up to `last_id` is in the cloud, and
-    /// writes it out before returning. A cloud-direct queue's next life
-    /// starts from this, and one read stale would overwrite that object.
+    /// writes it out before returning: the next life starts from this, and a
+    /// stale one would overwrite that object.
     pub(crate) fn mark_landed(
         &self,
         queue: &QueueId,

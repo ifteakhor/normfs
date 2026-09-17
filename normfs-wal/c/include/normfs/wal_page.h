@@ -199,12 +199,9 @@ struct normfs_wal_page_find_result
 normfs_wal_page_find(struct normfs_wal_page *page, uint64_t entry_id);
 
 /*
- * Where to cut a page so that everything before the cut has an id below
- * entry_id and everything at or after it has an id at or above. A flush that
- * may only take ids up to some bound takes buf[from .. cut(bound + 1)), and the
- * proof that the cut falls between two entries and never inside one is the
- * neighbour clause below: the entry just under the bound begins strictly
- * before the cut.
+ * Where a page splits into ids below entry_id and ids at or above it. A flush
+ * bounded at some id takes buf[from .. cut(bound + 1)); the neighbour clause
+ * is what proves the cut falls between two entries and never inside one.
  */
 /*@ requires normfs_wal_page_wf(page);
     assigns \nothing;
@@ -225,9 +222,8 @@ normfs_wal_page_find(struct normfs_wal_page *page, uint64_t entry_id);
 size_t normfs_wal_page_cut(struct normfs_wal_page *page, uint64_t entry_id);
 
 /*
- * The inverse: the first entry whose bytes begin at or after byte offset
- * `from`, which is what a writer resuming mid-page needs to name the id of the
- * first record it is about to take.
+ * The inverse: the first entry beginning at or after byte `from`, which names
+ * the first id a writer resuming mid-page is about to take.
  */
 /*@ requires normfs_wal_page_wf(page);
     assigns \nothing;

@@ -1035,13 +1035,10 @@ impl NormFS {
     }
 
     /// Where a cloud-direct queue resumes: the pointer names the last file
-    /// landed and its last id. The bucket is asked once for a later file, in
-    /// case the pointer is behind it -- the process died between the PUT and
-    /// the pointer write -- because writing the next file at a lower id would
-    /// overwrite an object holding acked records. The bucket being
-    /// unreachable is not fatal here: the pointer is what the sink wrote
-    /// after every landing, and the writer that follows retries the bucket
-    /// on its own.
+    /// landed and its last id. The bucket is asked once for a later file, for
+    /// the crash between a PUT and the pointer write, since the next file
+    /// written at a lower id would overwrite acked records. An unreachable
+    /// bucket is a warning here; the writer that follows retries it anyway.
     async fn continue_cloud_queue(
         &self,
         queue: &QueueId,
@@ -1375,10 +1372,9 @@ impl NormFS {
         Ok(entry_ids)
     }
 
-    /// What happens to a record once it is in a page, by pipeline: a memory
-    /// queue acks it here, a WAL queue tells its writer, a page-per-file
-    /// queue nothing -- its writer takes the page whole and the ack comes
-    /// back from the sink.
+    /// What a record needs once it is in a page: a memory queue acks it here,
+    /// a WAL queue tells its writer, a page-per-file queue nothing -- its
+    /// writer takes the page whole and the ack comes back from the sink.
     fn after_place(
         &self,
         queue: &QueueId,

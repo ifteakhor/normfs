@@ -10,11 +10,10 @@ use crate::downloader::CloudDownloader;
 use crate::offloader::put_verified;
 
 /// Where a cloud-direct queue records what has landed, so a restart knows
-/// the last id and the last file without listing the bucket.
+/// its last id and last file without listing the bucket.
 ///
-/// `mark_landed` must not return before the record is durable. A restart that
-/// read a stale record would start the next file at an id already in the
-/// bucket and overwrite an object holding acked data.
+/// `mark_landed` returns only once the record is durable: a restart that read
+/// a stale one would start the next file at an id the bucket already holds.
 pub trait LandedIndex: Send + Sync {
     fn mark_landed(
         &self,
@@ -24,9 +23,9 @@ pub trait LandedIndex: Send + Sync {
     ) -> io::Result<()>;
 }
 
-/// The bucket, directly: a sealed page becomes one object and touches no
-/// local disk. Retrying is the caller's; every attempt is a fresh PUT of the
-/// same key, which is idempotent.
+/// The bucket, directly: a sealed page becomes one object and no local disk
+/// is touched. Every attempt is a fresh PUT of the same key, so the caller
+/// may retry freely.
 pub struct CloudSink {
     downloader: Arc<CloudDownloader>,
     index: Arc<dyn LandedIndex>,

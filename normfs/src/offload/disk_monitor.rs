@@ -43,9 +43,8 @@ impl DiskMonitorConfig {
     }
 }
 
-/// How long the running store total is trusted before one walk re-seeds it.
-/// Every landed and every deleted store file is accounted for as it happens,
-/// so this only absorbs what nothing reported -- a file removed by hand.
+/// How long the running store total is trusted before a walk re-seeds it;
+/// only a file removed by hand can put it off.
 const STORE_RESEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug)]
@@ -54,9 +53,9 @@ struct QueueMonitor {
     config: DiskMonitorConfig,
     root_path: PathBuf,
     offloader: Option<QueueOffloader>,
-    /// Bytes of store files, kept as they land and as they are deleted.
-    /// With page-sized store files a queue holds hundreds of thousands, and
-    /// stat-ing every one each tick was the tick.
+    /// Bytes of store files, kept as they land and are deleted. With page-sized
+    /// files a queue holds hundreds of thousands; stat-ing each per tick was
+    /// the tick.
     store_bytes: AtomicU64,
     store_seeded: std::sync::Mutex<Instant>,
 }

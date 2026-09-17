@@ -161,8 +161,7 @@ impl WalStore {
     pub async fn find_last_file_id(&self, queue: &QueueId) -> Result<UintN, WalError> {
         let queue_path = queue.to_wal_dir(&self.root);
         // A lookup creates nothing: a queue that never wrote a WAL file has no
-        // WAL directory, and that absence is what tells a restart it was a
-        // memory, store or cloud queue.
+        // WAL directory, and a restart reads that absence.
         if !queue_path.is_dir() {
             return Err(WalError::PathError(paths::PathError::NoFilesFound));
         }

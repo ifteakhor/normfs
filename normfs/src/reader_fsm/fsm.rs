@@ -55,8 +55,8 @@ impl ReaderFSM {
         }
     }
 
-    /// A memory queue has no files to fall back to, and a read must not go
-    /// looking: an absent directory is what its restart contract rests on.
+    /// A memory queue has no files, and a read must not go looking: its
+    /// restart contract rests on the directory being absent.
     fn is_memory(&self, queue: &QueueId) -> bool {
         self.queue_settings
             .get_config(&queue.to_string())
