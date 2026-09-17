@@ -40,6 +40,7 @@ mod signature_test;
 
 #[derive(Debug)]
 pub enum StoreError {
+    CloseIncomplete,
     Io(std::io::Error),
     Header(header::StoreHeaderError),
     AnyHeader(store_header_v1::AnyStoreHeaderError),
@@ -56,6 +57,10 @@ pub enum StoreError {
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            StoreError::CloseIncomplete => write!(
+                f,
+                "store close incomplete: accepted records are not durable"
+            ),
             StoreError::Io(e) => write!(f, "IO error: {}", e),
             StoreError::Header(e) => write!(f, "Store header error: {}", e),
             StoreError::AnyHeader(e) => write!(f, "Store header error: {}", e),
@@ -296,6 +301,14 @@ impl PersistStore {
         self.page_writers.read().unwrap().contains_key(queue)
     }
 
+    pub fn page_writer_is_closing(&self, queue: &QueueId) -> bool {
+        self.page_writers
+            .read()
+            .unwrap()
+            .get(queue)
+            .is_some_and(PageStoreWriter::is_closing)
+    }
+
     pub async fn flush_page_writer(&self, queue: &QueueId) -> Result<(), StoreError> {
         let writer = self.page_writers.read().unwrap().get(queue).cloned();
         match writer {
@@ -307,28 +320,31 @@ impl PersistStore {
         }
     }
 
-    /// Flushes and stops `queue`'s page writer. `false` when its last file did
+    /// Flushes and stops `queue`'s page writer. `false` when an outstanding file did
     /// not land within the close budget; it keeps trying, and the pool reports
     /// the gap until it does.
     pub async fn close_page_writer(&self, queue: &QueueId) -> bool {
-        let writer = self.page_writers.write().unwrap().remove(queue);
+        let writer = self.page_writers.read().unwrap().get(queue).cloned();
         match writer {
-            Some(writer) => writer.close().await,
+            Some(writer) => {
+                let complete = writer.close().await;
+                if complete {
+                    self.page_writers.write().unwrap().remove(queue);
+                }
+                complete
+            }
             None => true,
         }
     }
 
-    pub async fn close(&self) {
+    /// An incomplete close retains the page writers so callers can retry
+    /// after storage recovers.
+    pub async fn close(&self) -> Result<(), StoreError> {
         log::debug!(target: "normfs-store", "Closing PersistStore, shutting down workers");
-
-        // Page writers first: their tails must land before the instance
-        // reports itself closed, and nothing below depends on them.
-        let page_writers: Vec<_> = self.page_writers.write().unwrap().drain().collect();
-        for (queue, writer) in page_writers {
-            if !writer.close().await {
-                log::error!(target: "normfs-store",
-                    "queue {queue}: the last store file did not land within the close budget");
-            }
+        let queues: Vec<_> = self.page_writers.read().unwrap().keys().cloned().collect();
+        let mut complete = true;
+        for queue in queues {
+            complete &= self.close_page_writer(&queue).await;
         }
 
         if let Some(shutdown_tx) = self.shutdown_tx.lock().await.take() {
@@ -343,7 +359,11 @@ impl PersistStore {
             }
         }
 
+        if !complete {
+            return Err(StoreError::CloseIncomplete);
+        }
         log::info!(target: "normfs-store", "PersistStore closed successfully");
+        Ok(())
     }
 
     pub async fn get_queue_start(&self, queue: &QueueId) -> Result<Option<UintN>, StoreError> {

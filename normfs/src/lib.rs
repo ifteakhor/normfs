@@ -559,6 +559,11 @@ impl NormFS {
         let queue_lock = self.queue_init_lock(queue);
         let _guard = queue_lock.lock().await;
 
+        // A retry still owns its file id until the old writer has finished.
+        if self.store.page_writer_is_closing(queue) && !self.store.close_page_writer(queue).await {
+            return Err(StoreError::CloseIncomplete.into());
+        }
+
         if self.queue_closed_durably(queue) {
             self.reopen_queue(queue)?;
         }
@@ -1038,31 +1043,22 @@ impl NormFS {
     /// landed and its last id. The bucket is asked once for a later file, for
     /// the crash between a PUT and the pointer write, since the next file
     /// written at a lower id would overwrite acked records. An unreachable
-    /// bucket is a warning here; the writer that follows retries it anyway.
+    /// bucket prevents writing until its next unused file id is known.
     async fn continue_cloud_queue(
         &self,
         queue: &QueueId,
     ) -> Result<(UintN, normfs_wal::WalHeader, Option<UintN>), Error> {
         let mut landed = self.memory_pointers.last_landed(queue);
         if let Some(downloader) = &self.cloud_downloader {
-            match downloader.find_max_id(queue).await {
-                Ok(Some(max_file)) if landed.as_ref().is_none_or(|(_, f)| max_file > *f) => {
-                    match downloader.get_file_range(queue, &max_file).await {
-                        Ok(Some((_, last))) => {
-                            log::warn!(target: "normfs",
-                                "Queue '{}': bucket holds file {} beyond the pointer; resuming after it",
-                                queue, max_file);
-                            landed = Some((last, max_file));
-                        }
-                        Ok(None) => {}
-                        Err(e) => log::warn!(target: "normfs",
-                            "Queue '{}': could not read the range of cloud file {}: {}",
-                            queue, max_file, e),
-                    }
+            if let Some(max_file) = downloader.find_max_id(queue).await? {
+                if landed.as_ref().is_none_or(|(_, f)| max_file > *f) {
+                    let (_, last) = downloader.get_file_range(queue, &max_file).await?
+                        .ok_or_else(|| std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("cloud file {max_file} has no recoverable range for queue {queue}"),
+                        ))?;
+                    landed = Some((last, max_file));
                 }
-                Ok(_) => {}
-                Err(e) => log::warn!(target: "normfs",
-                    "Queue '{}': could not list the bucket, resuming from the pointer: {}", queue, e),
             }
         }
 
@@ -1328,44 +1324,19 @@ impl NormFS {
 
         log::debug!(target: "normfs", "Enqueuing batch - Queue: '{}', Batch size: {} entries", queue, data.len());
 
-        // Each record is placed exactly as a single enqueue would place it. It
-        // has to be: a record that reached a page but was reported as not in
-        // one would be written to the file twice — once from the writer's
-        // buffer and once from its page.
-        let Some(placed) = self.mem.enqueue_batch_awaiting(queue, data.clone()).await else {
+        let Some(entry_ids) = self
+            .mem
+            .enqueue_batch_awaiting(queue, data, |id, data, placement| {
+                self.after_place(queue, id, data, placement)
+            })
+            .await?
+        else {
             return Err(if self.mem.is_closed(queue) {
                 Error::QueueClosed
             } else {
                 Error::QueueNotFound
             });
         };
-        let entry_ids: Vec<UintN> = placed.iter().map(|(id, _)| id.clone()).collect();
-
-        if let (Some(first_id), Some(last_id)) = (entry_ids.first(), entry_ids.last()) {
-            log::debug!(target: "normfs", "Batch entry IDs - Queue: '{}', First ID: {}, Last ID: {}",
-                queue, first_id, last_id);
-        }
-
-        let wal_entries: Vec<(UintN, Bytes, normfs_wal::Placement)> = placed
-            .into_iter()
-            .zip(data.iter().cloned())
-            .map(|((id, placement), d)| (id, d, placement))
-            .collect();
-
-        match self.persist_for(queue).drainer() {
-            Drainer::None => {
-                // The ack is a watermark and the pointer is monotone, so the
-                // last id stands for the batch.
-                if let Some(last_id) = entry_ids.last() {
-                    self.memory_pointers
-                        .mark(queue, last_id)
-                        .map_err(Error::Io)?;
-                    self.mem.ack(queue, last_id);
-                }
-            }
-            Drainer::Wal => self.wal.enqueue_batch(queue, wal_entries)?,
-            Drainer::Page => {}
-        }
 
         log::trace!(target: "normfs", "Batch enqueued successfully - Queue: '{}', Count: {}", queue, entry_ids.len());
 
@@ -1514,8 +1485,10 @@ impl NormFS {
 
         // Store first: page writers land their tails, and the migration
         // workers must outlive the WAL writers' last rotation.
-        self.store.close().await;
-        self.wal.close().await?;
+        let store_result = self.store.close().await;
+        let wal_result = self.wal.close().await;
+        store_result?;
+        wal_result?;
 
         log::info!(target: "normfs", "NormFS closed successfully");
         Ok(())

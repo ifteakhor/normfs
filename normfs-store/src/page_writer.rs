@@ -4,7 +4,7 @@ use normfs_types::QueueId;
 use normfs_wal::{FileRuns, PagePool, WAL_HEADER_V1_MAX_SIZE, WalHeader, WalHeaderV1};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use uintn::UintN;
 
 use crate::header::{CompressionType, EncryptionType};
@@ -25,14 +25,14 @@ pub struct PageWriterSettings {
     /// seconds. Attempts are unbounded: the pool fills behind a file that will
     /// not land and appenders wait, which is back-pressure rather than loss.
     pub retry_delay: Duration,
-    /// Attempts a close gives its last file before reporting itself
+    /// Attempts a close gives an outstanding file before reporting itself
     /// incomplete. The file keeps retrying after that.
     pub close_max_attempts: u32,
 }
 
 enum Request {
     Flush(oneshot::Sender<()>),
-    Close(oneshot::Sender<bool>),
+    Close,
 }
 
 /// One queue's page-per-file writer: each sealed page becomes one store file
@@ -43,9 +43,15 @@ enum Request {
 #[derive(Clone)]
 pub struct PageStoreWriter {
     tx: mpsc::UnboundedSender<Request>,
+    closing: watch::Sender<bool>,
+    done: watch::Receiver<Option<bool>>,
 }
 
 impl PageStoreWriter {
+    pub(crate) fn is_closing(&self) -> bool {
+        *self.closing.borrow()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         queue: &QueueId,
@@ -58,6 +64,8 @@ impl PageStoreWriter {
         written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (closing, close_requested) = watch::channel(false);
+        let (close_done, done) = watch::channel(None);
         let flush = Arc::new(Notify::new());
         pool.set_flush_signal(flush.clone());
         // From here this task drains the pool, so an appender may wait for a
@@ -70,14 +78,17 @@ impl PageStoreWriter {
             file_id: file_id.clone(),
             header,
             next_epoch: 0,
+            build_failed: false,
             settings,
             pool,
             sink,
             crypto,
             written_sender,
+            closing: close_requested,
+            done: close_done,
         };
         tokio::spawn(task.run(rx, flush));
-        Self { tx }
+        Self { tx, closing, done }
     }
 
     /// Lands everything accepted so far, the open page included. `false` if
@@ -90,15 +101,18 @@ impl PageStoreWriter {
         done.await.is_ok()
     }
 
-    /// As [`PageStoreWriter::flush`], then stops. `false` when the last file
+    /// As [`PageStoreWriter::flush`], then stops. `false` when an outstanding file
     /// did not land within the close budget; it keeps trying, and the pool
     /// reports the gap until it does.
-    pub async fn close(self) -> bool {
-        let (reply, done) = oneshot::channel();
-        if self.tx.send(Request::Close(reply)).is_err() {
-            return false;
+    pub async fn close(mut self) -> bool {
+        if !self.closing.send_replace(true) {
+            let _ = self.tx.send(Request::Close);
         }
-        done.await.unwrap_or(false)
+        self.done
+            .wait_for(|done| done.is_some())
+            .await
+            .map(|done| done.unwrap_or(false))
+            .unwrap_or(false)
     }
 }
 
@@ -107,11 +121,14 @@ struct Task {
     file_id: UintN,
     header: WalHeader,
     next_epoch: u64,
+    build_failed: bool,
     settings: PageWriterSettings,
     pool: Arc<PagePool>,
     sink: Arc<dyn SealedFileSink>,
     crypto: Arc<CryptoContext>,
     written_sender: mpsc::UnboundedSender<(QueueId, UintN)>,
+    closing: watch::Receiver<bool>,
+    done: watch::Sender<Option<bool>>,
 }
 
 /// A file built from the pool but not yet landed. The pool's cursors have
@@ -136,9 +153,14 @@ impl Task {
                         }
                         let _ = reply.send(());
                     }
-                    Some(Request::Close(reply)) => {
+                    Some(Request::Close) => {
                         self.catch_up().await;
-                        self.seal_and_close(reply).await;
+                        if let Some(runs) = self.seal() {
+                            self.land(runs).await;
+                        }
+                        // Reader pins can outlive the writer; they prevent
+                        // page reuse, but do not undo a successful landing.
+                        self.done.send_replace(Some(!self.build_failed));
                         self.pool.clear_drainer();
                         return;
                     }
@@ -173,31 +195,11 @@ impl Task {
 
     async fn land(&mut self, runs: FileRuns) {
         if let Some(built) = self.build(runs).await {
-            self.try_land(&built.sealed, None).await;
+            self.try_land(&built.sealed).await;
             self.finish(built);
+        } else {
+            self.build_failed = true;
         }
-    }
-
-    async fn seal_and_close(&mut self, reply: oneshot::Sender<bool>) {
-        let Some(runs) = self.seal() else {
-            let _ = reply.send(true);
-            return;
-        };
-        let Some(built) = self.build(runs).await else {
-            let _ = reply.send(false);
-            return;
-        };
-        if self
-            .try_land(&built.sealed, Some(self.settings.close_max_attempts))
-            .await
-        {
-            self.finish(built);
-            let _ = reply.send(true);
-            return;
-        }
-        let _ = reply.send(false);
-        self.try_land(&built.sealed, None).await;
-        self.finish(built);
     }
 
     /// Compressing, encrypting and signing a page is CPU work that would
@@ -267,26 +269,42 @@ impl Task {
         }
     }
 
-    async fn try_land(&self, sealed: &SealedFile, max_attempts: Option<u32>) -> bool {
+    async fn try_land(&self, sealed: &SealedFile) {
+        let mut closing = self.closing.clone();
+        let mut close_attempts = 0u32;
         let mut delay = self.settings.retry_delay;
         let mut attempt: u32 = 0;
         loop {
             match self.sink.land(&self.queue, &self.file_id, sealed).await {
-                Ok(()) => return true,
+                Ok(()) => return,
                 Err(e) => {
                     attempt = attempt.saturating_add(1);
-                    if max_attempts.is_some_and(|max| attempt >= max) {
-                        log::error!(target: "normfs-store",
-                            "store file {} for queue {} did not land in {attempt} attempts: {e}",
-                            self.file_id, self.queue);
-                        return false;
+                    if *closing.borrow_and_update() {
+                        if close_attempts == 0 {
+                            delay = self.settings.retry_delay;
+                        }
+                        close_attempts = close_attempts.saturating_add(1);
+                        if close_attempts >= self.settings.close_max_attempts {
+                            // Retain this file and keep retrying after the
+                            // caller learns that shutdown is incomplete.
+                            self.done.send_replace(Some(false));
+                        }
                     }
                     if attempt == 1 || attempt.is_multiple_of(LAND_WARN_EVERY) {
                         log::warn!(target: "normfs-store",
                             "store file {} for queue {} did not land (attempt {attempt}): {e}",
                             self.file_id, self.queue);
                     }
-                    tokio::time::sleep(delay).await;
+                    if *closing.borrow() || closing.has_changed().is_err() {
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {},
+                            _ = closing.changed() => {
+                                delay = self.settings.retry_delay;
+                            },
+                        }
+                    }
                     delay = (delay * 2).min(MAX_RETRY_DELAY);
                 }
             }

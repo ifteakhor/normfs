@@ -291,22 +291,23 @@ impl MemQueue {
     /// The gate is taken once for the whole batch, so the ids a batch returns
     /// are contiguous — another enqueue cannot interleave into the middle of
     /// one.
-    pub async fn enqueue_batch_awaiting(
+    pub async fn enqueue_batch_awaiting<E>(
         &self,
         entries: Vec<Bytes>,
-    ) -> Option<Vec<(UintN, Placement)>> {
+        mut after_place: impl FnMut(&UintN, Bytes, Placement) -> Result<(), E>,
+    ) -> Result<Option<Vec<UintN>>, E> {
         let _gate = self.append_gate.lock().await;
         let mut out = Vec::with_capacity(entries.len());
         for data in entries {
-            match self.enqueue_gated(data).await {
-                Some(placed) => out.push(placed),
-                // The writer left mid-batch. The placed prefix keeps its
-                // ids; the WAL send reports the failure.
-                None if !out.is_empty() => break,
-                None => return None,
-            }
+            let Some((id, placement)) = self.enqueue_gated(data.clone()).await else {
+                return Ok(if out.is_empty() { None } else { Some(out) });
+            };
+            // The writer must receive the prefix before placement can wait
+            // for it to free a page; the gate still keeps batch ids contiguous.
+            after_place(&id, data, placement)?;
+            out.push(id);
         }
-        Some(out)
+        Ok(Some(out))
     }
 
     /// The body of an enqueue, with the append gate already held.
@@ -1271,16 +1272,20 @@ impl MemStore {
         Some(mem_queue?.try_enqueue(data))
     }
 
-    pub async fn enqueue_batch_awaiting(
+    pub async fn enqueue_batch_awaiting<E>(
         &self,
         queue: &QueueId,
         entries: Vec<Bytes>,
-    ) -> Option<Vec<(UintN, Placement)>> {
+        after_place: impl FnMut(&UintN, Bytes, Placement) -> Result<(), E>,
+    ) -> Result<Option<Vec<UintN>>, E> {
         let mem_queue = {
             let queues = self.queues.read().unwrap();
             queues.get(queue).cloned()
         };
-        mem_queue?.enqueue_batch_awaiting(entries).await
+        match mem_queue {
+            Some(queue) => queue.enqueue_batch_awaiting(entries, after_place).await,
+            None => Ok(None),
+        }
     }
 
     pub fn get_last_id(&self, queue: &QueueId) -> Option<Option<UintN>> {

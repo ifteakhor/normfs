@@ -175,6 +175,24 @@ async fn a_sink_that_does_not_land_is_back_pressure_not_loss() {
 }
 
 #[tokio::test]
+async fn close_finishes_while_a_reader_holds_landed_records() {
+    let f = fixture(4);
+    let sink = GatedSink::new();
+    sink.permits.add_permits(2);
+    let writer = start(&f, sink.clone(), 1);
+    for id in 0..3 {
+        f.pool.place(id, &RECORD).await.unwrap();
+    }
+    let records = f.pool.pin_range(0, 1);
+    assert_eq!(records.len(), 2);
+    assert!(writer.clone().close().await);
+    assert_eq!(sink.landed().len(), 2);
+    drop(records);
+    assert!(writer.close().await);
+    assert!(f.pool.is_fully_durable());
+}
+
+#[tokio::test]
 async fn close_reports_a_file_that_did_not_land_and_keeps_trying() {
     let f = fixture(2);
     let sink = GatedSink::new();
