@@ -1328,3 +1328,34 @@ async fn try_place_now_refuses_a_record_no_page_can_hold() {
     ));
     assert_eq!(pool.next_entry_id(), 0);
 }
+
+/// The cut at a handover bound in the middle of a page falls exactly where the
+/// first unclaimed entry begins, so the run is whole entries and the writer's
+/// next take starts on the same boundary.
+#[tokio::test]
+async fn a_mid_page_handover_cuts_between_entries() {
+    let pool = Arc::new(PagePool::new(2, 4 * PAGE_SIZE, 0));
+    let entry_len = crate::wal_entry_v1::encoded_len(RECORD.len() as u32);
+
+    let first = pool.next_entry_id();
+    for i in 0..4u64 {
+        pool.place(first + i, &RECORD).await.unwrap();
+    }
+    pool.note_handed_over(first + 1);
+
+    let pending = pool.take_pending(0);
+    assert_eq!(pending.len(), 1);
+    let (w, bytes) = &pending[0];
+    assert_eq!((w.first_entry_id, w.last_entry_id), (first, first + 1));
+    assert_eq!(w.to - w.from, 2 * entry_len);
+    assert_eq!(bytes.len(), 2 * entry_len);
+    pool.commit_written(w);
+
+    pool.note_handed_over(first + 3);
+    let rest = pool.take_pending(0);
+    assert_eq!(rest.len(), 1);
+    let (w2, _) = &rest[0];
+    assert_eq!(w2.last_entry_id, first + 3);
+    assert_eq!(w2.from, w.to, "the second take resumes on the first cut");
+    assert_eq!(w2.to - w2.from, 2 * entry_len);
+}

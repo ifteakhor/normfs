@@ -198,6 +198,51 @@ uint64_t normfs_wal_page_entry_id(struct normfs_wal_page *page, uint32_t index);
 struct normfs_wal_page_find_result
 normfs_wal_page_find(struct normfs_wal_page *page, uint64_t entry_id);
 
+/*
+ * Where to cut a page so that everything before the cut has an id below
+ * entry_id and everything at or after it has an id at or above. A flush that
+ * may only take ids up to some bound takes buf[from .. cut(bound + 1)), and the
+ * proof that the cut falls between two entries and never inside one is the
+ * neighbour clause below: the entry just under the bound begins strictly
+ * before the cut.
+ */
+/*@ requires normfs_wal_page_wf(page);
+    assigns \nothing;
+    ensures \result <= page->used_bytes;
+    ensures (page->count == 0 || entry_id > page->last_entry_id) ==>
+            \result == page->used_bytes;
+    ensures (page->count > 0 && entry_id <= page->first_entry_id) ==>
+            \result == normfs_wal_page_offset_logic(page, 0);
+    ensures (page->count > 0 &&
+             page->first_entry_id < entry_id <= page->last_entry_id) ==>
+            \result == normfs_wal_page_offset_logic(page,
+                          entry_id - page->first_entry_id);
+    ensures (page->count > 0 &&
+             page->first_entry_id < entry_id <= page->last_entry_id) ==>
+            normfs_wal_page_offset_logic(page, entry_id - page->first_entry_id - 1)
+              < \result;
+*/
+size_t normfs_wal_page_cut(struct normfs_wal_page *page, uint64_t entry_id);
+
+/*
+ * The inverse: the first entry whose bytes begin at or after byte offset
+ * `from`, which is what a writer resuming mid-page needs to name the id of the
+ * first record it is about to take.
+ */
+/*@ requires normfs_wal_page_wf(page);
+    assigns \nothing;
+    ensures \result.found != 0 ==>
+            \result.index < page->count &&
+            normfs_wal_page_offset_logic(page, \result.index) >= from &&
+            (\forall integer j; 0 <= j < \result.index ==>
+               normfs_wal_page_offset_logic(page, j) < from);
+    ensures \result.found == 0 ==>
+            (\forall integer j; 0 <= j < page->count ==>
+               normfs_wal_page_offset_logic(page, j) < from);
+*/
+struct normfs_wal_page_find_result
+normfs_wal_page_first_from(struct normfs_wal_page *page, size_t from);
+
 /*@ requires \valid(page);
     requires page->pin_count < 0xFFFFFFFF;
     assigns page->pin_count;

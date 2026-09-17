@@ -330,17 +330,11 @@ struct Inner {
     stranded: BTreeMap<u64, u64>,
 }
 
-/// The offset table is only defined below `count`, which
-/// `normfs_wal_page_offset` asserts, so the walk stops there.
+/// The id of the first entry of page `k` that begins at or after byte `from`.
 fn first_id_at(inner: &Inner, k: usize, from: usize) -> Option<u64> {
     let first = inner.ring.page_first_entry_id(k)?;
-    let count = inner.ring.page_len(k);
-    for i in 0..count {
-        if inner.ring.page_entry_offset(k, i) >= from {
-            return Some(first + i as u64);
-        }
-    }
-    None
+    let index = inner.ring.page_first_index_from(k, from)?;
+    Some(first + index as u64)
 }
 
 impl Inner {
@@ -1200,12 +1194,8 @@ impl PagePool {
             if first_entry_id > bound {
                 continue;
             }
-            let (to, last_entry_id) = if last_entry_id <= bound {
-                (used, last_entry_id)
-            } else {
-                let next = (bound - first_entry_id + 1) as u32;
-                (inner.ring.page_entry_offset(k, next), bound)
-            };
+            let to = inner.ring.page_cut(k, bound.saturating_add(1));
+            let last_entry_id = last_entry_id.min(bound);
             if from >= to {
                 continue;
             }
@@ -1284,12 +1274,8 @@ impl PagePool {
             if first_entry_id > bound {
                 continue;
             }
-            let (to, last_entry_id) = if last_entry_id <= bound {
-                (used, last_entry_id)
-            } else {
-                let next = (bound - first_entry_id + 1) as u32;
-                (inner.ring.page_entry_offset(k, next), bound)
-            };
+            let to = inner.ring.page_cut(k, bound.saturating_add(1));
+            let last_entry_id = last_entry_id.min(bound);
             if from >= to {
                 continue;
             }

@@ -94,6 +94,8 @@ if(FRAMAC)
         normfs_wal_page_offset
         normfs_wal_page_entry_id
         normfs_wal_page_find
+        normfs_wal_page_cut
+        normfs_wal_page_first_from
         normfs_wal_page_pin
         normfs_wal_page_unpin
         normfs_wal_page_reusable)
