@@ -50,6 +50,12 @@ Memory → WAL (Disk) → Store (Disk) → Cloud (S3-compatible)
 Fast    Durable    Compressed      Archival
 ```
 
+Every stage after memory is optional, per queue (`QueueConfig.persist`):
+with WAL and store (the default) records reach disk within `write_interval`;
+with store alone a sealed memory page becomes one store file directly, so a
+crash loses at most the open page; with neither the queue is memory-only and
+only its last id survives a restart. `cloud` offloads that queue's store files.
+
 ## 🎯 Use Cases
 
 🤖 **Robotics**: High-frequency sensor logging (IMU, lidar, GPS), multi-sensor sync, black box recording, simulation replay, fleet data aggregation

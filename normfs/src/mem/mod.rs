@@ -102,11 +102,6 @@ pub struct MemStore {
     /// the queue from the map above, and a later follow still needs to know
     /// where the sequence ended. A reopen removes the entry.
     closed: RwLock<HashMap<QueueId, Option<UintN>>>,
-    /// Whether a full cache page may be forgotten to admit new records. Only
-    /// set when nothing ever drains these pools to disk (memory-only mode):
-    /// eviction moves the durability watermark, which must stay fsync-backed
-    /// anywhere a writer can attach.
-    cache_evicts: std::sync::atomic::AtomicBool,
 }
 
 struct Inner {
@@ -1067,12 +1062,7 @@ impl MemStore {
             passive_arena,
             next_ring_id: AtomicU64::new(0),
             closed: RwLock::new(HashMap::new()),
-            cache_evicts: std::sync::atomic::AtomicBool::new(false),
         })
-    }
-
-    pub fn evict_cache_on_full(&self) {
-        self.cache_evicts.store(true, Ordering::Relaxed);
     }
 
     fn arena_for(max_memory_usage: usize, page_size: usize) -> Result<Arc<WalArena>, crate::Error> {
@@ -1130,6 +1120,21 @@ impl MemStore {
         readonly: bool,
         pool: PoolKind,
     ) {
+        self.start_queue_with(queue, last_id, readonly, pool, false);
+    }
+
+    /// [`MemStore::start_queue`] with `evicts` set for a queue nothing drains
+    /// to disk: a full page may then be forgotten to admit new records.
+    /// Anywhere a writer attaches this must stay false, because eviction
+    /// moves the durability watermark, which must stay fsync-backed.
+    pub fn start_queue_with(
+        &self,
+        queue: &QueueId,
+        last_id: Option<UintN>,
+        readonly: bool,
+        pool: PoolKind,
+        evicts: bool,
+    ) {
         let mut queues = self.queues.write().unwrap();
         if !queues.contains_key(queue) {
             let arena = match pool {
@@ -1154,7 +1159,7 @@ impl MemStore {
                 ring_id,
                 want,
                 queue,
-                self.cache_evicts.load(Ordering::Relaxed),
+                evicts,
             ));
             log::debug!(target: "normfs-mem",
                 "Starting queue '{}' with last_id: {:?}, {} pages ({} KiB) from the {:?} arena \
