@@ -99,16 +99,34 @@ impl StoreWriteWorker {
             }
         };
 
-        let sealed = match store_file::build(
-            queue_id,
-            file_id,
-            wal_file.compression_type,
-            wal_file.encryption_type,
-            wal_data.entries_before.clone(),
-            wal_data.num_entries.clone(),
-            &wal_data.content,
-            &self.crypto_ctx,
-        ) {
+        // Off the runtime for the same reason as the page writer: a file's
+        // worth of zstd and AES on a worker thread stalls every other task.
+        let build = {
+            let (queue_id, file_id, crypto) =
+                (queue_id.clone(), file_id.clone(), self.crypto_ctx.clone());
+            let (compression, encryption) = (wal_file.compression_type, wal_file.encryption_type);
+            let (before, num, content) = (
+                wal_data.entries_before.clone(),
+                wal_data.num_entries.clone(),
+                wal_data.content.clone(),
+            );
+            tokio::task::spawn_blocking(move || {
+                store_file::build(
+                    &queue_id,
+                    &file_id,
+                    compression,
+                    encryption,
+                    before,
+                    num,
+                    &content,
+                    &crypto,
+                )
+            })
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|r| r)
+        };
+        let sealed = match build {
             Ok(sealed) => sealed,
             Err(e) => {
                 if !self.shutting_down.load(Ordering::Relaxed) {

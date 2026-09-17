@@ -172,7 +172,7 @@ impl Task {
     }
 
     async fn land(&mut self, runs: FileRuns) {
-        if let Some(built) = self.build(runs) {
+        if let Some(built) = self.build(runs).await {
             self.try_land(&built.sealed, None).await;
             self.finish(built);
         }
@@ -183,7 +183,7 @@ impl Task {
             let _ = reply.send(true);
             return;
         };
-        let Some(built) = self.build(runs) else {
+        let Some(built) = self.build(runs).await else {
             let _ = reply.send(false);
             return;
         };
@@ -200,7 +200,11 @@ impl Task {
         self.finish(built);
     }
 
-    fn build(&self, runs: FileRuns) -> Option<Built> {
+    /// Compressing, encrypting and signing a page is CPU work that would
+    /// otherwise sit on a runtime worker thread; three queues sealing at once
+    /// on a four-core box starved everything else, including the appenders
+    /// whose pages this is meant to free.
+    async fn build(&self, runs: FileRuns) -> Option<Built> {
         let first = UintN::from(runs.first_entry_id);
         let last = UintN::from(runs.last_entry_id);
         let num_entries = UintN::from(runs.last_entry_id - runs.first_entry_id + 1);
@@ -216,19 +220,34 @@ impl Task {
             wal_bytes.extend_from_slice(bytes);
         }
 
-        let sealed = written.and_then(|_| {
-            store_file::build(
-                &self.queue,
-                &self.file_id,
-                self.settings.compression,
-                self.settings.encryption,
-                first,
-                num_entries,
-                &wal_bytes.freeze(),
-                &self.crypto,
-            )
-            .map_err(|e| e.to_string())
-        });
+        let sealed = match written {
+            Ok(_) => {
+                let (queue, file_id, crypto) = (
+                    self.queue.clone(),
+                    self.file_id.clone(),
+                    self.crypto.clone(),
+                );
+                let (compression, encryption) =
+                    (self.settings.compression, self.settings.encryption);
+                let wal_bytes = wal_bytes.freeze();
+                tokio::task::spawn_blocking(move || {
+                    store_file::build(
+                        &queue,
+                        &file_id,
+                        compression,
+                        encryption,
+                        first,
+                        num_entries,
+                        &wal_bytes,
+                        &crypto,
+                    )
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()))
+            }
+            Err(e) => Err(e),
+        };
         match sealed {
             Ok(sealed) => Some(Built {
                 sealed,
