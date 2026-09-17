@@ -7,13 +7,16 @@ use normfs_types::{CompressionType, EncryptionType};
 /// With `wal`, records reach a `.wal` file within `write_interval` and the
 /// store migrates each full file. Without it but with `store`, a sealed memory
 /// page becomes one store file directly: no timer, so a crash loses at most
-/// the open page. With neither, the queue lives in memory and only its last id
-/// survives a restart.
+/// the open page. With `cloud` alone the sealed page becomes one object in
+/// the bucket and nothing touches the local disk but the pointer that names
+/// the last file. With none of the three, the queue lives in memory and only
+/// its last id survives a restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Persist {
     pub wal: bool,
     pub store: bool,
-    /// Store files are offloaded to the configured cloud bucket.
+    /// Store files go to the configured bucket: offloaded from the local
+    /// store when there is one, landed there directly when there is not.
     pub cloud: bool,
 }
 
@@ -32,6 +35,11 @@ impl Persist {
         wal: false,
         store: true,
         cloud: false,
+    };
+    pub const CLOUD: Self = Self {
+        wal: false,
+        store: false,
+        cloud: true,
     };
 
     pub fn is_memory(self) -> bool {
@@ -53,9 +61,6 @@ impl Persist {
         let pattern = pattern.to_string();
         if self.wal && !self.store {
             return Err(ConfigError::WalWithoutStore { pattern });
-        }
-        if self.cloud && !self.store {
-            return Err(ConfigError::CloudWithoutStore { pattern });
         }
         Ok(())
     }
@@ -86,11 +91,6 @@ pub enum ConfigError {
     WalWithoutStore {
         pattern: String,
     },
-    /// Cloud without a local store is the direct-to-cloud sink, which does
-    /// not exist yet.
-    CloudWithoutStore {
-        pattern: String,
-    },
     /// A rule asks for cloud and the instance has no cloud settings. An
     /// error rather than a warning: a queue that quietly stopped offloading
     /// would be found out by the disk monitor deleting what it never sent.
@@ -108,9 +108,6 @@ impl std::fmt::Display for ConfigError {
                     f,
                     "rule '{pattern}': wal without store, nothing would archive the files"
                 )
-            }
-            ConfigError::CloudWithoutStore { pattern } => {
-                write!(f, "rule '{pattern}': cloud without store is not supported")
             }
             ConfigError::CloudWithoutSettings { pattern } => {
                 write!(

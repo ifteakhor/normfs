@@ -22,6 +22,7 @@ pub struct ReaderFSM {
     pub(crate) mem: Arc<MemStore>,
     pub(crate) s3_downloader: Option<Arc<CloudDownloader>>,
     queue_settings: Arc<crate::QueueSettings>,
+    pointers: Arc<crate::memory_pointers::MemoryPointers>,
 }
 
 impl ReaderFSM {
@@ -31,6 +32,7 @@ impl ReaderFSM {
         mem: Arc<MemStore>,
         s3_downloader: Option<Arc<CloudDownloader>>,
         queue_settings: Arc<crate::QueueSettings>,
+        pointers: Arc<crate::memory_pointers::MemoryPointers>,
     ) -> Self {
         Self {
             wal,
@@ -38,6 +40,18 @@ impl ReaderFSM {
             mem,
             s3_downloader,
             queue_settings,
+            pointers,
+        }
+    }
+
+    /// The last file a cloud-direct queue landed, which bounds a file walk
+    /// the way the last local file bounds it for the others.
+    fn cloud_last(&self, queue: &QueueId) -> Option<UintN> {
+        let persist = self.queue_settings.get_config(&queue.to_string()).persist;
+        if persist.cloud && !persist.store {
+            self.pointers.last_landed(queue).map(|(_, file)| file)
+        } else {
+            None
         }
     }
 
@@ -510,6 +524,7 @@ impl ReaderFSM {
             store,
             wal,
             self.s3_downloader.as_ref(),
+            self.cloud_last(&queue),
         )
         .await
         {
@@ -983,7 +998,7 @@ impl ReaderFSM {
         let (wal_last_id, store_last_id) = tokio::join!(wal_last_id, store_last_id);
         let last_file_id = match (wal_last_id, store_last_id) {
             (Some(w), Some(s)) => Some(w.max(s)),
-            (w, s) => w.or(s),
+            (w, s) => w.or(s).or_else(|| self.cloud_last(&ctx.queue)),
         };
         if last_file_id.is_none_or(|last| next_file_id > last) {
             log::debug!(target: "normfs-reader-fsm",

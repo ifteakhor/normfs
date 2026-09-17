@@ -41,7 +41,10 @@ pub struct NormFS {
     store: Arc<PersistStore>,
     mem: Arc<mem::MemStore>,
     disk_monitor: Option<Arc<DiskMonitor>>,
-    _cloud_downloader: Option<Arc<CloudDownloader>>,
+    cloud_downloader: Option<Arc<CloudDownloader>>,
+    /// The sink a cloud-direct queue lands through; `None` without cloud
+    /// settings, which `new` has already refused for any rule that asks.
+    cloud_sink: Option<Arc<normfs_cloud::CloudSink>>,
     memory_pointers: Arc<memory_pointers::MemoryPointers>,
     memory_pointer_task: JoinHandle<()>,
     crypto_ctx: Arc<CryptoContext>,
@@ -453,12 +456,19 @@ impl NormFS {
             if cloud_downloader.is_some() { "enabled" } else { "disabled" });
 
         let store_arc = Arc::new(store);
+        let cloud_sink = cloud_downloader.as_ref().map(|downloader| {
+            Arc::new(normfs_cloud::CloudSink::new(
+                downloader.clone(),
+                memory_pointers.clone(),
+            ))
+        });
         let reader_fsm = reader_fsm::ReaderFSM::new(
             wal.clone(),
             store_arc.clone(),
             mem.clone(),
             cloud_downloader.clone(),
             Arc::new(settings.queue_settings.clone()),
+            memory_pointers.clone(),
         );
 
         Ok(Self {
@@ -467,7 +477,8 @@ impl NormFS {
             store: store_arc,
             mem,
             disk_monitor,
-            _cloud_downloader: cloud_downloader,
+            cloud_downloader,
+            cloud_sink,
             memory_pointers,
             memory_pointer_task,
             crypto_ctx,
@@ -1023,6 +1034,52 @@ impl NormFS {
         }
     }
 
+    /// Where a cloud-direct queue resumes: the pointer names the last file
+    /// landed and its last id. The bucket is asked once for a later file, in
+    /// case the pointer is behind it -- the process died between the PUT and
+    /// the pointer write -- because writing the next file at a lower id would
+    /// overwrite an object holding acked records. The bucket being
+    /// unreachable is not fatal here: the pointer is what the sink wrote
+    /// after every landing, and the writer that follows retries the bucket
+    /// on its own.
+    async fn continue_cloud_queue(
+        &self,
+        queue: &QueueId,
+    ) -> Result<(UintN, normfs_wal::WalHeader, Option<UintN>), Error> {
+        let mut landed = self.memory_pointers.last_landed(queue);
+        if let Some(downloader) = &self.cloud_downloader {
+            match downloader.find_max_id(queue).await {
+                Ok(Some(max_file)) if landed.as_ref().is_none_or(|(_, f)| max_file > *f) => {
+                    match downloader.get_file_range(queue, &max_file).await {
+                        Ok(Some((_, last))) => {
+                            log::warn!(target: "normfs",
+                                "Queue '{}': bucket holds file {} beyond the pointer; resuming after it",
+                                queue, max_file);
+                            landed = Some((last, max_file));
+                        }
+                        Ok(None) => {}
+                        Err(e) => log::warn!(target: "normfs",
+                            "Queue '{}': could not read the range of cloud file {}: {}",
+                            queue, max_file, e),
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!(target: "normfs",
+                    "Queue '{}': could not list the bucket, resuming from the pointer: {}", queue, e),
+            }
+        }
+
+        let mut header = normfs_wal::WalHeader::default();
+        let (file_id, last_id) = match landed {
+            Some((last, file)) => {
+                header.num_entries_before = last.increment();
+                (file.increment(), Some(last))
+            }
+            None => (UintN::one(), None),
+        };
+        Ok((file_id, header, last_id))
+    }
+
     async fn start_queue(&self, queue: &QueueId, mode: QueueMode) -> Result<(), Error> {
         log::info!(target: "normfs", "========================================");
         log::info!(target: "normfs", "Starting queue: '{}' (readonly={})", queue, mode.readonly);
@@ -1043,8 +1100,11 @@ impl NormFS {
             return Ok(());
         }
 
-        // Use the new backward search logic to find the correct file and entry to continue from
-        let (file_id, header, last_entry_id) = self.continue_queue(queue).await?;
+        let (file_id, header, last_entry_id) = if persist.store {
+            self.continue_queue(queue).await?
+        } else {
+            self.continue_cloud_queue(queue).await?
+        };
 
         log::info!(target: "normfs", "----------------------------------------");
         log::info!(target: "normfs", "Queue '{}' - Recovery complete:", queue);
@@ -1091,17 +1151,27 @@ impl NormFS {
                 }
                 Drainer::Page => {
                     let pool = self.mem.pool(queue).ok_or(Error::QueueNotFound)?;
-                    // `continue_queue` may hand back the latest WAL file for
-                    // reuse when it is header-only. This writer never writes
-                    // a `.wal`, so that file would sit beside the store file
-                    // of the same id forever.
-                    match self.wal.delete_wal_file(queue, &file_id).await {
-                        Ok(()) => log::info!(target: "normfs",
-                            "Queue '{}': removed empty WAL file {} in favour of a store file", queue, file_id),
-                        Err(WalError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => log::warn!(target: "normfs",
-                            "Queue '{}': could not remove WAL file {}: {}", queue, file_id, e),
-                    }
+                    let sink: Arc<dyn normfs_store::SealedFileSink> = if persist.store {
+                        // `continue_queue` may hand back the latest WAL file
+                        // for reuse when it is header-only. This writer never
+                        // writes a `.wal`, so that file would sit beside the
+                        // store file of the same id forever.
+                        match self.wal.delete_wal_file(queue, &file_id).await {
+                            Ok(()) => log::info!(target: "normfs",
+                                "Queue '{}': removed empty WAL file {} in favour of a store file", queue, file_id),
+                            Err(WalError::IoError(e))
+                                if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => log::warn!(target: "normfs",
+                                "Queue '{}': could not remove WAL file {}: {}", queue, file_id, e),
+                        }
+                        self.store.local_sink(wal_settings.enable_fsync)
+                    } else {
+                        self.cloud_sink.clone().ok_or_else(|| {
+                            Error::Config(ConfigError::CloudWithoutSettings {
+                                pattern: queue.to_string(),
+                            })
+                        })?
+                    };
                     self.store.start_page_writer(
                         queue,
                         &file_id,
@@ -1113,7 +1183,7 @@ impl NormFS {
                             close_max_attempts: wal_settings.flush_max_retries,
                         },
                         pool,
-                        self.store.local_sink(wal_settings.enable_fsync),
+                        sink,
                     );
                 }
             }
@@ -1144,10 +1214,13 @@ impl NormFS {
             });
         }
 
-        // Add queue to disk monitor if enabled
-        if let (Some(disk_monitor), Some(max_size)) =
-            (&self.disk_monitor, self.settings.max_disk_usage_per_queue)
-        {
+        // The disk monitor watches local store files; a cloud-direct queue
+        // has none.
+        if let (Some(disk_monitor), Some(max_size), true) = (
+            &self.disk_monitor,
+            self.settings.max_disk_usage_per_queue,
+            persist.store,
+        ) {
             let config = DiskMonitorConfig {
                 max_size: max_size as usize,
                 check_interval: Duration::from_secs(10), // Default check interval
