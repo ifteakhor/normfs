@@ -51,6 +51,7 @@ fastrand = "2.0"
 
 [build-dependencies]
 prost-build = "0.12"
+cc = "1"
 
 [[bench]]
 name = "latency_benchmark"

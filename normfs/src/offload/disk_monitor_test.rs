@@ -71,3 +71,59 @@ async fn the_tracked_size_follows_completions_and_deletions() {
     assert!(store_file_exists(root, &queue, 6));
     assert_eq!(queue_monitor.get_queue_size().await.unwrap(), 200);
 }
+
+#[test]
+fn the_c_layout_matches_to_file_path() {
+    let store = Path::new("/data/inst/cam/store");
+    let wal = Path::new("/data/inst/cam/wal");
+    let mut ids: Vec<UintN> = [0u64, 1, 0xfff, 0x1000, 0xabcdef, u64::MAX]
+        .into_iter()
+        .map(UintN::from)
+        .collect();
+    ids.push(UintN::from(u128::MAX));
+    ids.push(UintN::from_hex_digits(&"f".repeat(48)).unwrap());
+
+    for id in &ids {
+        assert_eq!(
+            file_path(store, FileKind::Store, id).unwrap(),
+            id.to_file_path(store.to_str().unwrap(), "store")
+        );
+        assert_eq!(
+            file_path(wal, FileKind::Wal, id).unwrap(),
+            id.to_file_path(wal.to_str().unwrap(), "wal")
+        );
+    }
+
+    let past_the_layout = UintN::from_hex_digits(&format!("1{}", "0".repeat(48))).unwrap();
+    assert!(file_path(store, FileKind::Store, &past_the_layout).is_err());
+}
+
+#[tokio::test]
+async fn eviction_never_passes_the_offloaded_bound() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=4 {
+        write_store_file(root, &queue, id, 100);
+    }
+    let store = queue.to_store_dir(root);
+    let wal = queue.to_wal_dir(root);
+
+    let bound = UintN::from(2u64);
+    let eviction = evict(&store, &wal, &UintN::from(1u64), Some(&bound), 1000).unwrap();
+    assert_eq!(eviction.stop, Stop::Bound);
+    assert_eq!(eviction.next, UintN::from(3u64));
+    assert_eq!(eviction.events.len(), 2);
+    assert!(eviction.events.iter().all(|e| e.result.is_ok()));
+    assert!(!store_file_exists(root, &queue, 2));
+    assert!(store_file_exists(root, &queue, 3));
+
+    let eviction = evict(&store, &wal, &UintN::from(3u64), None, 150).unwrap();
+    assert_eq!(eviction.stop, Stop::Freed);
+    assert_eq!(eviction.next, UintN::from(5u64));
+    assert!(!store_file_exists(root, &queue, 4));
+
+    let eviction = evict(&store, &wal, &UintN::from(5u64), None, 150).unwrap();
+    assert_eq!(eviction.stop, Stop::Gap);
+    assert!(eviction.events.is_empty());
+}

@@ -1427,6 +1427,7 @@ name = "normfs"
 version = "0.3.3"
 dependencies = [
  "bytes",
+ "cc",
  "clap 4.6.4",
  "criterion 0.5.1",
  "env_logger",
