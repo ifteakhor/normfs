@@ -5,17 +5,15 @@
 #include <stdint.h>
 
 /*
- * Per-queue disk budget: how many bytes store/ and wal/ hold, and which files
- * go when that exceeds the limit. Proved here: the id -> path layout (the same
- * sharding as UintN::to_file_path, byte for byte), the id arithmetic, and that
- * the walk and the eviction stay in their buffers and terminate. Syscalls are
- * assumed shims in normfs/disk_monitor_sys.h; tests/test_disk_monitor.c
- * discharges them. Rust keeps the timer, the offloader and the bookkeeping.
+ * Per-queue disk budget. Proved by WP: the id -> path layout (the sharding
+ * of UintN::to_file_path, byte for byte), the id arithmetic, and that the
+ * walk and the eviction stay in their buffers and terminate. Syscalls are
+ * assumed shims in normfs/disk_monitor_sys.h, discharged by the tests. Rust
+ * keeps the timer, the offloader and the byte count.
  *
- * An id is its hex digits, lowercase, no leading zeros ("0" for zero): what
- * UintN::to_file_path renders and from_hex_digits parses. Numeric order is
- * then length first, then bytewise. Precision is capped by the layout alone:
- * NORMFS_DISK_MAX_DEPTH chunks of three digits.
+ * An id is its hex digits, lowercase, no leading zeros: what to_file_path
+ * renders and from_hex_digits parses. Numeric order is then length first,
+ * then bytewise, and precision is capped by the layout alone.
  */
 
 #define NORMFS_DISK_PATH_MAX 4096
@@ -23,9 +21,8 @@
 #define NORMFS_DISK_ID_MAX (3 * NORMFS_DISK_MAX_DEPTH)
 #define NORMFS_DISK_CHUNKS 4096
 
-/* A layout directory holds at most 4096 + 4096 entries; past the cap the
- * listing is refused rather than truncated. Both caps exist so every loop
- * has a variant. */
+/* Refused, not truncated, past these; they exist so every loop has a
+ * variant. A layout directory holds at most 4096 + 4096 entries. */
 #define NORMFS_DISK_DIR_ENTRIES_MAX (1u << 20)
 #define NORMFS_DISK_WALK_STEPS_MAX (1u << 24)
 
@@ -54,8 +51,8 @@ enum normfs_disk_stop {
 	NORMFS_DISK_STOP_BOUND = 3
 };
 
-/* os_error is the errno of the failing syscall, 0 when no syscall ran. Two
- * 4 byte members, as in struct normfs_seed_result. */
+/* os_error is the errno of the failing syscall, 0 when none ran. Two 4 byte
+ * members, so the Rust mirror cannot disagree about the layout. */
 struct normfs_disk_result {
 	int os_error;
 	int status;
@@ -77,9 +74,7 @@ struct normfs_disk_scan {
  * Walks ids upward from `next`, deleting the store file at each id, or the
  * WAL file when there is none, until `to_free` bytes are gone, an id has
  * neither file, or the id passes `bound`. `next` and `to_free` are updated in
- * place. has_bound == 0 is the no-offloader case: every id may go. "Offloader
- * present, nothing offloaded yet" never reaches here; Rust knows nothing may
- * go without a walk.
+ * place. has_bound == 0 means every id may go: the no-offloader case.
  */
 struct normfs_disk_evict_req {
 	const char *store_dir;

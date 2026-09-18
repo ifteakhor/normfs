@@ -13,9 +13,8 @@ target_include_directories(normfs_c PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# src/disk_monitor.c is established by WP. The tests cover the syscall shims
-# in normfs/disk_monitor_sys.h, which carry contracts no prover can discharge,
-# and pin the literal layout bytes the ACSL only sizes.
+# The tests cover the syscall shims, which no prover can discharge, and pin
+# the layout bytes the ACSL only sizes.
 enable_testing()
 add_executable(test_disk_monitor tests/test_disk_monitor.c)
 target_link_libraries(test_disk_monitor PRIVATE normfs_c)

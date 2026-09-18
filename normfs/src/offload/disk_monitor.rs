@@ -301,7 +301,6 @@ pub(crate) struct EvictEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stop {
-    /// `to_free` reached zero.
     Freed,
     /// An id with neither file: the end of the queue's files.
     Gap,
@@ -423,7 +422,6 @@ pub struct DiskMonitorConfig {
 
 impl DiskMonitorConfig {
     pub fn validate(&self) -> Result<(), Error> {
-        // Queue size cannot be less than wal file size * 3
         let min_size = self.wal_settings.max_file_size * 3;
         if self.max_size < min_size {
             return Err(Error::Store(StoreError::Io(std::io::Error::new(

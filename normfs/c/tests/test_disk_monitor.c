@@ -104,7 +104,6 @@ mkdir_p(const char *path)
 	return 0;
 }
 
-/* Writes `len` bytes at <dir>/<layout path of hex>. */
 static int
 put_file(const char *dir, const char *hex, int kind, size_t len)
 {

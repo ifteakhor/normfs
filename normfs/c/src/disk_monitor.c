@@ -56,11 +56,9 @@ struct normfs_disk_level {
       logic integer disk_sep{L}(char *dir, integer dir_len) =
         dir_len <= 0 ? 0 : (dir[dir_len - 1] == '/' ? 0 : 1);
 
-      // The id is zero padded on the left to whole chunks of three digits;
-      // every chunk but the last is a directory, the last is the file name.
-      // Same layout as UintN::to_file_path. Chunk g occupies out[4g .. 4g+2]
-      // and its separator out[4g+3]: '/' between chunks, '.' before the
-      // extension.
+      // Zero padded on the left to whole chunks of three digits; chunk g is
+      // out[4g .. 4g+2], its separator out[4g+3]: '/' between chunks, '.'
+      // before the extension. Same layout as UintN::to_file_path.
       logic integer disk_groups(integer len) = (len + 2) / 3;
       logic integer disk_pad(integer len) = 3 * disk_groups(len) - len;
       logic integer disk_digit{L}(struct normfs_disk_id *id, integer p) =
@@ -84,7 +82,6 @@ struct normfs_disk_level {
         dir_len + disk_sep(dir, dir_len) + 4 * disk_groups(id_len) +
         disk_ext_len(kind);
 
-      // Digit p of a chunk sequence read back from directory names.
       logic integer disk_chunk_val(integer c, integer r) =
         r == 0 ? c / 256 : (r == 1 ? (c / 16) % 16 : c % 16);
       logic integer disk_chunk_digit{L}(uint16_t *chunks, integer p) =
@@ -372,7 +369,6 @@ normfs_disk_id_from_chunks(const uint16_t *chunks, size_t n,
 		id->hex[k] = d[z + k];
 }
 
-/* 0: not a layout name; 1: chunk directory "abc"; 2: file "abc.<ext>". */
 /*@ requires name_len == 0 || \valid_read(name + (0 .. name_len - 1));
     requires disk_kind_ok(kind);
     requires \valid(idx);
@@ -649,11 +645,7 @@ normfs_disk_path(const char *dir, size_t dir_len,
 	return r;
 }
 
-/*
- * The file at (dir, id, kind): 1 present with its size and path, 0 absent,
- * -1 on a failing stat, -2 when the path does not fit. The path is left in
- * `path` for an unlink to follow.
- */
+/* The path stays in `path` for an unlink to follow. */
 /*@ requires \valid_read(dir + (0 .. dir_len));
     requires dir[dir_len] == 0;
     requires \valid_read(id);
@@ -995,10 +987,10 @@ normfs_disk_scan(const char *dir, size_t dir_len, int kind,
 }
 
 /*
- * One id of the eviction. A WAL file at an id that also has a store file is
- * left alone, as before: the pair exists only while the store worker
- * converts it, and the worker deletes the WAL file itself. The path buffer
- * lives here so the caller's event array is never in the same frame.
+ * A WAL file at an id that also has a store file is left alone: the pair
+ * exists only while the store worker converts it, and the worker deletes the
+ * WAL file itself. The path buffer lives here so the caller's event array is
+ * never in the same frame.
  */
 /*@ requires \valid(req);
     requires \valid_read(req->store_dir + (0 .. req->store_dir_len));
