@@ -3,16 +3,16 @@ use std::io;
 use std::os::raw::{c_char, c_int};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time;
 use uintn::UintN;
 
 use crate::Error;
 use normfs_cloud::offloader::QueueOffloader;
 use normfs_cloud::S3Client;
-use normfs_store::StoreError;
+use normfs_store::{DiskUsage, StoreError};
 use normfs_types::QueueId;
 use normfs_wal::WalSettings;
 
@@ -89,14 +89,6 @@ unsafe extern "C" {
         used: *mut usize,
     ) -> CDiskResult;
 
-    fn normfs_disk_file_size(
-        dir: *const c_char,
-        dir_len: usize,
-        id: *const CDiskId,
-        kind: c_int,
-        size: *mut u64,
-    ) -> CDiskResult;
-
     fn normfs_disk_scan(
         dir: *const c_char,
         dir_len: usize,
@@ -148,8 +140,6 @@ impl std::fmt::Display for FileKind {
     }
 }
 
-/// Without the C layer's `errno`, `ErrorKind::NotFound` would be lost at the
-/// boundary; `store_file_done` reports on exactly that.
 fn map_status(r: CDiskResult) -> io::Result<()> {
     match r.status {
         NORMFS_DISK_OK => Ok(()),
@@ -241,25 +231,6 @@ pub(crate) fn file_path(dir: &Path, kind: FileKind, id: &UintN) -> io::Result<Pa
     map_status(r)?;
     out.truncate(used);
     Ok(PathBuf::from(std::ffi::OsString::from_vec(out)))
-}
-
-pub(crate) fn file_size(dir: &Path, kind: FileKind, id: &UintN) -> io::Result<u64> {
-    let dir_c = c_dir(dir)?;
-    let id_c = c_id(id)?;
-    let mut size = 0u64;
-
-    // SAFETY: as in file_path.
-    let r = unsafe {
-        normfs_disk_file_size(
-            dir_c.as_ptr(),
-            dir_c.as_bytes().len(),
-            &id_c,
-            kind.c(),
-            &mut size,
-        )
-    };
-    map_status(r)?;
-    Ok(size)
 }
 
 pub(crate) struct DirScan {
@@ -439,7 +410,7 @@ impl DiskMonitorConfig {
 pub type ForgetRange = Arc<dyn Fn(&QueueId, &UintN) + Send + Sync>;
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(60);
-/// Store bytes are tracked from completions and deletions; a full walk this
+/// Store bytes are tracked from publication and deletion; a full walk this
 /// often catches anything else that touched the directory.
 const RESCAN_EVERY_TICKS: u64 = 60;
 
@@ -449,7 +420,7 @@ struct QueueMonitor {
     store_dir: PathBuf,
     wal_dir: PathBuf,
     offloader: Option<QueueOffloader>,
-    store_bytes: Mutex<u64>,
+    store_bytes: Arc<Mutex<u64>>,
     forget_range: Option<ForgetRange>,
 }
 
@@ -461,6 +432,7 @@ impl QueueMonitor {
         client: Option<Arc<S3Client>>,
         prefix: Option<&str>,
         forget_range: Option<ForgetRange>,
+        disk_usage: Arc<DiskUsage>,
     ) -> Result<Self, Error> {
         let offloader = if let (Some(client), Some(prefix)) = (client, prefix) {
             Some(QueueOffloader::new(queue_id.clone(), root_path.clone(), client, prefix).await)
@@ -470,17 +442,19 @@ impl QueueMonitor {
 
         let store_dir = queue_id.to_store_dir(&root_path);
         let wal_dir = queue_id.to_wal_dir(&root_path);
-        let store_bytes = Self::scan_dir(&store_dir, FileKind::Store).await?.total;
+        let store_bytes = disk_usage.queue(&queue_id);
 
-        Ok(Self {
+        let monitor = Self {
             queue_id,
             config,
             store_dir,
             wal_dir,
             offloader,
-            store_bytes: Mutex::new(store_bytes),
+            store_bytes,
             forget_range,
-        })
+        };
+        monitor.rescan_store().await?;
+        Ok(monitor)
     }
 
     async fn scan_dir(dir: &Path, kind: FileKind) -> Result<DirScan, Error> {
@@ -489,41 +463,18 @@ impl QueueMonitor {
     }
 
     async fn rescan_store(&self) -> Result<(), Error> {
-        let scanned = Self::scan_dir(&self.store_dir, FileKind::Store)
-            .await?
-            .total;
-        let mut tracked = self.store_bytes.lock().unwrap();
-        if *tracked != scanned {
-            log::info!(
-                target: "normfs::disk_monitor",
-                "Queue '{}' store size corrected from {} to {} bytes",
-                self.queue_id,
-                *tracked,
-                scanned
-            );
-            *tracked = scanned;
-        }
-        Ok(())
-    }
-
-    async fn store_file_done(&self, file_id: &UintN) {
+        let mut tracked = self.store_bytes.clone().lock_owned().await;
         let dir = self.store_dir.clone();
-        let id = file_id.clone();
-        match blocking(move || file_size(&dir, FileKind::Store, &id)).await {
-            Ok(size) => *self.store_bytes.lock().unwrap() += size,
-            Err(e) => log::warn!(
-                target: "normfs::disk_monitor",
-                "Completed store file {} of queue '{}' cannot be sized: {}",
-                file_id,
-                self.queue_id,
-                e
-            ),
-        }
+        blocking(move || {
+            *tracked = scan(&dir, FileKind::Store)?.total;
+            Ok(())
+        })
+        .await
     }
 
     async fn get_queue_size(&self) -> Result<u64, Error> {
         let wal = Self::scan_dir(&self.wal_dir, FileKind::Wal).await?.total;
-        Ok(*self.store_bytes.lock().unwrap() + wal)
+        Ok((*self.store_bytes.lock().await).saturating_add(wal))
     }
 
     async fn cleanup_oldest_files(&self, current_size: u64) -> Result<(), Error> {
@@ -557,9 +508,16 @@ impl QueueMonitor {
             },
         };
 
-        let store_min = Self::scan_dir(&self.store_dir, FileKind::Store).await?.min;
-        let wal_min = Self::scan_dir(&self.wal_dir, FileKind::Wal).await?.min;
-        let start = match (store_min, wal_min) {
+        let mut tracked = self.store_bytes.clone().lock_owned().await;
+        let store_scan = Self::scan_dir(&self.store_dir, FileKind::Store).await?;
+        let wal_scan = Self::scan_dir(&self.wal_dir, FileKind::Wal).await?;
+        *tracked = store_scan.total;
+        let current_size = store_scan.total.saturating_add(wal_scan.total);
+        let to_free = current_size.saturating_sub(max_size);
+        if to_free == 0 {
+            return Ok(());
+        }
+        let start = match (store_scan.min, wal_scan.min) {
             (Some(s), Some(w)) => s.min(w),
             (Some(s), None) => s,
             (None, Some(w)) => w,
@@ -575,8 +533,21 @@ impl QueueMonitor {
 
         let store_dir = self.store_dir.clone();
         let wal_dir = self.wal_dir.clone();
-        let eviction =
-            blocking(move || evict(&store_dir, &wal_dir, &start, bound.as_ref(), to_free)).await?;
+        let eviction = blocking(move || {
+            let result = evict(&store_dir, &wal_dir, &start, bound.as_ref(), to_free);
+            match &result {
+                Ok(eviction) => {
+                    for event in &eviction.events {
+                        if event.kind == FileKind::Store && event.result.is_ok() {
+                            *tracked = tracked.saturating_sub(event.size);
+                        }
+                    }
+                }
+                Err(_) => *tracked = scan(&store_dir, FileKind::Store)?.total,
+            }
+            result
+        })
+        .await?;
 
         let mut freed = 0u64;
         for event in eviction.events {
@@ -584,9 +555,6 @@ impl QueueMonitor {
                 Ok(()) => {
                     freed += event.size;
                     if event.kind == FileKind::Store {
-                        let mut tracked = self.store_bytes.lock().unwrap();
-                        *tracked = tracked.saturating_sub(event.size);
-                        drop(tracked);
                         if let Some(forget) = &self.forget_range {
                             forget(&self.queue_id, &event.id);
                         }
@@ -660,6 +628,7 @@ pub struct DiskMonitor {
     client: Option<Arc<S3Client>>,
     prefix: Option<String>,
     forget_range: Option<ForgetRange>,
+    disk_usage: Arc<DiskUsage>,
 }
 
 impl DiskMonitor {
@@ -668,6 +637,7 @@ impl DiskMonitor {
         client: Option<Arc<S3Client>>,
         prefix: Option<String>,
         forget_range: Option<ForgetRange>,
+        disk_usage: Arc<DiskUsage>,
     ) -> Result<Self, Error> {
         let monitors: Arc<RwLock<std::collections::HashMap<QueueId, QueueMonitor>>> =
             Arc::new(RwLock::new(std::collections::HashMap::new()));
@@ -707,13 +677,13 @@ impl DiskMonitor {
             client,
             prefix,
             forget_range,
+            disk_usage,
         })
     }
 
     pub async fn store_file_done(&self, queue_id: &QueueId, file_id: UintN) -> Result<(), Error> {
         let monitors = self.monitors.read().await;
         if let Some(monitor) = monitors.get(queue_id) {
-            monitor.store_file_done(&file_id).await;
             if let Some(ref offloader) = monitor.offloader {
                 if let Err(e) = offloader.enqueue_file(file_id.clone()).await {
                     log::error!(
@@ -755,6 +725,7 @@ impl DiskMonitor {
             self.client.clone(),
             self.prefix.as_deref(),
             self.forget_range.clone(),
+            self.disk_usage.clone(),
         )
         .await?;
 

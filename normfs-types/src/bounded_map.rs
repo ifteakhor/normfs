@@ -39,7 +39,9 @@ impl<K: Hash + Eq + Clone, V> BoundedMap<K, V> {
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        self.map.remove(key)
+        let value = self.map.remove(key)?;
+        self.order.retain(|queued| queued != key);
+        Some(value)
     }
 
     pub fn len(&self) -> usize {

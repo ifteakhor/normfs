@@ -410,6 +410,7 @@ impl NormFS {
                 cloud_client.clone(),
                 cloud_prefix.clone(),
                 Some(forget_range),
+                store_arc.disk_usage(),
             )
             .await
             {
@@ -437,7 +438,7 @@ impl NormFS {
 
                     if let Err(e) = monitor.store_file_done(&queue_id, file_id.clone()).await {
                         log::error!(target: "normfs",
-                            "Failed to account store file: queue={}, file_id={:?}, error={}",
+                            "Failed to forward store completion: queue={}, file_id={:?}, error={}",
                             queue_id, file_id, e);
                     }
                 }

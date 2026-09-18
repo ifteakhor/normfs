@@ -12,12 +12,16 @@ use uintn::{Error as UintNError, UintN};
 use crate::ranges::RangeStoreError;
 
 mod compression;
+mod disk_usage;
+pub use disk_usage::DiskUsage;
 pub mod header;
 pub mod parser;
 mod ranges;
 pub mod store_header_v1;
 mod writer;
 
+#[cfg(test)]
+mod disk_usage_test;
 #[cfg(test)]
 mod header_test;
 #[cfg(test)]
@@ -144,6 +148,7 @@ impl Default for StoreWriteConfig {
 pub struct PersistStore {
     root: PathBuf,
     range_store: Arc<ranges::RangeStore>,
+    disk_usage: Arc<DiskUsage>,
     config: StoreWriteConfig,
     crypto_ctx: Arc<CryptoContext>,
     wal_store: Arc<WalStore>,
@@ -169,6 +174,7 @@ impl PersistStore {
 
         Self {
             root: root_path.clone(),
+            disk_usage: Arc::new(DiskUsage::default()),
             range_store: Arc::new(ranges::RangeStore::new(
                 root_path,
                 crypto_ctx.clone(),
@@ -202,6 +208,7 @@ impl PersistStore {
             self.crypto_ctx.clone(),
             self.wal_store.clone(),
             self.range_store.clone(),
+            self.disk_usage.clone(),
         ));
 
         for worker_id in 0..self.config.num_workers {
@@ -223,6 +230,10 @@ impl PersistStore {
         log::info!(target: "normfs-store", "All {} writer workers started successfully", self.config.num_workers);
 
         store_done_rx
+    }
+
+    pub fn disk_usage(&self) -> Arc<DiskUsage> {
+        self.disk_usage.clone()
     }
 
     pub async fn close(&self) {

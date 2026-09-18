@@ -25,9 +25,15 @@ async fn the_tracked_size_follows_completions_and_deletions() {
     let log = forgotten.clone();
     let forget: ForgetRange =
         Arc::new(move |_: &QueueId, id: &UintN| log.lock().unwrap().push(id.clone()));
-    let monitor = DiskMonitor::new(root, None, None, Some(forget))
-        .await
-        .unwrap();
+    let monitor = DiskMonitor::new(
+        root,
+        None,
+        None,
+        Some(forget),
+        Arc::new(DiskUsage::default()),
+    )
+    .await
+    .unwrap();
 
     let config = DiskMonitorConfig {
         max_size: 250,
@@ -55,9 +61,18 @@ async fn the_tracked_size_follows_completions_and_deletions() {
     write_store_file(root, &queue, 6, 100);
     assert_eq!(queue_monitor.get_queue_size().await.unwrap(), 200);
 
-    // A reported completion is.
-    write_store_file(root, &queue, 5, 100);
-    queue_monitor.store_file_done(&UintN::from(5u64)).await;
+    let temp_file = root.join("new-store-file");
+    std::fs::write(&temp_file, vec![0; 100]).unwrap();
+    monitor
+        .disk_usage
+        .publish(
+            &queue,
+            &temp_file,
+            &queue.to_store_path(root, &UintN::from(5u64)),
+            100,
+        )
+        .await
+        .unwrap();
     assert_eq!(queue_monitor.get_queue_size().await.unwrap(), 300);
 
     queue_monitor.check_and_cleanup(false).await.unwrap();
@@ -126,4 +141,119 @@ async fn eviction_never_passes_the_offloaded_bound() {
     let eviction = evict(&store, &wal, &UintN::from(5u64), None, 150).unwrap();
     assert_eq!(eviction.stop, Stop::Gap);
     assert!(eviction.events.is_empty());
+}
+
+#[tokio::test]
+async fn delayed_and_duplicate_completions_do_not_count_scanned_files_again() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    for id in 1..=2 {
+        write_store_file(root, &queue, id, 100);
+    }
+    let usage = Arc::new(DiskUsage::default());
+    let monitor = DiskMonitor::new(root, None, None, None, usage.clone())
+        .await
+        .unwrap();
+    monitor
+        .add_queue(
+            &queue,
+            DiskMonitorConfig {
+                max_size: 300,
+                check_interval: Duration::from_secs(60),
+                wal_settings: WalSettings {
+                    max_file_size: 10,
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+    monitor
+        .store_file_done(&queue, UintN::from(1u64))
+        .await
+        .unwrap();
+    let temp_file = root.join("new-store-file");
+    std::fs::write(&temp_file, vec![0; 100]).unwrap();
+    usage
+        .publish(
+            &queue,
+            &temp_file,
+            &queue.to_store_path(root, &UintN::from(3u64)),
+            100,
+        )
+        .await
+        .unwrap();
+    let monitors = monitor.monitors.read().await;
+    let queue_monitor = monitors.get(&queue).unwrap();
+    queue_monitor.rescan_store().await.unwrap();
+    drop(monitors);
+    for _ in 0..2 {
+        monitor
+            .store_file_done(&queue, UintN::from(3u64))
+            .await
+            .unwrap();
+    }
+    let monitors = monitor.monitors.read().await;
+    let queue_monitor = monitors.get(&queue).unwrap();
+    assert_eq!(queue_monitor.get_queue_size().await.unwrap(), 300);
+    queue_monitor.check_and_cleanup(false).await.unwrap();
+    for id in 1..=3 {
+        assert!(store_file_exists(root, &queue, id));
+    }
+}
+
+#[tokio::test]
+async fn concurrent_rescans_and_out_of_order_publications_preserve_usage() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let usage = Arc::new(DiskUsage::default());
+    let monitor = QueueMonitor::new(
+        queue.clone(),
+        DiskMonitorConfig {
+            max_size: 10_000,
+            check_interval: Duration::from_secs(60),
+            wal_settings: WalSettings {
+                max_file_size: 10,
+                ..Default::default()
+            },
+        },
+        root.to_path_buf(),
+        None,
+        None,
+        None,
+        usage.clone(),
+    )
+    .await
+    .unwrap();
+    std::fs::create_dir_all(queue.to_store_dir(root)).unwrap();
+    let publish = async {
+        for id in (1..=32u64).rev() {
+            let temp_file = root.join("new-store-file");
+            tokio::fs::write(&temp_file, vec![0; 100]).await.unwrap();
+            usage
+                .publish(
+                    &queue,
+                    &temp_file,
+                    &queue.to_store_path(root, &UintN::from(id)),
+                    100,
+                )
+                .await
+                .unwrap();
+        }
+    };
+    let rescan = async {
+        for _ in 0..32 {
+            monitor.rescan_store().await.unwrap();
+        }
+    };
+    tokio::join!(publish, rescan);
+    assert_eq!(monitor.get_queue_size().await.unwrap(), 3200);
+    assert_eq!(
+        scan(&queue.to_store_dir(root), FileKind::Store)
+            .unwrap()
+            .total,
+        3200
+    );
 }
