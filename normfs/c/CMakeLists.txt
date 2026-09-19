@@ -52,6 +52,7 @@ if(FRAMAC)
         normfs_disk_list_dir
         normfs_disk_scan
         normfs_disk_evict_one
+        normfs_disk_event_append
         normfs_disk_evict)
     string(REPLACE ";" "," NORMFS_DISK_WP_FCTS_ARG "${NORMFS_DISK_WP_FCTS}")
 

@@ -30,18 +30,6 @@ struct normfs_disk_level {
         v < 10 ? '0' + v : 'a' + (v - 10);
       logic integer next_hex(integer c) = c == '9' ? 'a' : c + 1;
 
-      predicate disk_id_wf{L}(struct normfs_disk_id *id) =
-        1 <= id->len <= NORMFS_DISK_ID_MAX &&
-        (\forall integer k; 0 <= k < id->len ==> is_hex(id->hex[k])) &&
-        (id->len == 1 || id->hex[0] != '0');
-
-      predicate disk_event_wf{L}(struct normfs_disk_event *e) =
-        disk_id_wf(&e->id) &&
-        (e->kind == NORMFS_DISK_STORE || e->kind == NORMFS_DISK_WAL) &&
-        (e->deleted == 0 || e->deleted == 1) &&
-        (e->deleted == 1 ==> e->os_error == 0) &&
-        (e->deleted == 0 ==> e->os_error > 0);
-
       predicate disk_kind_ok(integer kind) =
         kind == NORMFS_DISK_STORE || kind == NORMFS_DISK_WAL;
       logic integer disk_ext_len(integer kind) =
@@ -90,6 +78,20 @@ struct normfs_disk_level {
     }
 */
 
+/* Expose fields to WP so unrelated stores do not require framing opaque
+ * memory predicates. */
+#define DISK_ID_WF(id) \
+    (1 <= (id)->len <= NORMFS_DISK_ID_MAX && \
+     (\forall integer wf_digit; 0 <= wf_digit < (id)->len ==> \
+        is_hex((id)->hex[wf_digit])) && \
+     ((id)->len == 1 || (id)->hex[0] != '0'))
+#define DISK_EVENT_WF(e) \
+    (DISK_ID_WF(&(e)->id) && \
+     ((e)->kind == NORMFS_DISK_STORE || (e)->kind == NORMFS_DISK_WAL) && \
+     ((e)->deleted == 0 || (e)->deleted == 1) && \
+     ((e)->deleted == 1 ==> (e)->os_error == 0) && \
+     ((e)->deleted == 0 ==> (e)->os_error > 0))
+
 /*@ assigns \nothing;
     ensures \result == 0 || \result == 1;
     ensures \result == 1 <==> is_hex(c);
@@ -129,7 +131,7 @@ normfs_disk_hex_digit(unsigned v)
 /*@ requires \valid_read(id);
     assigns \nothing;
     ensures \result == 0 || \result == 1;
-    ensures \result == 1 <==> disk_id_wf(id);
+    ensures \result == 1 <==> DISK_ID_WF(id);
 */
 static int
 normfs_disk_id_ok(const struct normfs_disk_id *id)
@@ -206,11 +208,11 @@ normfs_disk_id_cmp(const struct normfs_disk_id *a,
 /* Field by field: a struct copy is a memcpy over both memories to the
  * provers, and disk_id_wf does not survive it in a large context. */
 /*@ requires \valid_read(src);
-    requires disk_id_wf(src);
+    requires DISK_ID_WF(src);
     requires \valid(dst);
     requires \separated(dst, src);
     assigns dst->hex[0 .. NORMFS_DISK_ID_MAX - 1], dst->len;
-    ensures disk_id_wf(dst);
+    ensures DISK_ID_WF(dst);
     ensures dst->len == src->len;
     ensures \forall integer k; 0 <= k < src->len ==> dst->hex[k] == src->hex[k];
 */
@@ -231,7 +233,7 @@ normfs_disk_id_copy(struct normfs_disk_id *dst,
 }
 
 /*@ requires \valid(id);
-    requires disk_id_wf(id);
+    requires DISK_ID_WF(id);
     assigns id->hex[0 .. NORMFS_DISK_ID_MAX - 1], id->len;
     ensures \result == NORMFS_DISK_OK ||
             \result == NORMFS_DISK_ERR_ID_OVERFLOW;
@@ -243,7 +245,7 @@ normfs_disk_id_copy(struct normfs_disk_id *dst,
               id->len == \old(id->len) &&
               \forall integer k; 0 <= k < NORMFS_DISK_ID_MAX ==>
                 id->hex[k] == \old(id->hex[k]);
-    ensures \result == NORMFS_DISK_OK ==> disk_id_wf(id);
+    ensures DISK_ID_WF(id);
     ensures \result == NORMFS_DISK_OK &&
             (\forall integer k; 0 <= k < \old(id->len) ==>
                \old(id->hex[k]) == 'f') ==>
@@ -318,7 +320,7 @@ normfs_disk_id_increment(struct normfs_disk_id *id)
     requires \valid(id);
     requires \separated(id, chunks + (0 .. n - 1));
     assigns id->hex[0 .. NORMFS_DISK_ID_MAX - 1], id->len;
-    ensures disk_id_wf(id);
+    ensures DISK_ID_WF(id);
     ensures \exists integer z; 0 <= z < 3 * n &&
               (\forall integer q; 0 <= q < z ==> disk_chunk_digit(chunks, q) == '0') &&
               (z == 3 * n - 1 || disk_chunk_digit(chunks, z) != '0') &&
@@ -468,7 +470,7 @@ normfs_disk_next_bit(const uint64_t *dirs, size_t from)
 }
 
 /*@ requires \valid_read(id);
-    requires disk_id_wf(id);
+    requires DISK_ID_WF(id);
     requires \valid(out + (0 .. 4 * disk_groups(id->len) - 1));
     requires \separated(id, out + (0 .. 4 * disk_groups(id->len) - 1));
     assigns out[0 .. 4 * disk_groups(id->len) - 1];
@@ -545,15 +547,15 @@ normfs_disk_write_ext(int kind, char *out)
             \result.status == NORMFS_DISK_ERR_INVALID_ARG ||
             \result.status == NORMFS_DISK_ERR_PATH_TOO_LONG;
     ensures \result.status == NORMFS_DISK_ERR_INVALID_ARG <==>
-              !(disk_kind_ok(kind) && disk_id_wf(id));
+              !(disk_kind_ok(kind) && DISK_ID_WF(id));
     ensures \result.status == NORMFS_DISK_ERR_PATH_TOO_LONG <==>
-              (disk_kind_ok(kind) && disk_id_wf(id) &&
+              (disk_kind_ok(kind) && DISK_ID_WF(id) &&
                (dir_len >= NORMFS_DISK_PATH_MAX ||
                 out_len < disk_path_len(dir, dir_len, id->len, kind) + 1));
     // Completeness: without this the two clauses above are satisfied by a
     // function that never returns OK.
     ensures \result.status == NORMFS_DISK_OK <==>
-              (disk_kind_ok(kind) && disk_id_wf(id) &&
+              (disk_kind_ok(kind) && DISK_ID_WF(id) &&
                dir_len < NORMFS_DISK_PATH_MAX &&
                out_len >= disk_path_len(dir, dir_len, id->len, kind) + 1);
 
@@ -649,7 +651,7 @@ normfs_disk_path(const char *dir, size_t dir_len,
 /*@ requires \valid_read(dir + (0 .. dir_len));
     requires dir[dir_len] == 0;
     requires \valid_read(id);
-    requires disk_id_wf(id);
+    requires DISK_ID_WF(id);
     requires disk_kind_ok(kind);
     requires \valid(path + (0 .. NORMFS_DISK_PATH_MAX - 1));
     requires \valid(plen);
@@ -665,6 +667,9 @@ normfs_disk_path(const char *dir, size_t dir_len,
     ensures \result >= -1 ==> path[*plen] == 0;
     ensures \result == -1 ==> *os_error > 0;
     ensures \result != -1 ==> *os_error == 0;
+    ensures \result == 1 ==> disk_fs_present(path, *plen) &&
+              disk_fs_regular(path, *plen) &&
+              *size == disk_fs_size(path, *plen) && *size <= disk_fs_bytes;
 */
 static int
 normfs_disk_probe(const char *dir, size_t dir_len,
@@ -746,7 +751,7 @@ normfs_disk_file_size(const char *dir, size_t dir_len,
     requires \valid(lv);
     requires \valid(acc);
     requires acc->has_min == 0 || acc->has_min == 1;
-    requires acc->has_min == 1 ==> disk_id_wf(&acc->min);
+    requires acc->has_min == 1 ==> DISK_ID_WF(&acc->min);
     requires \valid(os_error);
     requires \separated(path + (0 .. path_len),
                         chunks + (0 .. NORMFS_DISK_MAX_DEPTH - 1),
@@ -760,7 +765,7 @@ normfs_disk_file_size(const char *dir, size_t dir_len,
     ensures \result != NORMFS_DISK_ERR_IO ==> *os_error == 0;
     ensures lv->next == 0;
     ensures acc->has_min == 0 || acc->has_min == 1;
-    ensures acc->has_min == 1 ==> disk_id_wf(&acc->min);
+    ensures acc->has_min == 1 ==> DISK_ID_WF(&acc->min);
 */
 static int
 normfs_disk_list_dir(const char *path, size_t path_len, int kind,
@@ -802,7 +807,7 @@ normfs_disk_list_dir(const char *path, size_t path_len, int kind,
 	    loop invariant done == 0 || done == 1;
 	    loop invariant *os_error == 0;
 	    loop invariant acc->has_min == 0 || acc->has_min == 1;
-	    loop invariant acc->has_min == 1 ==> disk_id_wf(&acc->min);
+	    loop invariant acc->has_min == 1 ==> DISK_ID_WF(&acc->min);
 	    loop invariant \forall integer k; 0 <= k < depth ==>
 	                     chunks[k] < NORMFS_DISK_CHUNKS;
 	    loop assigns n, rc, parsed, name_len, ekind, size, idx, done,
@@ -868,7 +873,7 @@ normfs_disk_list_dir(const char *path, size_t path_len, int kind,
     ensures \result.status == NORMFS_DISK_ERR_IO ==> \result.os_error > 0;
     ensures \result.status != NORMFS_DISK_ERR_IO ==> \result.os_error == 0;
     ensures out->has_min == 0 || out->has_min == 1;
-    ensures out->has_min == 1 ==> disk_id_wf(&out->min);
+    ensures out->has_min == 1 ==> DISK_ID_WF(&out->min);
 */
 struct normfs_disk_result
 normfs_disk_scan(const char *dir, size_t dir_len, int kind,
@@ -930,7 +935,7 @@ normfs_disk_scan(const char *dir, size_t dir_len, int kind,
 	    loop invariant \forall integer d; 0 <= d < depth ==>
 	                     chunks[d] < NORMFS_DISK_CHUNKS;
 	    loop invariant out->has_min == 0 || out->has_min == 1;
-	    loop invariant out->has_min == 1 ==> disk_id_wf(&out->min);
+	    loop invariant out->has_min == 1 ==> DISK_ID_WF(&out->min);
 	    loop assigns depth, steps, idx, plen, st, e,
 	                 levels[0 .. NORMFS_DISK_MAX_DEPTH - 1],
 	                 chunks[0 .. NORMFS_DISK_MAX_DEPTH - 1],
@@ -997,14 +1002,16 @@ normfs_disk_scan(const char *dir, size_t dir_len, int kind,
     requires req->store_dir[req->store_dir_len] == 0;
     requires \valid_read(req->wal_dir + (0 .. req->wal_dir_len));
     requires req->wal_dir[req->wal_dir_len] == 0;
-    requires disk_id_wf(&req->next);
-    requires req->has_bound == 0 || disk_id_wf(&req->bound);
+    requires DISK_ID_WF(&req->next);
+    requires req->has_bound == 0 || DISK_ID_WF(&req->bound);
     requires \valid(ev);
     requires \valid(stop);
     requires \separated(req, ev, stop,
                         req->store_dir + (0 .. req->store_dir_len),
                         req->wal_dir + (0 .. req->wal_dir_len));
-    assigns *ev, req->to_free, *stop;
+    assigns ev->id.hex[0 .. NORMFS_DISK_ID_MAX - 1], ev->id.len,
+            ev->size, ev->kind, ev->deleted, ev->os_error,
+            req->to_free, *stop, normfs_disk_fs_world;
     ensures \result == NORMFS_DISK_OK ||
             \result == NORMFS_DISK_ERR_PATH_TOO_LONG;
     ensures \result == NORMFS_DISK_OK ==>
@@ -1012,7 +1019,16 @@ normfs_disk_scan(const char *dir, size_t dir_len, int kind,
                *stop == NORMFS_DISK_STOP_GAP ||
                *stop == NORMFS_DISK_STOP_BOUND);
     ensures \result == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_MORE ==>
-              disk_event_wf(ev);
+              DISK_EVENT_WF(ev) &&
+              req->to_free == (ev->deleted == 1 ?
+                (ev->size >= \old(req->to_free) ? 0 : \old(req->to_free) - ev->size) :
+                \old(req->to_free));
+    ensures \result == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_MORE &&
+              ev->deleted == 1 ==>
+              disk_fs_bytes == \old(disk_fs_bytes) - ev->size;
+    ensures req->to_free <= \old(req->to_free);
+    ensures \result != NORMFS_DISK_OK || *stop != NORMFS_DISK_STOP_MORE ==>
+              req->to_free == \old(req->to_free);
 */
 static int
 normfs_disk_evict_one(struct normfs_disk_evict_req *req,
@@ -1024,6 +1040,8 @@ normfs_disk_evict_one(struct normfs_disk_evict_req *req,
 	int e = 0;
 	int rc;
 	int kind;
+	int unlink_result;
+	int deleted = 0;
 
 	*stop = NORMFS_DISK_STOP_MORE;
 
@@ -1051,22 +1069,45 @@ normfs_disk_evict_one(struct normfs_disk_evict_req *req,
 		return NORMFS_DISK_OK;
 	}
 
+	if (rc > 0) {
+		unlink_result = normfs_disk_sys_unlink(path, plen, &e);
+		if (unlink_result == 0) {
+			/*@ assert !disk_fs_present(&path[0], plen); */
+			/*@ assert disk_fs_bytes == \at(disk_fs_bytes, Pre) - size; */
+			deleted = 1;
+			req->to_free = (size >= req->to_free) ? 0u : req->to_free - size;
+		}
+	}
+
 	normfs_disk_id_copy(&ev->id, &req->next);
 	ev->kind = kind;
 	ev->size = size;
-	ev->deleted = 0;
-	ev->os_error = 0;
-
-	if (rc < 0) {
-		ev->os_error = e;
-	} else if (normfs_disk_sys_unlink(path, plen, &e) != 0) {
-		ev->os_error = e;
-	} else {
-		ev->deleted = 1;
-		req->to_free = (size >= req->to_free) ? 0u : req->to_free - size;
-	}
+	ev->deleted = deleted;
+	ev->os_error = e;
 
 	return NORMFS_DISK_OK;
+}
+
+/* Keep the prefix-frame proof separate from syscalls and ID advancement. */
+/*@ requires \valid(events + (0 .. index));
+    requires \valid_read(event);
+    requires \separated(event, events + (0 .. index));
+    requires DISK_EVENT_WF(event);
+    requires \forall integer k; 0 <= k < index ==> DISK_EVENT_WF(&events[k]);
+    assigns events[index];
+    ensures events[index] == *event;
+    ensures events[index].size == event->size;
+    ensures events[index].deleted == event->deleted;
+    ensures \forall integer k; 0 <= k < index ==>
+              events[k].deleted == \old(events[k].deleted) &&
+              events[k].size == \old(events[k].size);
+    ensures \forall integer k; 0 <= k <= index ==> DISK_EVENT_WF(&events[k]);
+*/
+static void
+normfs_disk_event_append(struct normfs_disk_event *events, size_t index,
+    const struct normfs_disk_event *event)
+{
+	events[index] = *event;
 }
 
 /* Ids are consecutive, so the first id with neither file is the end. */
@@ -1081,15 +1122,16 @@ normfs_disk_evict_one(struct normfs_disk_evict_req *req,
     requires \separated(req, count, stop, events + (0 .. cap - 1),
                         req->store_dir + (0 .. req->store_dir_len),
                         req->wal_dir + (0 .. req->wal_dir_len));
-    assigns req->next, req->to_free, events[0 .. cap - 1], *count, *stop;
+    assigns req->next, req->to_free, events[0 .. cap - 1], *count, *stop,
+            normfs_disk_fs_world;
     ensures \result.os_error == 0;
     ensures \result.status == NORMFS_DISK_OK ||
             \result.status == NORMFS_DISK_ERR_INVALID_ARG ||
             \result.status == NORMFS_DISK_ERR_PATH_TOO_LONG ||
             \result.status == NORMFS_DISK_ERR_ID_OVERFLOW;
     ensures \result.status == NORMFS_DISK_ERR_INVALID_ARG <==>
-              !(disk_id_wf(&req->next) &&
-                (req->has_bound == 0 || disk_id_wf(&req->bound)));
+              !(DISK_ID_WF(&req->next) &&
+                (req->has_bound == 0 || DISK_ID_WF(&req->bound)));
     ensures *count <= cap;
     ensures \result.status == NORMFS_DISK_OK ==>
               (*stop == NORMFS_DISK_STOP_MORE ||
@@ -1101,8 +1143,13 @@ normfs_disk_evict_one(struct normfs_disk_evict_req *req,
     ensures \result.status == NORMFS_DISK_OK && *stop == NORMFS_DISK_STOP_FREED
               ==> req->to_free == 0;
     ensures \result.status != NORMFS_DISK_ERR_INVALID_ARG ==>
-              disk_id_wf(&req->next);
-    ensures \forall integer k; 0 <= k < *count ==> disk_event_wf(&events[k]);
+              DISK_ID_WF(&req->next);
+    ensures req->to_free <= \old(req->to_free);
+    ensures *count == 0 ==> req->to_free == \old(req->to_free);
+    ensures \forall integer k; 0 <= k < *count ==> DISK_EVENT_WF(&events[k]);
+    ensures \forall integer k; 0 <= k < *count &&
+              events[k].deleted == 1 && events[k].size > 0 ==>
+              req->to_free < \old(req->to_free);
 */
 struct normfs_disk_result
 normfs_disk_evict(struct normfs_disk_evict_req *req,
@@ -1110,6 +1157,8 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
     size_t *count, int *stop)
 {
 	struct normfs_disk_result r;
+	/* The struct copy overwrites even the unused ID bytes in the Rust buffer. */
+	struct normfs_disk_event event = {0};
 	int st;
 	int one = NORMFS_DISK_STOP_MORE;
 
@@ -1125,11 +1174,21 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 	}
 
 	/*@ loop invariant 0 <= *count <= cap;
-	    loop invariant disk_id_wf(&req->next);
+	    loop invariant \separated(&req->next, &req->bound, &req->to_free,
+	                              count, events + (0 .. cap - 1));
+	    loop invariant DISK_ID_WF(&req->next);
+	    loop invariant req->has_bound == 0 || DISK_ID_WF(&req->bound);
+	    loop invariant req->to_free <= \at(req->to_free, Pre);
+	    loop invariant *count == 0 ==> req->to_free == \at(req->to_free, Pre);
+	    loop invariant \forall integer k; 0 <= k < *count &&
+	      events[k].deleted == 1 && events[k].size > 0 ==>
+	      req->to_free < \at(req->to_free, Pre);
 	    loop invariant \forall integer k; 0 <= k < *count ==>
-	                     disk_event_wf(&events[k]);
-	    loop assigns *count, st, one, req->next, req->to_free,
-	                 events[0 .. cap - 1];
+	      1 <= events[k].id.len <= NORMFS_DISK_ID_MAX;
+	    loop invariant \forall integer k; 0 <= k < *count ==>
+	      DISK_EVENT_WF(&events[k]);
+	    loop assigns *count, st, one, event, req->next, req->to_free,
+	                 events[0 .. cap - 1], normfs_disk_fs_world;
 	    loop variant cap - *count;
 	*/
 	while (*count < cap) {
@@ -1138,7 +1197,7 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 			return r;
 		}
 
-		st = normfs_disk_evict_one(req, &events[*count], &one);
+		st = normfs_disk_evict_one(req, &event, &one);
 		if (st != NORMFS_DISK_OK) {
 			r.status = st;
 			return r;
@@ -1147,6 +1206,7 @@ normfs_disk_evict(struct normfs_disk_evict_req *req,
 			*stop = one;
 			return r;
 		}
+		normfs_disk_event_append(events, *count, &event);
 		*count += 1u;
 
 		if (normfs_disk_id_increment(&req->next) != NORMFS_DISK_OK) {

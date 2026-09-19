@@ -14,6 +14,20 @@
  * entry is a name, a kind and a size.
  */
 
+/* The model excludes external namespace changes between syscalls. Bytes count
+ * regular-file lengths by directory entry, not allocated blocks or inodes. */
+/*@ ghost extern int normfs_disk_fs_world; */
+/*@ axiomatic NormfsDiskKernel {
+      predicate disk_fs_present{L}(char *path, integer len)
+        reads normfs_disk_fs_world, path[0 .. len];
+      predicate disk_fs_regular{L}(char *path, integer len)
+        reads normfs_disk_fs_world, path[0 .. len];
+      logic integer disk_fs_size{L}(char *path, integer len)
+        reads normfs_disk_fs_world, path[0 .. len];
+      logic integer disk_fs_bytes{L} reads normfs_disk_fs_world;
+    }
+*/
+
 #define NORMFS_DISK_SYS_NAME_MAX 256
 
 enum normfs_disk_sys_kind {
@@ -79,6 +93,11 @@ void normfs_disk_sys_dir_close(void *handle);
     ensures \result == -1 || \result == 0 || \result == 1;
     ensures \result == -1 ==> *os_error > 0;
     ensures \result >= 0 ==> *os_error == 0;
+    ensures \result == 0 ==> !disk_fs_regular(path, path_len);
+    ensures \result == 1 ==> disk_fs_present(path, path_len) &&
+              disk_fs_regular(path, path_len) &&
+              *size == disk_fs_size(path, path_len) &&
+              *size <= disk_fs_bytes;
 */
 int normfs_disk_sys_file_size(const char *path, size_t path_len,
     uint64_t *size, int *os_error);
@@ -88,10 +107,16 @@ int normfs_disk_sys_file_size(const char *path, size_t path_len,
     requires path[path_len] == 0;
     requires \valid(os_error);
     requires \separated(os_error, path + (0 .. path_len));
-    assigns *os_error;
+    assigns *os_error, normfs_disk_fs_world;
     ensures \result == 0 || \result == -1;
     ensures \result == -1 ==> *os_error > 0;
     ensures \result == 0 ==> *os_error == 0;
+    ensures \result == 0 ==> disk_fs_present{Pre}(path, path_len);
+    ensures \result == 0 ==> !disk_fs_present(path, path_len) &&
+              !disk_fs_regular(path, path_len);
+    ensures \result == 0 && disk_fs_regular{Pre}(path, path_len) ==>
+              disk_fs_bytes == \old(disk_fs_bytes) -
+                disk_fs_size{Pre}(path, path_len);
 */
 int normfs_disk_sys_unlink(const char *path, size_t path_len, int *os_error);
 

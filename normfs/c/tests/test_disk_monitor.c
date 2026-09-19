@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include "normfs/disk_monitor.h"
+#include "normfs/disk_monitor_sys.h"
 
 /* assert() is a no-op under NDEBUG, which the Release build defines. */
 #define CHECK(cond)                                                     \
@@ -369,6 +370,42 @@ test_file_size(void)
 }
 
 static int
+test_unlink_removes_name_but_preserves_other_references(void)
+{
+	char path[640];
+	char alias[640];
+	struct stat st;
+	uint64_t size = 0u;
+	int error = -1;
+	int fd;
+	char byte = 0;
+
+	(void)snprintf(path, sizeof(path), "%s/unlink-file", root);
+	(void)snprintf(alias, sizeof(alias), "%s/unlink-alias", root);
+	fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+	CHECK(fd >= 0);
+	CHECK(write(fd, "x", 1) == 1);
+	CHECK(link(path, alias) == 0);
+	CHECK(normfs_disk_sys_file_size(path, strlen(path), &size, &error) == 1);
+	CHECK(size == 1u && error == 0);
+	CHECK(normfs_disk_sys_unlink(path, strlen(path), &error) == 0);
+	CHECK(error == 0);
+	CHECK(lstat(path, &st) == -1 && errno == ENOENT);
+	CHECK(lstat(alias, &st) == 0 && st.st_size == 1);
+	CHECK(fstat(fd, &st) == 0 && st.st_size == 1);
+	CHECK(normfs_disk_sys_unlink(alias, strlen(alias), &error) == 0);
+	CHECK(pread(fd, &byte, 1, 0) == 1 && byte == 'x');
+	CHECK(normfs_disk_sys_unlink(path, strlen(path), &error) == -1);
+	CHECK(error == ENOENT);
+	CHECK(normfs_disk_sys_file_size(path, strlen(path), &size, &error) == 0);
+	CHECK(size == 0u && error == 0);
+	CHECK(normfs_disk_sys_file_size(root, strlen(root), &size, &error) == 0);
+	CHECK(size == 0u && error == 0);
+	CHECK(close(fd) == 0);
+	return 0;
+}
+
+static int
 setup_queue(const char *name, char *store, size_t store_len, char *wal,
     size_t wal_len)
 {
@@ -675,6 +712,8 @@ main(void)
 	if (test_scan_refuses_a_tree_too_deep() != 0)
 		return 1;
 	if (test_file_size() != 0)
+		return 1;
+	if (test_unlink_removes_name_but_preserves_other_references() != 0)
 		return 1;
 	if (test_evict_frees_from_the_bottom() != 0)
 		return 1;
