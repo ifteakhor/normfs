@@ -138,8 +138,15 @@ impl StoreWriteWorker {
             }
         };
 
-        if let Err(e) =
-            store_file::land_local(&self.root_dir, queue_id, file_id, &sealed, true).await
+        if let Err(e) = store_file::land_local(
+            self.wal_store.fs(),
+            &self.root_dir,
+            queue_id,
+            file_id,
+            &sealed,
+            true,
+        )
+        .await
         {
             if !self.shutting_down.load(Ordering::Relaxed) {
                 log::error!(target: "normfs-store",
