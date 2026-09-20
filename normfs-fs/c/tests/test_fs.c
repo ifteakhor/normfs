@@ -44,7 +44,9 @@ rm_tree(const char *dir)
 	char cmd[1024];
 
 	(void)snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
-	(void)system(cmd);
+	/* A (void) cast does not satisfy glibc's warn_unused_result on system. */
+	if (system(cmd) != 0)
+		fprintf(stderr, "fs: could not remove %s\n", dir);
 }
 
 static void
