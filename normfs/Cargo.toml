@@ -18,6 +18,7 @@ server-bin = ["clap", "env_logger"]
 uintn = { version = "0.3.3", path = "../uintn-rs" }
 normfs-types = { version = "0.3.3", path = "../normfs-types" }
 normfs-wal = { version = "0.3.3", path = "../normfs-wal" }
+normfs-fs = { version = "0.3.3", path = "../normfs-fs" }
 normfs-store = { version = "0.3.3", path = "../normfs-store" }
 normfs-cloud = { version = "0.3.3", path = "../normfs-cloud" }
 normfs-crypto = { version = "0.3.3", path = "../normfs-crypto" }

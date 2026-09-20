@@ -13,6 +13,7 @@ use bytes::Bytes;
 use core::time::Duration;
 use normfs_cloud::CloudDownloader;
 use normfs_crypto::CryptoContext;
+use normfs_fs::{Fs, FsConfig, Runs, TmpMode};
 use normfs_store::PersistStore;
 use normfs_wal::{WalFile, WalSettings, WalStore};
 use std::collections::HashMap;
@@ -37,6 +38,7 @@ pub use uintn::{Error as UintNError, UintN, UintNType};
 
 pub struct NormFS {
     path: std::path::PathBuf,
+    fs: Fs,
     wal: Arc<WalStore>,
     store: Arc<PersistStore>,
     mem: Arc<mem::MemStore>,
@@ -207,6 +209,12 @@ impl From<normfs_cloud::errors::CloudError> for Error {
     }
 }
 
+impl From<normfs_fs::FsError> for Error {
+    fn from(e: normfs_fs::FsError) -> Self {
+        Error::Io(e.into())
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Io(e)
@@ -296,12 +304,17 @@ impl NormFS {
         let path = path.as_ref().to_path_buf();
         log::debug!(target: "normfs", "Creating new NormFS at path: {:?}", path);
 
-        let crypto_ctx = Arc::new(CryptoContext::open(&path).map_err(|e| {
-            Error::Io(std::io::Error::other(format!(
-                "Failed to open crypto context: {}",
-                e
-            )))
-        })?);
+        let fs = Fs::new(FsConfig::default()).map_err(Error::Io)?;
+
+        let crypto_path = path.clone();
+        let crypto_ctx = fs
+            .run_blocking(move || {
+                CryptoContext::open(&crypto_path).map_err(|e| {
+                    std::io::Error::other(format!("Failed to open crypto context: {}", e))
+                })
+            })
+            .await
+            .map(Arc::new)?;
 
         let instance_id = crypto_ctx.instance_id_hex();
 
@@ -324,8 +337,11 @@ impl NormFS {
             }
         }
 
-        let memory_pointers =
-            Arc::new(memory_pointers::MemoryPointers::open(&path).map_err(Error::Io)?);
+        let memory_pointers = Arc::new(
+            memory_pointers::MemoryPointers::open(fs.clone(), &path)
+                .await
+                .map_err(Error::Io)?,
+        );
         let memory_pointer_task =
             memory_pointers.spawn_flusher(settings.memory_pointers_flush_interval);
 
@@ -335,10 +351,11 @@ impl NormFS {
             tokio::sync::mpsc::UnboundedReceiver<WalFile>,
         ) = tokio::sync::mpsc::unbounded_channel();
 
-        let wal = Arc::new(WalStore::new(
+        let wal = Arc::new(WalStore::with_fs(
             &path,
             wal_entry_send.clone(),
             wal_complete_send,
+            fs.clone(),
         ));
 
         let store = PersistStore::new(
@@ -414,7 +431,14 @@ impl NormFS {
         // Initialize disk monitor if enabled
         let disk_monitor = if settings.max_disk_usage_per_queue.is_some() {
             log::debug!(target: "normfs", "Disk monitor enabled, creating disk monitor instance");
-            match DiskMonitor::new(&path, cloud_client.clone(), cloud_prefix.clone()).await {
+            match DiskMonitor::new(
+                fs.clone(),
+                &path,
+                cloud_client.clone(),
+                cloud_prefix.clone(),
+            )
+            .await
+            {
                 Ok(monitor) => Some(Arc::new(monitor)),
                 Err(e) => {
                     log::error!(target: "normfs", "Failed to create disk monitor: {}", e);
@@ -473,6 +497,7 @@ impl NormFS {
 
         Ok(Self {
             path: path.clone(),
+            fs,
             wal,
             store: store_arc,
             mem,
@@ -523,7 +548,7 @@ impl NormFS {
     }
 
     // Consults the durable marker once and mirrors it into memory.
-    fn queue_closed_durably(&self, queue: &QueueId) -> bool {
+    async fn queue_closed_durably(&self, queue: &QueueId) -> bool {
         if self.mem.is_closed(queue) {
             return true;
         }
@@ -532,7 +557,15 @@ impl NormFS {
         if self.mem.get_last_id(queue).is_some() {
             return false;
         }
-        if queue.to_fs_path(&self.path).join("closed").is_file() {
+        let marker = queue.to_fs_path(&self.path).join("closed");
+        if self
+            .fs
+            .stat(&marker)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.is_file())
+        {
             self.mem.mark_closed(queue);
             return true;
         }
@@ -545,7 +578,7 @@ impl NormFS {
 
         // Reads stay legal on a closed queue; this only loads the marker
         // so a follow here knows to end.
-        self.queue_closed_durably(queue);
+        self.queue_closed_durably(queue).await;
 
         if self.mem.get_last_id(queue).is_some() {
             return Ok(());
@@ -564,8 +597,8 @@ impl NormFS {
             return Err(StoreError::CloseIncomplete.into());
         }
 
-        if self.queue_closed_durably(queue) {
-            self.reopen_queue(queue)?;
+        if self.queue_closed_durably(queue).await {
+            self.reopen_queue(queue).await?;
         }
 
         let queue_exists = self.mem.get_last_id(queue).is_some();
@@ -592,13 +625,15 @@ impl NormFS {
     /// first and is synced, so a crash here leaves the queue closed rather
     /// than half-open; the start that follows recovers the last id from the
     /// files the close completed.
-    fn reopen_queue(&self, queue: &QueueId) -> Result<(), Error> {
+    async fn reopen_queue(&self, queue: &QueueId) -> Result<(), Error> {
         log::info!(target: "normfs", "Reopening closed queue '{}' for write", queue);
         let dir = queue.to_fs_path(&self.path);
-        match std::fs::remove_file(dir.join("closed")) {
-            Ok(()) => std::fs::File::open(&dir)?.sync_all()?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+        if let Err(e) = self.fs.remove_durable(&dir.join("closed"), true).await {
+            let e = std::io::Error::from(e);
+            // No directory: nothing was closed, and there is nothing to sync.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            }
         }
         self.mem.reopen(queue);
         Ok(())
@@ -1435,11 +1470,16 @@ impl NormFS {
         // no half-closed state. An unknown name is more likely a typo than
         // an intent, and "closed" is a reserved child name the same way
         // wal/ and store/ already are.
-        if self.mem.get_last_id(queue).is_none() && !dir.exists() {
+        if self.mem.get_last_id(queue).is_none() && self.fs.stat(&dir).await?.is_none() {
             return Err(Error::QueueNotFound);
         }
 
-        if dir.join("closed").is_dir() {
+        if self
+            .fs
+            .stat(&dir.join("closed"))
+            .await?
+            .is_some_and(|m| m.is_dir())
+        {
             return Err(Error::Io(std::io::Error::other(
                 "a child queue named 'closed' occupies this queue's marker path",
             )));
@@ -1467,11 +1507,11 @@ impl NormFS {
             return Err(Error::Wal(WalError::CloseIncomplete));
         }
 
-        std::fs::create_dir_all(&dir)?;
-        let marker = std::fs::File::create(dir.join("closed"))?;
-        marker.sync_all()?;
-        // The directory entry must survive a power cut too.
-        std::fs::File::open(&dir)?.sync_all()?;
+        // The marker and its directory entry, both synced: a CREATE plan.
+        self.fs.mkdir_all(&dir).await?;
+        self.fs
+            .create_durable(&dir.join("closed"), Runs::default(), TmpMode::Trunc, true)
+            .await?;
 
         self.mem.close_queue(queue);
         Ok(())
@@ -1480,7 +1520,10 @@ impl NormFS {
     pub async fn close(&self) -> Result<(), Error> {
         log::info!(target: "normfs", "Closing NormFS");
 
-        self.memory_pointers.flush_if_dirty().map_err(Error::Io)?;
+        self.memory_pointers
+            .flush_if_dirty()
+            .await
+            .map_err(Error::Io)?;
         self.memory_pointer_task.abort();
 
         // Store first: page writers land their tails, and the migration

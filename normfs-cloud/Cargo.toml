@@ -18,6 +18,7 @@ uintn = { version = "0.3.3", path = "../uintn-rs" }
 normfs-types = { version = "0.3.3", path = "../normfs-types" }
 normfs-store = { version = "0.3.3", path = "../normfs-store" }
 normfs-wal = { version = "0.3.3", path = "../normfs-wal" }
+normfs-fs = { version = "0.3.3", path = "../normfs-fs" }
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 log = "0.4"

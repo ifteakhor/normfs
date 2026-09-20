@@ -1,6 +1,8 @@
+use bytes::Bytes;
+use normfs_fs::{Fs, PublishSpec, Runs, TmpMode};
 use normfs_types::QueueId;
 use std::collections::HashMap;
-use std::io::{Error, ErrorKind, Write};
+use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,30 +26,40 @@ struct PointerState {
 }
 
 pub(crate) struct MemoryPointers {
+    fs: Fs,
     path: PathBuf,
     tmp_path: PathBuf,
     state: Mutex<PointerState>,
-    flush_lock: Mutex<()>,
+    flush_lock: tokio::sync::Mutex<()>,
 }
 
 impl MemoryPointers {
-    pub(crate) fn open(root: &Path) -> Result<Self, Error> {
+    pub(crate) async fn open(fs: Fs, root: &Path) -> Result<Self, Error> {
         let path = root.join(POINTERS_FILE);
         let tmp_path = root.join(POINTERS_TMP_FILE);
-        let queues = match std::fs::read_to_string(&path) {
-            Ok(contents) => parse_pointers(&contents)?,
-            Err(e) if e.kind() == ErrorKind::NotFound => HashMap::new(),
-            Err(e) => return Err(e),
+        let read_path = path.clone();
+        let contents = fs
+            .run_blocking(move || match std::fs::read_to_string(&read_path) {
+                Ok(contents) => Ok(Some(contents)),
+                Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e),
+            })
+            .await
+            .map_err(Error::from)?;
+        let queues = match contents {
+            Some(contents) => parse_pointers(&contents)?,
+            None => HashMap::new(),
         };
 
         Ok(Self {
+            fs,
             path,
             tmp_path,
             state: Mutex::new(PointerState {
                 queues,
                 dirty: false,
             }),
-            flush_lock: Mutex::new(()),
+            flush_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -74,14 +86,14 @@ impl MemoryPointers {
     /// Records that `file_id` holding ids up to `last_id` is in the cloud, and
     /// writes it out before returning: the next life starts from this, and a
     /// stale one would overwrite that object.
-    pub(crate) fn mark_landed(
+    pub(crate) async fn mark_landed(
         &self,
         queue: &QueueId,
         last_id: &UintN,
         file_id: &UintN,
     ) -> Result<(), Error> {
         self.advance(queue, last_id, Some(file_id))?;
-        self.flush_if_dirty()
+        self.flush_if_dirty().await
     }
 
     fn advance(&self, queue: &QueueId, id: &UintN, file: Option<&UintN>) -> Result<(), Error> {
@@ -101,8 +113,8 @@ impl MemoryPointers {
         Ok(())
     }
 
-    pub(crate) fn flush_if_dirty(&self) -> Result<(), Error> {
-        let _flush_guard = self.flush_lock.lock().unwrap();
+    pub(crate) async fn flush_if_dirty(&self) -> Result<(), Error> {
+        let _flush_guard = self.flush_lock.lock().await;
         let snapshot = {
             let mut state = self.state.lock().unwrap();
             if !state.dirty {
@@ -112,7 +124,7 @@ impl MemoryPointers {
             state.queues.clone()
         };
 
-        if let Err(e) = self.write_snapshot(&snapshot) {
+        if let Err(e) = self.write_snapshot(&snapshot).await {
             self.state.lock().unwrap().dirty = true;
             return Err(e);
         }
@@ -126,46 +138,62 @@ impl MemoryPointers {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
-                if let Err(e) = pointers.flush_if_dirty() {
+                if let Err(e) = pointers.flush_if_dirty().await {
                     log::warn!(target: "normfs", "Failed to flush memory-only pointers: {e}");
                 }
             }
         })
     }
 
-    fn write_snapshot(&self, snapshot: &HashMap<String, Pointer>) -> Result<(), Error> {
+    /// One PUBLISH plan: the fixed temporary name, truncated, then the rename
+    /// and the directory sync, so a restart reads either the previous
+    /// snapshot or this one whole.
+    async fn write_snapshot(&self, snapshot: &HashMap<String, Pointer>) -> Result<(), Error> {
         let mut entries: Vec<_> = snapshot.iter().collect();
         entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-        let mut file = std::fs::File::create(&self.tmp_path)?;
-        file.write_all(b"# normfs memory-only pointers v1\n")?;
+        let mut out = Vec::new();
+        out.extend_from_slice(b"# normfs memory-only pointers v1\n");
         for (queue, pointer) in entries {
-            file.write_all(queue.as_bytes())?;
-            file.write_all(b"\t")?;
-            file.write_all(pointer.id.to_string().as_bytes())?;
+            out.extend_from_slice(queue.as_bytes());
+            out.push(b'\t');
+            out.extend_from_slice(pointer.id.to_string().as_bytes());
             if let Some(f) = pointer.file {
-                file.write_all(b"\t")?;
-                file.write_all(f.to_string().as_bytes())?;
+                out.push(b'\t');
+                out.extend_from_slice(f.to_string().as_bytes());
             }
-            file.write_all(b"\n")?;
+            out.push(b'\n');
         }
-        file.sync_all()?;
-        drop(file);
 
-        std::fs::rename(&self.tmp_path, &self.path)?;
-        std::fs::File::open(self.path.parent().unwrap_or(Path::new(".")))?.sync_all()?;
+        self.fs
+            .publish(
+                PublishSpec {
+                    tmp: self.tmp_path.clone(),
+                    dst: self.path.clone(),
+                    runs: Runs(vec![Bytes::from(out)]),
+                    tmp_mode: TmpMode::Trunc,
+                    sync: true,
+                },
+                None,
+            )
+            .await?;
         Ok(())
     }
 }
 
 impl normfs_cloud::LandedIndex for MemoryPointers {
-    fn mark_landed(
-        &self,
-        queue: &QueueId,
-        last_entry_id: &UintN,
-        file_id: &UintN,
-    ) -> Result<(), Error> {
-        MemoryPointers::mark_landed(self, queue, last_entry_id, file_id)
+    fn mark_landed<'a>(
+        &'a self,
+        queue: &'a QueueId,
+        last_entry_id: &'a UintN,
+        file_id: &'a UintN,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send + 'a>> {
+        Box::pin(MemoryPointers::mark_landed(
+            self,
+            queue,
+            last_entry_id,
+            file_id,
+        ))
     }
 }
 

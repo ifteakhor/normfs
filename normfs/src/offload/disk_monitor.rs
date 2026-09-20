@@ -9,6 +9,7 @@ use uintn::{paths, UintN};
 use crate::Error;
 use normfs_cloud::offloader::QueueOffloader;
 use normfs_cloud::S3Client;
+use normfs_fs::Fs;
 use normfs_store::StoreError;
 use normfs_types::QueueId;
 use normfs_wal::WalSettings;
@@ -62,6 +63,7 @@ struct QueueMonitor {
 
 impl QueueMonitor {
     async fn new(
+        fs: Fs,
         queue_id: QueueId,
         config: DiskMonitorConfig,
         root_path: PathBuf,
@@ -69,9 +71,9 @@ impl QueueMonitor {
         prefix: Option<&str>,
     ) -> Self {
         let offloader = match (client, prefix) {
-            (Some(client), Some(prefix)) if config.offload => {
-                Some(QueueOffloader::new(queue_id.clone(), root_path.clone(), client, prefix).await)
-            }
+            (Some(client), Some(prefix)) if config.offload => Some(
+                QueueOffloader::new(fs, queue_id.clone(), root_path.clone(), client, prefix).await,
+            ),
             _ => None,
         };
 
@@ -378,6 +380,7 @@ impl QueueMonitor {
 }
 
 pub struct DiskMonitor {
+    fs: Fs,
     monitors: Arc<RwLock<std::collections::HashMap<QueueId, QueueMonitor>>>,
     root_path: PathBuf,
     _handle: Option<tokio::task::JoinHandle<()>>,
@@ -387,6 +390,7 @@ pub struct DiskMonitor {
 
 impl DiskMonitor {
     pub async fn new(
+        fs: Fs,
         root_path: impl AsRef<Path>,
         client: Option<Arc<S3Client>>,
         prefix: Option<String>,
@@ -418,6 +422,7 @@ impl DiskMonitor {
         });
 
         Ok(Self {
+            fs,
             monitors,
             root_path: root_path.as_ref().to_path_buf(),
             _handle: Some(handle),
@@ -469,6 +474,7 @@ impl DiskMonitor {
         config.validate()?;
 
         let monitor = QueueMonitor::new(
+            self.fs.clone(),
             queue_id.clone(),
             config,
             self.root_path.clone(),
