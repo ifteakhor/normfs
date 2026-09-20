@@ -281,6 +281,13 @@ fn sys_pwritev_all(fd: RawFd, runs: &[Bytes], mut off: u64) -> std::io::Result<(
 }
 
 fn sys_fsync(fd: RawFd) -> std::io::Result<()> {
+    // What Rust's sync_all does on macOS; plain fsync stops at the drive
+    // cache there and would flatter this backend against tokio's.
+    #[cfg(target_os = "macos")]
+    // SAFETY: fd is open.
+    if unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) } == 0 {
+        return Ok(());
+    }
     loop {
         // SAFETY: fd is open.
         if unsafe { libc::fsync(fd) } == 0 {

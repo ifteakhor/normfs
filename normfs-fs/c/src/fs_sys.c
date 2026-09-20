@@ -197,6 +197,17 @@ normfs_fs_sys_fsync(int fd, int *os_error)
 	int rc;
 
 	*os_error = 0;
+#if defined(__APPLE__)
+	/* fsync(2) here stops at the drive's cache; F_FULLFSYNC is what
+	 * reaches the medium, and what Rust's sync_all does on this host. It
+	 * is refused on some descriptors, and fsync is the fallback then. */
+	do {
+		errno = 0;
+		rc = fcntl(fd, F_FULLFSYNC);
+	} while (rc != 0 && errno == EINTR);
+	if (rc == 0)
+		return 0;
+#endif
 	do {
 		errno = 0;
 		rc = fsync(fd);
