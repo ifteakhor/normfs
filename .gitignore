@@ -6,6 +6,7 @@ normfs-wal/c/build/
 normfs-store/c/build/
 normfs-crypto/c/build/
 normfs/c/build/
+normfs-fs/c/build/
 
 # macOS
 .DS_Store
