@@ -11,15 +11,20 @@ description = "Filesystem layer for NormFS: proved protocol planner, thread-pool
 [features]
 default = []
 uring = ["dep:io-uring"]
+fault-injection = []
 
 [dependencies]
 bytes = { workspace = true }
 libc = "0.2"
 log = { workspace = true }
 tokio = { workspace = true }
+uintn = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }
+
+[build-dependencies]
+cc = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1507,11 +1507,13 @@ name = "normfs-fs"
 version = "0.3.3"
 dependencies = [
  "bytes",
+ "cc",
  "io-uring",
  "libc",
  "log",
  "tempfile",
  "tokio",
+ "uintn",
 ]
 
 [[package]]
@@ -1524,6 +1526,7 @@ dependencies = [
  "log",
  "lzma-rust2",
  "normfs-crypto",
+ "normfs-fs",
  "normfs-types",
  "normfs-wal",
  "ruzstd",
@@ -1551,6 +1554,7 @@ dependencies = [
  "criterion 0.5.1",
  "env_logger",
  "log",
+ "normfs-fs",
  "normfs-types",
  "rand 0.8.7",
  "tempfile",
