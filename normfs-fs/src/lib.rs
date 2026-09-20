@@ -60,11 +60,15 @@ impl Default for FsConfig {
     }
 }
 
+/// One thread per core up to eight. On the four-core rover that is four;
+/// on a many-core host with an SSD the gate benchmark lost 11% of publish
+/// throughput at four threads and 5% at eight against tokio's unbounded
+/// pool, at 40% less CPU either way.
 fn default_threads() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2)
-        .clamp(2, 4)
+        .clamp(2, 8)
 }
 
 #[derive(Debug)]
