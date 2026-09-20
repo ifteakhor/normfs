@@ -350,19 +350,25 @@ pub struct WalContent {
     pub content: Bytes,
 }
 
-pub async fn get_wal_content(base_path: &Path, file_id: &UintN) -> Result<WalContent, WalError> {
+pub async fn get_wal_content(
+    fs: &normfs_fs::Fs,
+    base_path: &Path,
+    file_id: &UintN,
+) -> Result<WalContent, WalError> {
     let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
     log::debug!("WAL reader: getting content from file {}", file_id);
 
-    let content_bytes = match fs::read(&file_path).await {
+    let content = match fs.read_whole(&file_path).await {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::warn!("WAL reader: file {} not found", file_id);
-            return Err(WalError::WalNotFound);
+        Err(e) => {
+            let e = std::io::Error::from(e);
+            if e.kind() == std::io::ErrorKind::NotFound {
+                log::warn!("WAL reader: file {} not found", file_id);
+                return Err(WalError::WalNotFound);
+            }
+            return Err(e.into());
         }
-        Err(e) => return Err(e.into()),
     };
-    let content = Bytes::from(content_bytes);
 
     if content.is_empty() {
         log::warn!("WAL reader: file {} has no content", file_id);

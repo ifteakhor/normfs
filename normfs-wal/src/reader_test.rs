@@ -1,3 +1,7 @@
+fn test_fs() -> normfs_fs::Fs {
+    normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap()
+}
+
 use crate::wal_header::WalHeader;
 use crate::{
     errors::WalError,
@@ -46,7 +50,9 @@ async fn test_get_wal_range() {
     assert_eq!(header.num_entries_before, UintN::from(0u64));
     assert_eq!(range, Some((UintN::from(1u64), UintN::from(5u64))));
 
-    let wal_content = get_wal_content(dir.path(), &file_id).await.unwrap();
+    let wal_content = get_wal_content(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
     assert_eq!(wal_content.entries_before, UintN::from(0u64));
     assert_eq!(wal_content.num_entries, UintN::from(5u64));
     assert_eq!(wal_content.content, buffer.clone().freeze());
@@ -119,7 +125,7 @@ async fn test_get_wal_range_empty_file() {
     // Empty file should return WalEmpty error
     assert!(matches!(result, Err(WalError::WalEmpty(_))));
 
-    let result_content = get_wal_content(dir.path(), &file_id).await;
+    let result_content = get_wal_content(&test_fs(), dir.path(), &file_id).await;
     assert!(matches!(
         result_content,
         Err(WalError::WalEntryError(
@@ -178,7 +184,9 @@ async fn test_get_wal_range_header_only() {
     assert_eq!(header.num_entries_before, UintN::from(0u64));
     assert_eq!(range, None);
 
-    let wal_content = get_wal_content(dir.path(), &file_id).await.unwrap();
+    let wal_content = get_wal_content(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
     assert_eq!(wal_content.entries_before, UintN::from(0u64));
     assert_eq!(wal_content.num_entries, UintN::from(0u64));
     assert_eq!(wal_content.content, buffer.clone().freeze());
@@ -257,7 +265,9 @@ async fn test_get_wal_range_corrupted_end() {
     assert_eq!(header.num_entries_before, UintN::from(0u64));
     assert_eq!(range, Some((UintN::from(1u64), UintN::from(3u64))));
 
-    let wal_content = get_wal_content(dir.path(), &file_id).await.unwrap();
+    let wal_content = get_wal_content(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
     assert_eq!(wal_content.entries_before, UintN::from(0u64));
     assert_eq!(wal_content.num_entries, UintN::from(3u64));
     assert_eq!(wal_content.content, buffer.clone().freeze());
@@ -357,7 +367,9 @@ async fn test_get_wal_range_cropped_last_entry() {
     assert_eq!(header.num_entries_before, UintN::from(0u64));
     assert_eq!(range, Some((UintN::from(1u64), UintN::from(3u64))));
 
-    let wal_content = get_wal_content(dir.path(), &file_id).await.unwrap();
+    let wal_content = get_wal_content(&test_fs(), dir.path(), &file_id)
+        .await
+        .unwrap();
     assert_eq!(wal_content.entries_before, UintN::from(0u64));
     assert_eq!(wal_content.num_entries, UintN::from(3u64));
     assert_eq!(wal_content.content, buffer.clone().freeze());

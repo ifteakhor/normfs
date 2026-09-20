@@ -1,3 +1,7 @@
+fn test_fs() -> normfs_fs::Fs {
+    normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap()
+}
+
 use std::sync::Once;
 use std::time::Duration;
 
@@ -213,14 +217,18 @@ async fn test_size_based_rotation() {
     assert_eq!(received.queue_id, queue_id);
     assert_eq!(received.file_id, file_id);
 
-    let content1 = get_wal_content(&queue_id.to_wal_dir(tmp_dir.path()), &file_id)
+    let content1 = get_wal_content(&test_fs(), &queue_id.to_wal_dir(tmp_dir.path()), &file_id)
         .await
         .unwrap();
     assert_eq!(content1.num_entries, UintN::from(1u64));
 
-    let content2 = get_wal_content(&queue_id.to_wal_dir(tmp_dir.path()), &file_id.increment())
-        .await
-        .unwrap();
+    let content2 = get_wal_content(
+        &test_fs(),
+        &queue_id.to_wal_dir(tmp_dir.path()),
+        &file_id.increment(),
+    )
+    .await
+    .unwrap();
     assert_eq!(content2.num_entries, UintN::from(1u64));
 }
 
@@ -300,7 +308,9 @@ async fn test_v1_enqueue_read_and_scan() {
     }
 
     // get_wal_content + get_wal_range agree on the count and the id range.
-    let content = get_wal_content(&wal_dir, &file_id).await.unwrap();
+    let content = get_wal_content(&test_fs(), &wal_dir, &file_id)
+        .await
+        .unwrap();
     assert_eq!(content.num_entries, UintN::from(3u64));
     assert_eq!(content.entries_before, UintN::from(0u64));
 
@@ -384,7 +394,9 @@ async fn test_v1_truncated_tail_is_dropped() {
     let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
     assert_eq!(range, Some((UintN::from(0u64), UintN::from(1u64))));
 
-    let content = get_wal_content(&wal_dir, &file_id).await.unwrap();
+    let content = get_wal_content(&test_fs(), &wal_dir, &file_id)
+        .await
+        .unwrap();
     assert_eq!(content.num_entries, UintN::from(2u64));
 }
 
@@ -435,7 +447,9 @@ async fn test_v1_entries_straddle_window_boundary() {
     let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
     assert_eq!(range, Some((UintN::from(0u64), UintN::from(39u64))));
 
-    let content = get_wal_content(&wal_dir, &file_id).await.unwrap();
+    let content = get_wal_content(&test_fs(), &wal_dir, &file_id)
+        .await
+        .unwrap();
     assert_eq!(content.num_entries, UintN::from(40u64));
 }
 
@@ -450,7 +464,9 @@ async fn test_v1_entry_larger_than_window() {
     let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
     assert_eq!(range, Some((UintN::from(0u64), UintN::from(2u64))));
 
-    let content = get_wal_content(&wal_dir, &file_id).await.unwrap();
+    let content = get_wal_content(&test_fs(), &wal_dir, &file_id)
+        .await
+        .unwrap();
     assert_eq!(content.num_entries, UintN::from(3u64));
 }
 
@@ -645,7 +661,9 @@ async fn test_v1_rotates_on_file_size_not_field_width() {
 
     let wal_dir = queue_id.to_wal_dir(tmp_dir.path());
 
-    let content1 = get_wal_content(&wal_dir, &file_id).await.unwrap();
+    let content1 = get_wal_content(&test_fs(), &wal_dir, &file_id)
+        .await
+        .unwrap();
     assert_eq!(
         content1.num_entries,
         UintN::from(2u64),
@@ -782,7 +800,7 @@ async fn a_rotation_that_cannot_open_its_file_waits_rather_than_desyncing() {
     let mut seen = 0u64;
     for file in 1..=16u64 {
         let file_id = UintN::from(file);
-        let Ok(content) = get_wal_content(&wal_dir, &file_id).await else {
+        let Ok(content) = get_wal_content(&test_fs(), &wal_dir, &file_id).await else {
             continue;
         };
         assert_eq!(
@@ -958,7 +976,7 @@ async fn a_rotation_inside_a_released_run_keeps_the_entries_before_it() {
     let mut seen = 0u64;
     for file in 1..=16u64 {
         let file_id = UintN::from(file);
-        let Ok(content) = get_wal_content(&wal_dir, &file_id).await else {
+        let Ok(content) = get_wal_content(&test_fs(), &wal_dir, &file_id).await else {
             continue;
         };
         assert_eq!(
@@ -1072,7 +1090,7 @@ async fn a_close_that_cannot_flush_hands_its_tail_to_a_retrier() {
     let mut seen = 0u64;
     for file in 1..=32u64 {
         let file_id = UintN::from(file);
-        let Ok(content) = get_wal_content(&wal_dir, &file_id).await else {
+        let Ok(content) = get_wal_content(&test_fs(), &wal_dir, &file_id).await else {
             continue;
         };
         assert_eq!(
