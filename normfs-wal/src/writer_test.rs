@@ -1,5 +1,7 @@
 fn test_fs() -> normfs_fs::Fs {
-    normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap()
+    static FS: std::sync::OnceLock<normfs_fs::Fs> = std::sync::OnceLock::new();
+    FS.get_or_init(|| normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap())
+        .clone()
 }
 
 use std::sync::Once;
@@ -71,6 +73,7 @@ async fn test_enqueue_and_read() {
 
     let (tx, mut rx) = mpsc::channel(10);
     let result = read_wal_file_range(
+        &test_fs(),
         &queue_id.to_wal_dir(tmp_dir.path()),
         &file_id,
         &UintN::from(0u64),
@@ -141,6 +144,7 @@ async fn test_enqueue_batch_and_read() {
 
     let (tx, mut rx) = mpsc::channel(10);
     let result = read_wal_file_range(
+        &test_fs(),
         &queue_id.to_wal_dir(tmp_dir.path()),
         &file_id,
         &UintN::from(0u64),
@@ -286,6 +290,7 @@ async fn test_v1_enqueue_read_and_scan() {
     // read_wal_file_range: ids are 0,1,2 derived from position, data intact.
     let (tx, mut rx) = mpsc::channel(10);
     let result = read_wal_file_range(
+        &test_fs(),
         &wal_dir,
         &file_id,
         &UintN::from(0u64),
@@ -314,7 +319,7 @@ async fn test_v1_enqueue_read_and_scan() {
     assert_eq!(content.num_entries, UintN::from(3u64));
     assert_eq!(content.entries_before, UintN::from(0u64));
 
-    let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
+    let (_, range) = get_wal_range(&test_fs(), &wal_dir, &file_id).await.unwrap();
     assert_eq!(range, Some((UintN::from(0u64), UintN::from(2u64))));
 
     // read_wal_bytes_range over the same content, with a step, hits the V1
@@ -391,7 +396,7 @@ async fn test_v1_truncated_tail_is_dropped() {
         .unwrap();
 
     // Only the first two entries survive; ids 0 and 1.
-    let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
+    let (_, range) = get_wal_range(&test_fs(), &wal_dir, &file_id).await.unwrap();
     assert_eq!(range, Some((UintN::from(0u64), UintN::from(1u64))));
 
     let content = get_wal_content(&test_fs(), &wal_dir, &file_id)
@@ -444,7 +449,7 @@ async fn test_v1_entries_straddle_window_boundary() {
     let tmp_dir = tempdir().unwrap();
     let (wal_dir, file_id) = build_v1_file(tmp_dir.path(), "v1_straddle", 40, 12 * 1024).await;
 
-    let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
+    let (_, range) = get_wal_range(&test_fs(), &wal_dir, &file_id).await.unwrap();
     assert_eq!(range, Some((UintN::from(0u64), UintN::from(39u64))));
 
     let content = get_wal_content(&test_fs(), &wal_dir, &file_id)
@@ -461,7 +466,7 @@ async fn test_v1_entry_larger_than_window() {
     let tmp_dir = tempdir().unwrap();
     let (wal_dir, file_id) = build_v1_file(tmp_dir.path(), "v1_big", 3, 200 * 1024).await;
 
-    let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
+    let (_, range) = get_wal_range(&test_fs(), &wal_dir, &file_id).await.unwrap();
     assert_eq!(range, Some((UintN::from(0u64), UintN::from(2u64))));
 
     let content = get_wal_content(&test_fs(), &wal_dir, &file_id)
@@ -490,7 +495,7 @@ async fn test_v1_truncation_offsets_across_a_frame() {
             .unwrap();
 
         // Either way the fourth entry is gone and the first three remain.
-        let (_, range) = get_wal_range(&wal_dir, &file_id).await.unwrap();
+        let (_, range) = get_wal_range(&test_fs(), &wal_dir, &file_id).await.unwrap();
         assert_eq!(
             range,
             Some((UintN::from(0u64), UintN::from(2u64))),
@@ -582,15 +587,16 @@ async fn test_mixed_v0_and_v1_files_in_one_queue() {
     assert_eq!(raw1[0], 0, "file 1 must be V0");
     assert_eq!(raw2[0], 1, "file 2 must be V1");
 
-    let (_, range1) = get_wal_range(&wal_dir, &file1).await.unwrap();
+    let (_, range1) = get_wal_range(&test_fs(), &wal_dir, &file1).await.unwrap();
     assert_eq!(range1, Some((UintN::from(0u64), UintN::from(1u64))));
 
-    let (_, range2) = get_wal_range(&wal_dir, &file2).await.unwrap();
+    let (_, range2) = get_wal_range(&test_fs(), &wal_dir, &file2).await.unwrap();
     assert_eq!(range2, Some((UintN::from(2u64), UintN::from(3u64))));
 
     // Stream file 2's V1 entries and confirm the derived ids and data.
     let (tx, mut rx) = mpsc::channel(10);
     read_wal_file_range(
+        &test_fs(),
         &wal_dir,
         &file2,
         &UintN::from(2u64),
@@ -678,6 +684,7 @@ async fn test_v1_rotates_on_file_size_not_field_width() {
 
     let (tx, mut rx) = mpsc::channel(10);
     read_wal_file_range(
+        &test_fs(),
         &wal_dir,
         &file_id,
         &UintN::from(1u64),

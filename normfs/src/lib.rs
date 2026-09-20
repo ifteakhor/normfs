@@ -6,6 +6,8 @@ pub mod proto {
 }
 mod config;
 mod memory_pointers;
+#[cfg(test)]
+mod memory_pointers_test;
 mod offload;
 pub(crate) mod reader_fsm;
 
@@ -305,6 +307,7 @@ impl NormFS {
         log::debug!(target: "normfs", "Creating new NormFS at path: {:?}", path);
 
         let fs = Fs::new(FsConfig::default()).map_err(Error::Io)?;
+        fs.mkdir_all(&path).await?;
 
         let crypto_path = path.clone();
         let crypto_ctx = fs

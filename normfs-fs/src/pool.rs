@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use crate::executor::{Executor, Finished, Job, PlanJob, Resources};
+use crate::executor::{Executor, Finished, Job, PlanJob, Resources, Task};
 use crate::plan::{Kind, Op, Plan, PlanError};
 use crate::{FsError, PublishReport};
 
@@ -74,19 +74,18 @@ pub(crate) struct Pool {
 }
 
 impl Pool {
-    pub(crate) fn start(threads: usize) -> Arc<Pool> {
+    pub(crate) fn start(threads: usize) -> std::io::Result<Arc<Pool>> {
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
         let rx = Arc::new(Mutex::new(rx));
         for i in 0..threads.max(1) {
             let rx = rx.clone();
             std::thread::Builder::new()
                 .name(format!("normfs-fs-{i}"))
-                .spawn(move || worker(rx))
-                .expect("spawn fs worker");
+                .spawn(move || worker(rx))?;
         }
-        Arc::new(Pool {
+        Ok(Arc::new(Pool {
             tx: Mutex::new(Some(tx)),
-        })
+        }))
     }
 }
 
@@ -108,8 +107,13 @@ fn worker(rx: Arc<Mutex<Receiver<Job>>>) {
     loop {
         let job = rx.lock().unwrap().recv();
         match job {
-            Ok(Job::Plan(job)) => run_plan(job),
-            Ok(Job::Blocking(f)) => f(),
+            Ok(Job { task, permit }) => {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match task {
+                    Task::Plan(job) => run_plan(job),
+                    Task::Blocking(f) => f(),
+                }));
+                drop(permit);
+            }
             Err(_) => return,
         }
     }
@@ -137,40 +141,55 @@ fn run_plan(job: PlanJob) {
         then,
         reply,
     } = job;
-    let result = drive(&mut plan, &res);
-    let _ = match result {
-        Ok((file, absent)) => {
-            if plan.kind() == Kind::Publish && plan.next().ok() == Some(Op::Failed) {
-                // Best effort, outside the theorem: the temporary name has no
-                // reader, and the next publish picks a fresh one anyway.
-                let mut e = Errno::new();
-                // SAFETY: tmp is a NUL-terminated path owned by the plan.
-                unsafe {
-                    normfs_fs_sys_unlink(plan.tmp().as_ptr(), plan.tmp().to_bytes().len(), &mut e.0)
-                };
-            }
-            if let Some(then) = then
-                && plan.next().ok() == Some(Op::Done)
-            {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (file, absent, opened) = drive(&mut plan, &res)?;
+        if opened && plan.kind() == Kind::Publish && plan.next().ok() == Some(Op::Failed) {
+            // An unsuccessful exclusive open never owns the existing name.
+            let mut e = Errno::new();
+            // SAFETY: tmp is a NUL-terminated path owned by the plan.
+            unsafe {
+                normfs_fs_sys_unlink(plan.tmp().as_ptr(), plan.tmp().to_bytes().len(), &mut e.0)
+            };
+        }
+        if let Some(then) = then
+            && plan.next().ok() == Some(Op::Done)
+        {
+            // DONE is irreversible; accounting failure cannot turn it into a retryable publish.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 then(&PublishReport {
                     old_len: plan.old_len(),
                     new_len: plan.total(),
                 });
+            }))
+            .is_err()
+            {
+                log::error!("publish committed but its accounting callback panicked");
             }
-            reply.send(Ok(Finished { plan, file, absent }))
         }
-        Err(e) => reply.send(Err(e)),
-    };
+        Ok(Finished { plan, file, absent })
+    }))
+    .unwrap_or(Err(FsError::JobPanicked));
+    let _ = reply.send(result);
 }
 
 /// The step loop. Errors here are executor faults (a report the planner
 /// refuses); a failing syscall is a report, not an error.
-fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool), FsError> {
+fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool, bool), FsError> {
+    if plan.kind() == Kind::Publish {
+        if path_of(plan.tmp()) == path_of(plan.dst()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "publish paths alias",
+            )
+            .into());
+        }
+    }
     let sync = res.sync;
     // The descriptor a Publish or Create opened; closed on the way out
     // unless Create hands it back.
     let mut owned: Option<OwnedFd> = None;
     let mut absent = false;
+    let mut opened = false;
     let fd_of = |owned: &Option<OwnedFd>| -> RawFd {
         match (owned, &res.file) {
             (Some(fd), _) => fd.as_raw_fd(),
@@ -206,6 +225,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool), FsErr
                     )
                 };
                 if fd >= 0 {
+                    opened = true;
                     // SAFETY: fd is a fresh descriptor the shim returned to us.
                     owned = Some(unsafe { OwnedFd::from_raw_fd(fd) });
                     plan.ok(ino)?;
@@ -323,6 +343,10 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool), FsErr
                 }
             }
             Op::TruncateBack => {
+                if crate::fault::take_truncate_failure(path_of(plan.dst())) {
+                    plan.err(libc::EIO)?;
+                    continue;
+                }
                 // SAFETY: fd is open; e is valid for writes.
                 let rc = unsafe { normfs_fs_sys_ftruncate(fd_of(&owned), plan.at(), &mut e.0) };
                 if rc == 0 {
@@ -351,9 +375,9 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool), FsErr
                 } else {
                     None
                 };
-                return Ok((file, absent));
+                return Ok((file, absent, opened));
             }
-            Op::Failed => return Ok((None, absent)),
+            Op::Failed => return Ok((None, absent, opened)),
         }
     }
 }

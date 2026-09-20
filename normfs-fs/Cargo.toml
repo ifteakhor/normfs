@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Filesystem layer for NormFS: proved protocol planner, thread-pool and io_uring executors"
+description = "Filesystem layer for NormFS: proved protocol planner and bounded thread-pool executor"
 
 [features]
 default = []

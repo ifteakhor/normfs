@@ -5,6 +5,7 @@
 //! queue carries on. On a card that never recovers this is back-pressure rather
 //! than loss: the pool fills and `enqueue` waits.
 
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -141,20 +142,24 @@ async fn attempt_once(fs: &Fs, file: &StrandedFile) -> Result<(), Failure> {
         })?;
     let handle = Arc::new(handle);
 
-    let len = handle.metadata().map_err(|e| Transient(e))?.len();
-    if len < file.valid_len {
+    let metadata = fs
+        .metadata(handle.clone())
+        .await
+        .map_err(|e| Transient(e.into()))?;
+    let inode = metadata.ino();
+    if metadata.len() < file.valid_len {
         return Err(Fatal);
     }
 
     // Before every attempt: a previous one may have left bytes behind, and V1
     // derives ids from position, so a stray frame renumbers what follows.
-    fs.restore(handle.clone(), &file.path, file.valid_len)
+    fs.restore_with_inode(handle.clone(), inode, &file.path, file.valid_len)
         .await
         .map_err(|e| Transient(e.into()))?;
 
     let runs = Runs(file.stranded.runs.iter().map(|(_, b)| b.clone()).collect());
     match fs
-        .append_sync(handle, &file.path, file.valid_len, runs, file.fsync)
+        .append_sync_with_inode(handle, inode, &file.path, file.valid_len, runs, file.fsync)
         .await
     {
         Ok(AppendOutcome::Committed) => Ok(()),

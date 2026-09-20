@@ -5,7 +5,7 @@ use std::fs::File;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 
 use crate::plan::Plan;
 use crate::{FsError, PublishReport};
@@ -13,7 +13,8 @@ use crate::{FsError, PublishReport};
 /// Runs after a `Publish` plan reaches `Done`, on the executor's thread,
 /// before the caller is told. A caller that must keep its bookkeeping in
 /// step with the rename puts the bookkeeping here: the future that awaits
-/// the job can be dropped, this cannot.
+/// the job can be dropped, this cannot. A panic is logged without changing
+/// the committed publication result.
 pub type Accounting = Box<dyn FnOnce(&PublishReport) + Send + 'static>;
 
 /// What a plan needs beyond its paths.
@@ -43,7 +44,12 @@ pub(crate) struct PlanJob {
     pub reply: oneshot::Sender<Result<Finished, FsError>>,
 }
 
-pub(crate) enum Job {
+pub(crate) struct Job {
+    pub task: Task,
+    pub permit: OwnedSemaphorePermit,
+}
+
+pub(crate) enum Task {
     Plan(PlanJob),
     Blocking(Box<dyn FnOnce() + Send + 'static>),
 }

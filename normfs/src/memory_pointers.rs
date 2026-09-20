@@ -29,8 +29,8 @@ pub(crate) struct MemoryPointers {
     fs: Fs,
     path: PathBuf,
     tmp_path: PathBuf,
-    state: Mutex<PointerState>,
-    flush_lock: tokio::sync::Mutex<()>,
+    state: Arc<Mutex<PointerState>>,
+    flush_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl MemoryPointers {
@@ -55,11 +55,11 @@ impl MemoryPointers {
             fs,
             path,
             tmp_path,
-            state: Mutex::new(PointerState {
+            state: Arc::new(Mutex::new(PointerState {
                 queues,
                 dirty: false,
-            }),
-            flush_lock: tokio::sync::Mutex::new(()),
+            })),
+            flush_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -114,7 +114,7 @@ impl MemoryPointers {
     }
 
     pub(crate) async fn flush_if_dirty(&self) -> Result<(), Error> {
-        let _flush_guard = self.flush_lock.lock().await;
+        let flush_guard = self.flush_lock.clone().lock_owned().await;
         let snapshot = {
             let mut state = self.state.lock().unwrap();
             if !state.dirty {
@@ -124,12 +124,24 @@ impl MemoryPointers {
             state.queues.clone()
         };
 
-        if let Err(e) = self.write_snapshot(&snapshot).await {
-            self.state.lock().unwrap().dirty = true;
-            return Err(e);
-        }
-
-        Ok(())
+        let (fs, tmp, path, state) = (
+            self.fs.clone(),
+            self.tmp_path.clone(),
+            self.path.clone(),
+            self.state.clone(),
+        );
+        // The task owns serialization until the executor has finished, even
+        // when the caller abandons a close or a cloud landing.
+        tokio::spawn(async move {
+            let _guard = flush_guard;
+            let result = Self::write_snapshot(&fs, tmp, path, &snapshot).await;
+            if result.is_err() {
+                state.lock().unwrap().dirty = true;
+            }
+            result
+        })
+        .await
+        .map_err(Error::other)?
     }
 
     pub(crate) fn spawn_flusher(self: &Arc<Self>, interval: Duration) -> JoinHandle<()> {
@@ -148,7 +160,12 @@ impl MemoryPointers {
     /// One PUBLISH plan: the fixed temporary name, truncated, then the rename
     /// and the directory sync, so a restart reads either the previous
     /// snapshot or this one whole.
-    async fn write_snapshot(&self, snapshot: &HashMap<String, Pointer>) -> Result<(), Error> {
+    async fn write_snapshot(
+        fs: &Fs,
+        tmp: PathBuf,
+        path: PathBuf,
+        snapshot: &HashMap<String, Pointer>,
+    ) -> Result<(), Error> {
         let mut entries: Vec<_> = snapshot.iter().collect();
         entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
@@ -165,18 +182,17 @@ impl MemoryPointers {
             out.push(b'\n');
         }
 
-        self.fs
-            .publish(
-                PublishSpec {
-                    tmp: self.tmp_path.clone(),
-                    dst: self.path.clone(),
-                    runs: Runs(vec![Bytes::from(out)]),
-                    tmp_mode: TmpMode::Trunc,
-                    sync: true,
-                },
-                None,
-            )
-            .await?;
+        fs.publish(
+            PublishSpec {
+                tmp,
+                dst: path,
+                runs: Runs(vec![Bytes::from(out)]),
+                tmp_mode: TmpMode::Trunc,
+                sync: true,
+            },
+            None,
+        )
+        .await?;
         Ok(())
     }
 }

@@ -37,6 +37,7 @@ async fn main() {
     let mut smallest = usize::MAX;
     let mut largest = 0usize;
 
+    let fs = normfs_fs::Fs::new(normfs_fs::FsConfig::default()).unwrap();
     for id in ids {
         if written >= cap {
             break;
@@ -44,8 +45,10 @@ async fn main() {
         let (tx, mut rx) = mpsc::channel(256);
         let dir = wal_dir.to_path_buf();
         let fid = id.clone();
+        let fs = fs.clone();
         let reader = tokio::spawn(async move {
             let _ = normfs_wal::read_wal_file_range(
+                &fs,
                 &dir,
                 &fid,
                 &UintN::zero(),

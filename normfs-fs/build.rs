@@ -6,6 +6,7 @@ fn main() {
     let include_dir = manifest_dir.join("c/include");
     let sources = [
         manifest_dir.join("c/src/fs_plan.c"),
+        manifest_dir.join("c/src/fs_dir.c"),
         manifest_dir.join("c/src/fs_sys.c"),
     ];
 

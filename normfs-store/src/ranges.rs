@@ -1,11 +1,11 @@
 use crate::header::{FileAuthentication, StoreHeaderError};
 use crate::store_header_v1::{AnyStoreHeader, AnyStoreHeaderError};
 use normfs_crypto::CryptoContext;
+use normfs_fs::Fs;
 use normfs_types::QueueId;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use uintn::{Error as UintNError, UintN, paths};
 
@@ -18,6 +18,7 @@ const RANGES_PER_QUEUE: usize = 4096;
 type Ranges = HashMap<QueueId, BTreeMap<UintN, (UintN, UintN)>>;
 
 pub struct RangeStore {
+    fs: Fs,
     root: PathBuf,
     ranges: RwLock<Ranges>,
     crypto_ctx: Arc<CryptoContext>,
@@ -97,11 +98,13 @@ impl From<UintNError> for RangeStoreError {
 
 impl RangeStore {
     pub fn new(
+        fs: Fs,
         root: impl AsRef<Path>,
         crypto_ctx: Arc<CryptoContext>,
         verify_signatures: bool,
     ) -> Self {
         Self {
+            fs,
             root: root.as_ref().to_path_buf(),
             ranges: RwLock::new(HashMap::new()),
             crypto_ctx,
@@ -128,7 +131,7 @@ impl RangeStore {
             "Reading range from filesystem for queue: {}, file_id: {:?}, path: {:?}",
             queue_id, file_id, file_path);
 
-        let file = match File::open(&file_path).await {
+        let file = match self.fs.open_read(&file_path).await {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 log::debug!(target: "normfs-store",

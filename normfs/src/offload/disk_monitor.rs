@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time;
-use uintn::{paths, UintN};
+use uintn::UintN;
 
 use crate::Error;
 use normfs_cloud::offloader::QueueOffloader;
 use normfs_cloud::S3Client;
-use normfs_fs::Fs;
+use normfs_fs::{Fs, Scan, ScanResult};
 use normfs_store::StoreError;
 use normfs_types::QueueId;
 use normfs_wal::WalSettings;
@@ -50,6 +50,7 @@ const STORE_RESEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug)]
 struct QueueMonitor {
+    fs: Fs,
     queue_id: QueueId,
     config: DiskMonitorConfig,
     root_path: PathBuf,
@@ -72,12 +73,20 @@ impl QueueMonitor {
     ) -> Self {
         let offloader = match (client, prefix) {
             (Some(client), Some(prefix)) if config.offload => Some(
-                QueueOffloader::new(fs, queue_id.clone(), root_path.clone(), client, prefix).await,
+                QueueOffloader::new(
+                    fs.clone(),
+                    queue_id.clone(),
+                    root_path.clone(),
+                    client,
+                    prefix,
+                )
+                .await,
             ),
             _ => None,
         };
 
         let monitor = Self {
+            fs,
             queue_id,
             config,
             root_path,
@@ -92,29 +101,25 @@ impl QueueMonitor {
     /// One walk of the store directory, the only full walk it ever gets.
     async fn reseed_store_bytes(&self) {
         let store_path = self.queue_id.to_store_dir(&self.root_path);
-        let bytes = if store_path.exists() {
-            match Self::get_directory_size(&store_path).await {
-                Ok(bytes) => bytes as u64,
-                Err(e) => {
-                    log::warn!(target: "normfs::disk_monitor",
-                        "Queue '{}': could not size the store directory: {}", self.queue_id, e);
-                    return;
-                }
+        let bytes = match self.fs.directory_size(&store_path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::warn!(target: "normfs::disk_monitor", "Cannot size {}: {e}", store_path.display());
+                return;
             }
-        } else {
-            0
         };
         self.store_bytes.store(bytes, Ordering::Relaxed);
         *self.store_seeded.lock().unwrap() = Instant::now();
     }
 
     /// A store file has just landed: one stat, not a walk.
-    fn note_store_file(&self, file_id: &UintN) {
+    async fn note_store_file(&self, file_id: &UintN) {
         let path = self.queue_id.to_store_path(&self.root_path, file_id);
-        match std::fs::metadata(&path) {
-            Ok(meta) => {
+        match self.fs.stat(&path).await {
+            Ok(Some(meta)) => {
                 self.store_bytes.fetch_add(meta.len(), Ordering::Relaxed);
             }
+            Ok(None) => {}
             Err(e) => log::warn!(target: "normfs::disk_monitor",
                 "Queue '{}': landed store file {} cannot be sized: {}", self.queue_id, file_id, e),
         }
@@ -130,42 +135,7 @@ impl QueueMonitor {
         // WAL files are bounded by max_disk / max_file_size, so this walk
         // stays short whatever the store holds.
         let wal_path = self.queue_id.to_wal_dir(&self.root_path);
-        if wal_path.exists() {
-            total_size += Self::get_directory_size(&wal_path).await?;
-        }
-
-        Ok(total_size)
-    }
-
-    async fn get_directory_size(path: &Path) -> Result<usize, Error> {
-        let mut total_size = 0;
-        let mut dirs_to_process = vec![path.to_path_buf()];
-
-        // Iterative approach using a stack to avoid recursion
-        while let Some(current_dir) = dirs_to_process.pop() {
-            let mut entries = tokio::fs::read_dir(&current_dir)
-                .await
-                .map_err(|e| Error::Store(StoreError::Io(e)))?;
-
-            while let Some(entry) = entries
-                .next_entry()
-                .await
-                .map_err(|e| Error::Store(StoreError::Io(e)))?
-            {
-                let metadata = entry
-                    .metadata()
-                    .await
-                    .map_err(|e| Error::Store(StoreError::Io(e)))?;
-
-                if metadata.is_file() {
-                    total_size += metadata.len() as usize;
-                } else if metadata.is_dir() {
-                    // Add subdirectory to the stack for processing
-                    dirs_to_process.push(entry.path());
-                }
-            }
-        }
-
+        total_size += self.fs.directory_size(&wal_path).await? as usize;
         Ok(total_size)
     }
 
@@ -197,17 +167,13 @@ impl QueueMonitor {
         let store_path = self.queue_id.to_store_dir(&self.root_path);
         let wal_path = self.queue_id.to_wal_dir(&self.root_path);
 
-        // Find initial minimum ID across both store and wal
-        let store_min_id = if store_path.exists() {
-            paths::find_min_id(&store_path, "store").ok()
-        } else {
-            None
+        let store_min_id = match self.fs.scan_ids(&store_path, "store", Scan::Min).await? {
+            ScanResult::One(id) => Some(id),
+            _ => None,
         };
-
-        let wal_min_id = if wal_path.exists() {
-            paths::find_min_id(&wal_path, "wal").ok()
-        } else {
-            None
+        let wal_min_id = match self.fs.scan_ids(&wal_path, "wal", Scan::Min).await? {
+            ScanResult::One(id) => Some(id),
+            _ => None,
         };
 
         // Start with the minimum ID across both directories
@@ -229,15 +195,18 @@ impl QueueMonitor {
             let store_file_path = self.queue_id.to_store_path(&self.root_path, &current_id);
             let wal_file_path = self.queue_id.to_wal_path(&self.root_path, &current_id);
 
-            if !store_file_path.exists() && !wal_file_path.exists() {
-                log::info!(
-                    target: "normfs::disk_monitor",
-                    "No more files to delete for queue '{}', stopping cleanup at id {}",
-                    self.queue_id,
-                    current_id
-                );
-                break;
-            }
+            let store_meta = self.fs.stat(&store_file_path).await?;
+            let wal_meta = self.fs.stat(&wal_file_path).await?;
+            let (path, metadata, is_store) = match (store_meta, wal_meta) {
+                (Some(meta), _) => (&store_file_path, meta, true),
+                (None, Some(meta)) => (&wal_file_path, meta, false),
+                (None, None) => {
+                    log::info!(target: "normfs::disk_monitor",
+                        "No more files to delete for queue '{}', stopping cleanup at id {}",
+                        self.queue_id, current_id);
+                    break;
+                }
+            };
 
             // Check if file has been offloaded before deleting
             let can_delete = if let Some(ref latest_offloaded) = latest_offloaded_id {
@@ -256,101 +225,23 @@ impl QueueMonitor {
                 break;
             }
 
-            if store_file_path.exists() {
-                match tokio::fs::metadata(&store_file_path).await {
-                    Ok(metadata) => {
-                        let file_size = metadata.len() as usize;
-
-                        log::info!(
-                            target: "normfs::disk_monitor",
-                            "Deleting store file {} (size: {} bytes) for queue '{}'",
-                            current_id,
-                            file_size,
-                            self.queue_id
-                        );
-
-                        match tokio::fs::remove_file(&store_file_path).await {
-                            Ok(_) => {
-                                self.store_bytes
-                                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| {
-                                        Some(b.saturating_sub(file_size as u64))
-                                    })
-                                    .ok();
-                                size_to_free = size_to_free.saturating_sub(file_size);
-                                total_freed += file_size;
-                                let remaining_size = current_size.saturating_sub(total_freed);
-                                log::info!(
-                                    target: "normfs::disk_monitor",
-                                    "Deleted store file {}, queue '{}' size now: {} bytes",
-                                    current_id,
-                                    self.queue_id,
-                                    remaining_size
-                                );
-                            }
-                            Err(e) => {
-                                log::error!(
-                                    target: "normfs::disk_monitor",
-                                    "Failed to delete store file {}: {}",
-                                    current_id,
-                                    e
-                                );
-                            }
-                        }
+            let file_size = metadata.len() as usize;
+            match self.fs.unlink(path).await {
+                Ok(()) => {
+                    if is_store {
+                        self.store_bytes
+                            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| {
+                                Some(b.saturating_sub(file_size as u64))
+                            })
+                            .ok();
                     }
-                    Err(e) => {
-                        log::error!(
-                            target: "normfs::disk_monitor",
-                            "Failed to get metadata for store file {}: {}",
-                            current_id,
-                            e
-                        );
-                    }
+                    size_to_free = size_to_free.saturating_sub(file_size);
+                    total_freed += file_size;
+                    log::info!(target: "normfs::disk_monitor", "Deleted {}, queue size now {}",
+                        path.display(), current_size.saturating_sub(total_freed));
                 }
-            } else if wal_file_path.exists() {
-                // Get file size and delete wal file
-                match tokio::fs::metadata(&wal_file_path).await {
-                    Ok(metadata) => {
-                        let file_size = metadata.len() as usize;
-
-                        log::warn!(
-                            target: "normfs::disk_monitor",
-                            "Deleting WAL file {} (size: {} bytes) for queue '{}'",
-                            current_id,
-                            file_size,
-                            self.queue_id
-                        );
-
-                        match tokio::fs::remove_file(&wal_file_path).await {
-                            Ok(_) => {
-                                size_to_free = size_to_free.saturating_sub(file_size);
-                                total_freed += file_size;
-                                let remaining_size = current_size.saturating_sub(total_freed);
-                                log::info!(
-                                    target: "normfs::disk_monitor",
-                                    "Deleted WAL file {}, queue '{}' size now: {} bytes",
-                                    current_id,
-                                    self.queue_id,
-                                    remaining_size
-                                );
-                            }
-                            Err(e) => {
-                                log::error!(
-                                    target: "normfs::disk_monitor",
-                                    "Failed to delete WAL file {}: {}",
-                                    current_id,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::error!(
-                            target: "normfs::disk_monitor",
-                            "Failed to get metadata for WAL file {}: {}",
-                            current_id,
-                            e
-                        );
-                    }
+                Err(e) => {
+                    log::error!(target: "normfs::disk_monitor", "Cannot delete {}: {e}", path.display())
                 }
             }
 
@@ -438,7 +329,7 @@ impl DiskMonitor {
     ) -> Result<(), Error> {
         let monitors = self.monitors.read().await;
         if let Some(monitor) = monitors.get(queue_id) {
-            monitor.note_store_file(&file_id);
+            monitor.note_store_file(&file_id).await;
             if let Some(ref offloader) = monitor.offloader {
                 if let Err(e) = offloader.enqueue_file(file_id.clone()).await {
                     log::error!(

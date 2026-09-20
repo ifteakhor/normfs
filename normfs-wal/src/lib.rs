@@ -196,7 +196,7 @@ impl WalStore {
     ) -> Result<Option<UintN>, WalError> {
         let queue_path = queue_id.to_wal_dir(&self.root);
 
-        match reader::get_wal_range(&queue_path, file_id).await {
+        match reader::get_wal_range(&self.fs, &queue_path, file_id).await {
             Ok((_, entries)) => Ok(entries.map(|(_, last)| last)),
             Err(WalError::WalEmpty(_)) => Ok(None),
             Err(WalError::WalNotFound) => Ok(None),
@@ -260,6 +260,7 @@ impl WalStore {
 
         let queue_path = queue_id.to_wal_dir(&self.root);
         let result = reader::read_wal_file_range(
+            &self.fs,
             &queue_path,
             file_id,
             from_id,
@@ -615,7 +616,7 @@ impl WalStore {
         );
 
         let queue_path = queue_id.to_wal_dir(&self.root);
-        let header = reader::read_wal_header(&queue_path, file_id).await?;
+        let header = reader::read_wal_header(&self.fs, &queue_path, file_id).await?;
 
         log::debug!(
             "WalStore: file {} for queue '{}' has {} entries before",
@@ -641,7 +642,7 @@ impl WalStore {
         );
 
         let queue_path = queue_id.to_wal_dir(&self.root);
-        match reader::read_wal_header(&queue_path, file_id).await {
+        match reader::read_wal_header(&self.fs, &queue_path, file_id).await {
             Ok(header) => {
                 log::info!(
                     "WalStore: file {} for queue '{}' - data_size={}, id_size={}, entries_before={}",

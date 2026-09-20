@@ -318,6 +318,8 @@ int normfs_fs_plan_next(const struct normfs_fs_plan *plan);
     requires NORMFS_FS_PLAN_WF(plan);
     requires plan->kind == NORMFS_FS_PUBLISH;
     requires NORMFS_FS_PUBLISH_STATE(plan);
+    requires plan->op == NORMFS_FS_OP_FSYNC_DIR ==>
+        fs_parent_durable(plan->dst, plan->dst_len);
     assigns plan->op, plan->written, plan->ino, plan->old_len,
             plan->old_present,
             normfs_fs_vol_names, normfs_fs_vol_data,
@@ -477,6 +479,8 @@ int normfs_fs_append_err(struct normfs_fs_plan *plan, int os_error);
     requires NORMFS_FS_PLAN_WF(plan);
     requires plan->kind == NORMFS_FS_CREATE;
     requires NORMFS_FS_CREATE_STATE(plan);
+    requires plan->op == NORMFS_FS_OP_FSYNC_DIR ==>
+        fs_parent_durable(plan->dst, plan->dst_len);
     assigns plan->op, plan->written, plan->ino,
             normfs_fs_vol_names, normfs_fs_vol_data,
             normfs_fs_dur_names, normfs_fs_dur_data;
@@ -536,6 +540,8 @@ int normfs_fs_create_err(struct normfs_fs_plan *plan, int os_error);
     requires NORMFS_FS_PLAN_WF(plan);
     requires plan->kind == NORMFS_FS_REMOVE;
     requires NORMFS_FS_REMOVE_STATE(plan);
+    requires plan->op == NORMFS_FS_OP_FSYNC_DIR ==>
+        fs_parent_durable(plan->dst, plan->dst_len);
     assigns plan->op, normfs_fs_vol_names, normfs_fs_dur_names;
     ensures \result == NORMFS_FS_OK || \result == NORMFS_FS_ERR_STATE;
     ensures NORMFS_FS_PLAN_WF(plan);
@@ -616,5 +622,16 @@ int normfs_fs_publish_done_durable(const struct normfs_fs_plan *plan);
     ensures \result == 1;
 */
 int normfs_fs_append_boundary_holds(const struct normfs_fs_plan *plan);
+
+/*@ requires len < NORMFS_FS_PATH_MAX;
+    requires \valid_read(a + (0 .. len));
+    requires \valid_read(b + (0 .. len));
+    requires fs_path_equal(a, len, b, len);
+    requires fs_vol_ino(a, len) > 0;
+    assigns normfs_fs_vol_names;
+    ensures fs_vol_ino(a, len) == \old(fs_vol_ino(a, len));
+    ensures fs_vol_ino(b, len) == \old(fs_vol_ino(b, len));
+*/
+void normfs_fs_rename_equal_paths(const char *a, const char *b, size_t len);
 
 #endif /* NORMFS_FS_PLAN_H */

@@ -7,7 +7,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -pedantic")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_library(normfs_fs_c STATIC src/fs_plan.c src/fs_sys.c)
+add_library(normfs_fs_c STATIC src/fs_plan.c src/fs_dir.c src/fs_sys.c)
 target_include_directories(normfs_fs_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
@@ -32,10 +32,14 @@ if(FRAMAC)
         set(NPROC 4)
     endif()
 
-    # Every function with a body in src/fs_plan.c, statics included. A
+    # Every function with a body in the proved sources, statics included. A
     # function left off this list is silently never scheduled, and
     # check-proved.sh cannot tell that apart from one that was proved.
     set(NORMFS_FS_WP_FCTS
+        normfs_fs_sync_created_dir
+        normfs_fs_append_crash_prefix
+        normfs_fs_publish_crash_safe
+        normfs_fs_rename_equal_paths
         normfs_fs_publish_init
         normfs_fs_append_init
         normfs_fs_create_init
@@ -77,7 +81,7 @@ if(FRAMAC)
             -wp-no-warn-memory-model
             -cpp-extra-args=-I${CMAKE_CURRENT_SOURCE_DIR}/include
             -wp-fct ${NORMFS_FS_WP_FCTS_ARG}
-            src/fs_plan.c
+            src/fs_plan.c src/fs_dir.c src/fs_crash.c
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "WP: normfs fs protocol planner"
         VERBATIM

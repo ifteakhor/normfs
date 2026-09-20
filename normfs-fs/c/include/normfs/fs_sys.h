@@ -46,6 +46,19 @@
         reads normfs_fs_dur_names, path[0 .. len];
       logic integer fs_dur_synced{L}(integer ino) reads normfs_fs_dur_data;
       logic integer fs_dur_len{L}(integer ino) reads normfs_fs_dur_data;
+      logic integer fs_cached_byte{L}(integer ino, integer off) reads normfs_fs_vol_data;
+      logic integer fs_certified_byte{L}(integer ino, integer off) reads normfs_fs_dur_data;
+      predicate fs_path_equal{L}(char *a, integer an, char *b, integer bn) =
+        an == bn && (\forall integer i; 0 <= i <= an ==> a[i] == b[i]);
+      axiom fs_vol_path_value{L}: \forall char *a, *b, integer an, bn;
+        fs_path_equal(a, an, b, bn) ==> fs_vol_ino(a, an) == fs_vol_ino(b, bn);
+      axiom fs_dur_path_value{L}: \forall char *a, *b, integer an, bn;
+        fs_path_equal(a, an, b, bn) ==> fs_dur_ino(a, an) == fs_dur_ino(b, bn);
+    }
+*/
+
+/*@ axiomatic NormfsFsDirectories {
+      predicate fs_parent_durable(char *path, integer len);
     }
 */
 
@@ -59,10 +72,15 @@
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires ino > 0;
-    assigns normfs_fs_vol_names, normfs_fs_vol_data;
+    assigns normfs_fs_vol_names, normfs_fs_vol_data, normfs_fs_dur_data;
+    ensures fs_dur_synced(ino) == 0;
+    ensures \forall integer j; j != ino ==> fs_dur_synced(j) == \old(fs_dur_synced(j));
     ensures fs_vol_ino(path, path_len) == ino;
     ensures fs_vol_len(ino) == 0;
     ensures \forall integer j; j != ino ==> fs_vol_len(j) == \old(fs_vol_len(j));
+    ensures \forall integer j; j != ino ==> fs_dur_len(j) == \old(fs_dur_len(j));
+    ensures \forall integer j, i; j != ino ==>
+        fs_certified_byte(j, i) == \old(fs_certified_byte(j, i));
 */
 void normfs_fs_world_open_ok(const char *path, size_t path_len, uint64_t ino);
 
@@ -74,6 +92,9 @@ void normfs_fs_world_open_ok(const char *path, size_t path_len, uint64_t ino);
     ensures \forall integer j; j != ino ==> fs_vol_len(j) == \old(fs_vol_len(j));
     ensures fs_dur_synced(ino) == \old(fs_dur_synced(ino));
     ensures \forall integer j; j != ino ==> fs_dur_synced(j) == \old(fs_dur_synced(j));
+    ensures \forall integer j; j != ino ==> fs_dur_len(j) == \old(fs_dur_len(j));
+    ensures \forall integer j, i; (j != ino || i < \old(fs_dur_synced(ino))) ==>
+        fs_certified_byte(j, i) == \old(fs_certified_byte(j, i));
 */
 void normfs_fs_world_write_ok(uint64_t ino, uint64_t n);
 
@@ -83,6 +104,9 @@ void normfs_fs_world_write_ok(uint64_t ino, uint64_t n);
     ensures fs_dur_synced(ino) == \old(fs_dur_synced(ino));
     ensures \forall integer j; j != ino ==> fs_vol_len(j) == \old(fs_vol_len(j));
     ensures \forall integer j; j != ino ==> fs_dur_synced(j) == \old(fs_dur_synced(j));
+    ensures \forall integer j; j != ino ==> fs_dur_len(j) == \old(fs_dur_len(j));
+    ensures \forall integer j, i; (j != ino || i < \old(fs_dur_synced(ino))) ==>
+        fs_certified_byte(j, i) == \old(fs_certified_byte(j, i));
 */
 void normfs_fs_world_write_err(uint64_t ino);
 
@@ -90,7 +114,12 @@ void normfs_fs_world_write_err(uint64_t ino);
 /*@ assigns normfs_fs_dur_data;
     ensures fs_dur_synced(ino) == fs_vol_len(ino);
     ensures fs_dur_len(ino) == fs_vol_len(ino);
+    ensures \forall integer i; 0 <= i < fs_vol_len(ino) ==>
+        fs_certified_byte(ino, i) == fs_cached_byte(ino, i);
     ensures \forall integer j; j != ino ==> fs_dur_synced(j) == \old(fs_dur_synced(j));
+    ensures \forall integer j; j != ino ==> fs_dur_len(j) == \old(fs_dur_len(j));
+    ensures \forall integer j, i; j != ino ==>
+        fs_certified_byte(j, i) == \old(fs_certified_byte(j, i));
 */
 void normfs_fs_world_fsync_ok(uint64_t ino);
 
@@ -100,6 +129,9 @@ void normfs_fs_world_fsync_ok(uint64_t ino);
     ensures fs_dur_synced(ino) == \old(fs_dur_synced(ino));
     ensures \forall integer j; j != ino ==> fs_vol_len(j) == \old(fs_vol_len(j));
     ensures \forall integer j; j != ino ==> fs_dur_synced(j) == \old(fs_dur_synced(j));
+    ensures \forall integer j; j != ino ==> fs_dur_len(j) == \old(fs_dur_len(j));
+    ensures \forall integer j, i; (j != ino || i < \old(fs_dur_synced(ino))) ==>
+        fs_certified_byte(j, i) == \old(fs_certified_byte(j, i));
 */
 void normfs_fs_world_fsync_err(uint64_t ino);
 
@@ -109,7 +141,8 @@ void normfs_fs_world_fsync_err(uint64_t ino);
     requires \valid_read(dst + (0 .. dst_len));
     assigns normfs_fs_vol_names;
     ensures fs_vol_ino(dst, dst_len) == \old(fs_vol_ino(src, src_len));
-    ensures fs_vol_ino(src, src_len) == 0;
+    ensures \old(fs_vol_ino(src, src_len)) != \old(fs_vol_ino(dst, dst_len)) ==>
+        fs_vol_ino(src, src_len) == 0;
 */
 void normfs_fs_world_rename_ok(const char *src, size_t src_len,
     const char *dst, size_t dst_len);
@@ -119,6 +152,7 @@ void normfs_fs_world_rename_ok(const char *src, size_t src_len,
  * over paths, which the provers do not carry across a mutation. */
 /*@ requires name_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(name + (0 .. name_len));
+    requires fs_parent_durable(name, name_len);
     assigns normfs_fs_dur_names;
     ensures fs_dur_ino(name, name_len) == fs_vol_ino(name, name_len);
 */
@@ -142,6 +176,9 @@ void normfs_fs_world_fsync_dir_err(const char *name, size_t name_len);
               (\old(fs_dur_synced(ino)) <= len ? \old(fs_dur_synced(ino)) : len);
     ensures \forall integer j; j != ino ==> fs_vol_len(j) == \old(fs_vol_len(j));
     ensures \forall integer j; j != ino ==> fs_dur_synced(j) == \old(fs_dur_synced(j));
+    ensures \forall integer j; j != ino ==> fs_dur_len(j) == \old(fs_dur_len(j));
+    ensures \forall integer j, i; (j != ino || i < len) ==>
+        fs_certified_byte(j, i) == \old(fs_certified_byte(j, i));
 */
 void normfs_fs_world_truncate_ok(uint64_t ino, uint64_t len);
 
@@ -281,5 +318,17 @@ int normfs_fs_sys_ftruncate(int fd, uint64_t len, int *os_error);
     ensures \result == -1 ==> *os_error > 0;
 */
 int normfs_fs_sys_unlink(const char *path, size_t path_len, int *os_error);
+
+/*@ requires path_len < NORMFS_FS_PATH_MAX;
+    requires \valid_read(path + (0 .. path_len));
+    requires path[path_len] == 0;
+    requires \valid(os_error);
+    requires \separated(os_error, path + (0 .. path_len));
+    assigns *os_error;
+    ensures \result == 0 || \result == -1;
+    ensures \result == 0 ==> *os_error == 0;
+    ensures \result == -1 ==> *os_error > 0;
+*/
+int normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error);
 
 #endif /* NORMFS_FS_SYS_H */

@@ -190,15 +190,11 @@ impl PersistStore {
         let root_path = root.as_ref().to_path_buf();
         let (store_done_tx, store_done_rx) = mpsc::unbounded_channel();
 
-        let tmp_dir = root_path.join("tmp");
-        std::fs::create_dir_all(&tmp_dir).unwrap_or_else(|e| {
-            log::warn!(target: "normfs-store", "Failed to create tmp directory: {:?}", e);
-        });
-
         Self {
             root: root_path.clone(),
             fs: wal_store.fs().clone(),
             range_store: Arc::new(ranges::RangeStore::new(
+                wal_store.fs().clone(),
                 root_path,
                 crypto_ctx.clone(),
                 config.verify_signatures,

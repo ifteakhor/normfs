@@ -150,6 +150,8 @@ pub enum PlanError {
     State,
     /// A path with an interior NUL.
     Path,
+    PathTooLong,
+    Size,
     UnknownOp(c_int),
     UnknownStatus(c_int),
 }
@@ -158,6 +160,8 @@ impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PlanError::State => write!(f, "report does not fit the plan's state"),
+            PlanError::PathTooLong => write!(f, "path exceeds the C planner limit"),
+            PlanError::Size => write!(f, "file offset exceeds the supported range"),
             PlanError::Path => write!(f, "path contains an interior NUL"),
             PlanError::UnknownOp(v) => write!(f, "unknown op {v} from the C fs planner"),
             PlanError::UnknownStatus(v) => write!(f, "unknown status {v} from the C fs planner"),
@@ -180,6 +184,9 @@ unsafe impl Send for Plan {}
 
 fn cstring(path: &Path) -> Result<CString, PlanError> {
     use std::os::unix::ffi::OsStrExt;
+    if path.as_os_str().as_bytes().len() >= 4096 {
+        return Err(PlanError::PathTooLong);
+    }
     CString::new(path.as_os_str().as_bytes()).map_err(|_| PlanError::Path)
 }
 
@@ -237,6 +244,12 @@ impl Plan {
     }
 
     pub fn append(path: &Path, ino: u64, at: u64, total: u64) -> Result<Plan, PlanError> {
+        if at
+            .checked_add(total)
+            .is_none_or(|end| end > i64::MAX as u64)
+        {
+            return Err(PlanError::Size);
+        }
         let dst = cstring(path)?;
         let mut plan = Plan::blank(Kind::Append, CString::default(), dst);
         // SAFETY: as in `publish`.
@@ -367,6 +380,10 @@ impl Plan {
         } else {
             TmpMode::Excl
         }
+    }
+
+    pub fn inode(&self) -> u64 {
+        self.raw.ino
     }
 
     pub fn at(&self) -> u64 {

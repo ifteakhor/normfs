@@ -2,8 +2,8 @@
 
 void
 normfs_fs_publish_init(struct normfs_fs_plan *plan, const char *tmp,
-    size_t tmp_len, const char *dst, size_t dst_len, int tmp_mode,
-    uint64_t total)
+	size_t tmp_len, const char *dst, size_t dst_len, int tmp_mode,
+	uint64_t total)
 {
 	plan->kind = NORMFS_FS_PUBLISH;
 	plan->op = NORMFS_FS_OP_OPEN;
@@ -24,7 +24,7 @@ normfs_fs_publish_init(struct normfs_fs_plan *plan, const char *tmp,
 
 void
 normfs_fs_append_init(struct normfs_fs_plan *plan, const char *dst,
-    size_t dst_len, uint64_t ino, uint64_t at, uint64_t total)
+	size_t dst_len, uint64_t ino, uint64_t at, uint64_t total)
 {
 	plan->kind = NORMFS_FS_APPEND;
 	plan->op = NORMFS_FS_OP_WRITE;
@@ -45,7 +45,7 @@ normfs_fs_append_init(struct normfs_fs_plan *plan, const char *dst,
 
 void
 normfs_fs_create_init(struct normfs_fs_plan *plan, const char *dst,
-    size_t dst_len, int tmp_mode, uint64_t total)
+	size_t dst_len, int tmp_mode, uint64_t total)
 {
 	plan->kind = NORMFS_FS_CREATE;
 	plan->op = NORMFS_FS_OP_OPEN;
@@ -66,7 +66,7 @@ normfs_fs_create_init(struct normfs_fs_plan *plan, const char *dst,
 
 void
 normfs_fs_remove_init(struct normfs_fs_plan *plan, const char *dst,
-    size_t dst_len)
+	size_t dst_len)
 {
 	plan->kind = NORMFS_FS_REMOVE;
 	plan->op = NORMFS_FS_OP_UNLINK;
@@ -87,7 +87,7 @@ normfs_fs_remove_init(struct normfs_fs_plan *plan, const char *dst,
 
 void
 normfs_fs_restore_init(struct normfs_fs_plan *plan, const char *dst,
-    size_t dst_len, uint64_t ino, uint64_t at)
+	size_t dst_len, uint64_t ino, uint64_t at)
 {
 	plan->kind = NORMFS_FS_RESTORE;
 	plan->op = NORMFS_FS_OP_TRUNCATE_BACK;
@@ -350,25 +350,4 @@ normfs_fs_restore_report(struct normfs_fs_plan *plan, int os_error)
 		plan->op = NORMFS_FS_OP_FAILED;
 	}
 	return NORMFS_FS_OK;
-}
-
-int
-normfs_fs_publish_done_durable(const struct normfs_fs_plan *plan)
-{
-	(void)plan;
-	/*@ assert fs_dur_ino(plan->dst, plan->dst_len) == plan->ino; */
-	/*@ assert fs_dur_synced(plan->ino) == plan->total; */
-	/*@ assert fs_dur_len(plan->ino) == plan->total; */
-	return 1;
-}
-
-int
-normfs_fs_append_boundary_holds(const struct normfs_fs_plan *plan)
-{
-	(void)plan;
-	/*@ assert fs_dur_synced(plan->ino) == plan->at ||
-	           fs_dur_synced(plan->ino) == plan->at + plan->total; */
-	/*@ assert plan->op == NORMFS_FS_OP_DONE <==>
-	           fs_dur_synced(plan->ino) == plan->at + plan->total; */
-	return 1;
 }
