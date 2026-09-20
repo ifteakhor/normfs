@@ -2,8 +2,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use normfs_types::{DataSource, ReadEntry};
 use std::io::SeekFrom;
 use std::path::Path;
-use tokio::fs;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::sync::mpsc;
 use uintn::{UintN, varint};
 use xxhash_rust::xxh64;
@@ -140,11 +139,15 @@ async fn next_v1_frame<R: AsyncRead + Unpin>(
     Ok(V1Frame::Ready(total))
 }
 
-pub async fn read_wal_header(base_path: &Path, file_id: &UintN) -> Result<WalHeader, WalError> {
+pub async fn read_wal_header(
+    fs: &normfs_fs::Fs,
+    base_path: &Path,
+    file_id: &UintN,
+) -> Result<WalHeader, WalError> {
     let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
     log::debug!("WAL reader: reading header from file {}", file_id);
 
-    let file = match fs::File::open(&file_path).await {
+    let file = match fs.open_read(&file_path).await {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             log::warn!("WAL reader: file {} not found", file_path.display());
@@ -184,13 +187,14 @@ pub async fn read_wal_header(base_path: &Path, file_id: &UintN) -> Result<WalHea
 }
 
 pub async fn get_wal_range(
+    fs: &normfs_fs::Fs,
     base_path: &Path,
     file_id: &UintN,
 ) -> Result<(WalHeader, Option<(UintN, UintN)>), WalError> {
     let file_path = file_id.to_file_path(base_path.to_str().unwrap(), "wal");
     log::debug!("WAL reader: getting entry range from file {}", file_id);
 
-    let file = match fs::File::open(&file_path).await {
+    let file = match fs.open_read(&file_path).await {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             log::warn!("WAL reader: file {} not found", file_id);
@@ -514,6 +518,7 @@ pub enum ReadRangeResult {
 }
 
 pub async fn read_wal_file_range(
+    fs: &normfs_fs::Fs,
     base_path: &Path,
     file_id: &UintN,
     from_id: &UintN,
@@ -530,7 +535,7 @@ pub async fn read_wal_file_range(
         file_id
     );
 
-    let file = match fs::File::open(&file_path).await {
+    let file = match fs.open_read(&file_path).await {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             log::warn!("WAL reader: file {} not found", file_id);

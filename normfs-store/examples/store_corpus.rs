@@ -37,6 +37,7 @@ async fn main() {
     let (wtx, _wrx) = mpsc::unbounded_channel();
     let (ctx_, _crx) = mpsc::unbounded_channel();
     let wal = Arc::new(WalStore::new(root, wtx, ctx_));
+    let fs = wal.fs().clone();
     let store = PersistStore::new(
         root,
         StoreWriteConfig {
@@ -83,8 +84,10 @@ async fn main() {
         std::fs::write(&stage_file, &wal_bytes).unwrap();
         let (tx, mut rx) = mpsc::channel(256);
         let stage_dir_c = stage_dir.clone();
+        let fs = fs.clone();
         let reader = tokio::spawn(async move {
             let _ = normfs_wal::read_wal_file_range(
+                &fs,
                 std::path::Path::new(&stage_dir_c),
                 &UintN::from(1u64),
                 &UintN::zero(),

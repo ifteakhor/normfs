@@ -46,7 +46,9 @@ impl Default for AckFileWriterSettings {
 #[derive(Debug)]
 pub(crate) struct FileTail {
     pub(crate) file: Arc<File>,
+    pub(crate) inode: u64,
     pub(crate) flushed_len: u64,
+    pub(crate) needs_restore: bool,
 }
 
 /// One batch, committed only whole, at the file's known-good length.
@@ -66,11 +68,33 @@ pub(crate) async fn commit(
     let total = runs.total();
     for attempt in 0..settings.max_retries {
         let at = tail.flushed_len;
+        if tail.needs_restore {
+            if let Err(e) = fs
+                .restore_with_inode(tail.file.clone(), tail.inode, path, at)
+                .await
+            {
+                log::error!(target: "normfs", "Cannot restore {} to {at}: {e}", path.display());
+                if attempt + 1 < settings.max_retries {
+                    tokio::time::sleep(settings.retry_delay).await;
+                }
+                continue;
+            }
+            tail.needs_restore = false;
+        }
+        tail.needs_restore = true;
         match fs
-            .append_sync(tail.file.clone(), path, at, runs.clone(), settings.fsync)
+            .append_sync_with_inode(
+                tail.file.clone(),
+                tail.inode,
+                path,
+                at,
+                runs.clone(),
+                settings.fsync,
+            )
             .await
         {
             Ok(AppendOutcome::Committed) => {
+                tail.needs_restore = false;
                 tail.flushed_len += total;
                 return true;
             }
@@ -85,15 +109,7 @@ pub(crate) async fn commit(
                     settings.max_retries,
                     err
                 );
-                if !restored && let Err(e) = fs.restore(tail.file.clone(), path, at).await {
-                    log::error!(
-                        target: "normfs",
-                        "Failed to truncate {} back to {} bytes after a failed write: {}",
-                        path.display(),
-                        at,
-                        e
-                    );
-                }
+                tail.needs_restore = !restored;
             }
             Err(e) => {
                 log::error!(
@@ -259,11 +275,11 @@ impl AckFileWriter {
             fs.mkdir_all(parent).await?;
         }
 
-        // The header is synced with its directory entry, so a file that
-        // exists after a crash has at least a whole header.
+        // Only successful creation certifies the header; recovery must still
+        // accept a torn header left by a crash before creation completed.
         let initial_size = header.len() as u64;
-        let file = fs
-            .create_durable(
+        let (file, inode) = fs
+            .create_durable_with_inode(
                 path.as_ref(),
                 Runs(vec![header]),
                 TmpMode::Trunc,
@@ -290,7 +306,9 @@ impl AckFileWriter {
         }
         let tail = Arc::new(Mutex::new(FileTail {
             file,
+            inode,
             flushed_len: initial_size,
+            needs_restore: false,
         }));
         let writer_handle = tokio::spawn(writer_task(
             fs.clone(),

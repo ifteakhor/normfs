@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 #include "normfs/fs_sys.h"
+#include "normfs/fs_dir.h"
 
 #if !defined(O_CLOEXEC)
 #define O_CLOEXEC 0
@@ -65,7 +66,7 @@ normfs_fs_world_fsync_err(uint64_t ino)
 
 void
 normfs_fs_world_rename_ok(const char *src, size_t src_len, const char *dst,
-    size_t dst_len)
+	size_t dst_len)
 {
 	(void)src;
 	(void)src_len;
@@ -114,10 +115,10 @@ normfs_fs_sys_fail(int *os_error)
 
 int
 normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
-    uint64_t *ino, int *os_error)
+	uint64_t *ino, int *os_error)
 {
 	struct stat st;
-	int flags = O_WRONLY | O_CREAT | O_CLOEXEC;
+	int flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW;
 	int fd;
 
 	(void)path_len;
@@ -143,7 +144,7 @@ normfs_fs_sys_open_create(const char *path, size_t path_len, int mode,
 
 int
 normfs_fs_sys_pwritev_all(int fd, const struct normfs_fs_iov *iov,
-    size_t cnt, uint64_t off, int *os_error)
+	size_t cnt, uint64_t off, int *os_error)
 {
 	struct iovec vec[1024];
 	size_t first = 0u;
@@ -229,7 +230,7 @@ normfs_fs_sys_close(int fd, int *os_error)
 
 int
 normfs_fs_sys_file_len(const char *path, size_t path_len, uint64_t *len,
-    int *os_error)
+	int *os_error)
 {
 	struct stat st;
 
@@ -252,7 +253,7 @@ normfs_fs_sys_file_len(const char *path, size_t path_len, uint64_t *len,
 
 int
 normfs_fs_sys_rename(const char *src, size_t src_len, const char *dst,
-    size_t dst_len, int *os_error)
+	size_t dst_len, int *os_error)
 {
 	(void)src_len;
 	(void)dst_len;
@@ -320,4 +321,21 @@ normfs_fs_sys_unlink(const char *path, size_t path_len, int *os_error)
 		return normfs_fs_sys_fail(os_error);
 	}
 	return 0;
+}
+
+int
+normfs_fs_sys_sync_dir(const char *path, size_t path_len, int *os_error)
+{
+	int fd;
+	int rc;
+	(void)path_len;
+    *os_error = 0;
+	do {
+		fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	} while (fd < 0 && errno == EINTR);
+	if (fd < 0)
+		return normfs_fs_sys_fail(os_error);
+	rc = normfs_fs_sys_fsync(fd, os_error);
+	(void)close(fd);
+	return rc;
 }

@@ -25,8 +25,16 @@ pub enum ScanResult {
 }
 
 pub(crate) fn scan_ids(dir: &Path, ext: &str, which: Scan) -> io::Result<ScanResult> {
-    if !dir.is_dir() {
-        return Ok(ScanResult::None);
+    match std::fs::metadata(dir) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "scan root is not a directory",
+            ));
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(ScanResult::None),
+        Err(e) => return Err(e),
     }
     let one = |r: Result<UintN, PathError>| match r {
         Ok(id) => Ok(ScanResult::One(id)),

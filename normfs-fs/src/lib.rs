@@ -16,18 +16,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tokio::sync::oneshot;
+use tokio::sync::{Semaphore, oneshot};
 
+mod directory;
 mod executor;
 pub mod fault;
 mod plan;
 mod pool;
+mod read;
 mod scan;
+pub use read::ReadFile;
 
+#[cfg(test)]
+mod directory_test;
 #[cfg(test)]
 mod plan_test;
 #[cfg(test)]
 mod pool_test;
+#[cfg(test)]
+mod read_test;
 #[cfg(test)]
 mod scan_test;
 
@@ -35,7 +42,7 @@ pub use executor::Accounting;
 pub use plan::{Op, PlanError, TmpMode};
 pub use scan::{Scan, ScanResult};
 
-use executor::{Executor, Job, PlanJob, Resources};
+use executor::{Executor, Job, PlanJob, Resources, Task};
 use plan::Plan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +83,7 @@ pub enum FsError {
     Os(io::Error),
     /// The executor has shut down.
     ExecutorGone,
+    JobPanicked,
     Plan(PlanError),
 }
 
@@ -83,6 +91,7 @@ impl std::fmt::Display for FsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FsError::Os(e) => write!(f, "IO error: {e}"),
+            FsError::JobPanicked => write!(f, "fs job panicked"),
             FsError::ExecutorGone => write!(f, "the fs executor has shut down"),
             FsError::Plan(e) => write!(f, "fs planner: {e}"),
         }
@@ -93,7 +102,7 @@ impl std::error::Error for FsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             FsError::Os(e) => Some(e),
-            FsError::ExecutorGone => None,
+            FsError::ExecutorGone | FsError::JobPanicked => None,
             FsError::Plan(e) => Some(e),
         }
     }
@@ -125,6 +134,7 @@ impl Runs {
 }
 
 pub struct PublishSpec {
+    /// Must name a different inode from `dst`; callers exclude hard-link and parent aliases.
     pub tmp: PathBuf,
     pub dst: PathBuf,
     pub runs: Runs,
@@ -156,6 +166,15 @@ pub enum AppendOutcome {
 #[derive(Clone)]
 pub struct Fs {
     exec: Arc<dyn Executor>,
+    slots: Arc<Semaphore>,
+}
+
+impl std::fmt::Debug for Fs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fs")
+            .field("backend", &self.backend())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Fs {
@@ -166,14 +185,27 @@ impl Fs {
             cfg.threads
         };
         let exec: Arc<dyn Executor> = match cfg.backend {
-            Backend::Pool => pool::Pool::start(threads),
+            Backend::Pool => pool::Pool::start(threads)?,
         };
         log::info!(target: "normfs-fs", "fs executor: {} with {threads} threads", exec.name());
-        Ok(Fs { exec })
+        Ok(Fs {
+            exec,
+            slots: Arc::new(Semaphore::new(threads.saturating_mul(32).clamp(1, 1024))),
+        })
     }
 
     pub fn backend(&self) -> &'static str {
         self.exec.name()
+    }
+
+    async fn submit(&self, task: Task) -> Result<(), FsError> {
+        let permit = self
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| FsError::ExecutorGone)?;
+        self.exec.submit(Job { task, permit })
     }
 
     async fn run_plan(
@@ -183,12 +215,13 @@ impl Fs {
         then: Option<Accounting>,
     ) -> Result<executor::Finished, FsError> {
         let (reply, done) = oneshot::channel();
-        self.exec.submit(Job::Plan(PlanJob {
+        self.submit(Task::Plan(PlanJob {
             plan,
             res,
             then,
             reply,
-        }))?;
+        }))
+        .await?;
         done.await.map_err(|_| FsError::ExecutorGone)?
     }
 
@@ -207,11 +240,30 @@ impl Fs {
         runs: Runs,
         sync: bool,
     ) -> Result<AppendOutcome, FsError> {
+        if runs.total() == 0 {
+            return Ok(AppendOutcome::Committed);
+        }
+        let handle = file.clone();
+        let ino = self.run_blocking(move || inode(&handle)).await?;
+        self.append_sync_with_inode(file, ino, path, at, runs, sync)
+            .await
+    }
+
+    /// Like [`Fs::append_sync`], using the inode returned by creation or metadata.
+    /// `ino` must belong to this open file; holding the file prevents inode reuse.
+    pub async fn append_sync_with_inode(
+        &self,
+        file: Arc<File>,
+        ino: u64,
+        path: &Path,
+        at: u64,
+        runs: Runs,
+        sync: bool,
+    ) -> Result<AppendOutcome, FsError> {
         let total = runs.total();
         if total == 0 {
             return Ok(AppendOutcome::Committed);
         }
-        let ino = inode(&file)?;
         let plan = Plan::append(path, ino, at, total)?;
         let res = Resources {
             file: Some(file),
@@ -230,7 +282,19 @@ impl Fs {
 
     /// Cuts `file` back to `at`, for an append that failed unrestored.
     pub async fn restore(&self, file: Arc<File>, path: &Path, at: u64) -> Result<(), FsError> {
-        let ino = inode(&file)?;
+        let handle = file.clone();
+        let ino = self.run_blocking(move || inode(&handle)).await?;
+        self.restore_with_inode(file, ino, path, at).await
+    }
+
+    /// Like [`Fs::restore`], with the inode of this open file already known.
+    pub async fn restore_with_inode(
+        &self,
+        file: Arc<File>,
+        ino: u64,
+        path: &Path,
+        at: u64,
+    ) -> Result<(), FsError> {
         let plan = Plan::restore(path, ino, at)?;
         let res = Resources {
             file: Some(file),
@@ -245,6 +309,7 @@ impl Fs {
     /// syncs the directory. `then`, if given, runs on the executor's thread
     /// right after the directory sync and before this returns: bookkeeping
     /// put there cannot be separated from the rename by a dropped future.
+    /// A callback panic is logged; the completed publication still returns success.
     pub async fn publish(
         &self,
         spec: PublishSpec,
@@ -284,6 +349,19 @@ impl Fs {
         mode: TmpMode,
         sync: bool,
     ) -> Result<File, FsError> {
+        self.create_durable_with_inode(path, runs, mode, sync)
+            .await
+            .map(|(file, _)| file)
+    }
+
+    /// Creates a file and returns its inode from the same OPEN completion.
+    pub async fn create_durable_with_inode(
+        &self,
+        path: &Path,
+        runs: Runs,
+        mode: TmpMode,
+        sync: bool,
+    ) -> Result<(File, u64), FsError> {
         let total = runs.total();
         let plan = Plan::create(path, mode, total)?;
         let res = Resources {
@@ -294,6 +372,7 @@ impl Fs {
         let fin = self.run_plan(plan, res, None).await?;
         finished(&fin.plan)?;
         fin.file
+            .map(|file| (file, fin.plan.inode()))
             .ok_or_else(|| FsError::Os(io::Error::other("create finished without a file")))
     }
 
@@ -318,13 +397,55 @@ impl Fs {
         T: Send + 'static,
         F: FnOnce() -> io::Result<T> + Send + 'static,
     {
-        let (reply, done) = oneshot::channel::<io::Result<T>>();
-        self.exec.submit(Job::Blocking(Box::new(move || {
-            let _ = reply.send(f());
-        })))?;
-        done.await
-            .map_err(|_| FsError::ExecutorGone)?
-            .map_err(FsError::Os)
+        let (reply, done) = oneshot::channel();
+        self.submit(Task::Blocking(Box::new(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                .map_err(|_| FsError::JobPanicked)
+                .and_then(|r| r.map_err(FsError::Os));
+            let _ = reply.send(result);
+        })))
+        .await?;
+        done.await.map_err(|_| FsError::ExecutorGone)?
+    }
+
+    pub async fn open_read(&self, path: &Path) -> io::Result<ReadFile> {
+        let path = path.to_path_buf();
+        let file = self.run_blocking(move || File::open(path)).await?;
+        Ok(ReadFile::new(self.clone(), file))
+    }
+
+    pub async fn metadata(&self, file: Arc<File>) -> Result<Metadata, FsError> {
+        self.run_blocking(move || file.metadata()).await
+    }
+
+    pub async fn directory_size(&self, path: &Path) -> Result<u64, FsError> {
+        let root = path.to_path_buf();
+        self.run_blocking(move || {
+            let mut total = 0u64;
+            let mut dirs = vec![root];
+            while let Some(dir) = dirs.pop() {
+                let entries = match std::fs::read_dir(dir) {
+                    Ok(entries) => entries,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
+                };
+                for entry in entries {
+                    let entry = entry?;
+                    let metadata = match entry.metadata() {
+                        Ok(m) => m,
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(e) => return Err(e),
+                    };
+                    if metadata.is_dir() {
+                        dirs.push(entry.path());
+                    } else if metadata.is_file() {
+                        total = total.saturating_add(metadata.len());
+                    }
+                }
+            }
+            Ok(total)
+        })
+        .await
     }
 
     pub async fn read_whole(&self, path: &Path) -> Result<Bytes, FsError> {
@@ -344,10 +465,10 @@ impl Fs {
         .await
     }
 
+    /// Creates durable directories below an already durable, provisioned ancestor.
     pub async fn mkdir_all(&self, path: &Path) -> Result<(), FsError> {
         let path = path.to_path_buf();
-        self.run_blocking(move || std::fs::create_dir_all(&path))
-            .await
+        self.run_blocking(move || directory::mkdir_all(&path)).await
     }
 
     /// unlink without a directory sync: for eviction, where the name coming
@@ -376,7 +497,7 @@ impl Fs {
     }
 }
 
-fn inode(file: &File) -> Result<u64, FsError> {
+fn inode(file: &File) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
     Ok(file.metadata()?.ino())
 }

@@ -333,103 +333,38 @@ test_unlink_reports_absent(void)
 	return 0;
 }
 
-/* The planner's transitions, driven once through each protocol. The proof
- * covers every step; this pins the enum values the Rust side mirrors. */
 static int
-test_plan_walks_publish(void)
+test_sync_dir_rejects_missing_and_regular_paths(void)
 {
-	struct normfs_fs_plan p;
-	const char tmp[] = "t";
-	const char dst[] = "d";
+	char path[512];
+	uint64_t ino;
+	int fd;
+	int e;
 
-	normfs_fs_publish_init(&p, tmp, 1u, dst, 1u, NORMFS_FS_TMP_EXCL, 10u);
-	CHECK(normfs_fs_plan_next(&p) == NORMFS_FS_OP_OPEN);
-	CHECK(normfs_fs_publish_ok(&p, 0u) == NORMFS_FS_ERR_STATE);
-	CHECK(normfs_fs_publish_ok(&p, 77u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_WRITE && p.ino == 77u);
-	CHECK(normfs_fs_publish_ok(&p, 11u) == NORMFS_FS_ERR_STATE);
-	CHECK(normfs_fs_publish_ok(&p, 4u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_WRITE && p.written == 4u);
-	CHECK(normfs_fs_publish_ok(&p, 6u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_FSYNC_FILE);
-	CHECK(normfs_fs_publish_ok(&p, 0u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_CLOSE_FILE);
-	CHECK(normfs_fs_publish_ok(&p, 0u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_STAT_DST);
-	CHECK(normfs_fs_publish_absent(&p) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_RENAME && p.old_present == 0);
-	CHECK(normfs_fs_publish_absent(&p) == NORMFS_FS_ERR_STATE);
-	CHECK(normfs_fs_publish_ok(&p, 0u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_FSYNC_DIR);
-	CHECK(normfs_fs_publish_ok(&p, 0u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_DONE);
-	CHECK(normfs_fs_publish_ok(&p, 0u) == NORMFS_FS_ERR_STATE);
-	CHECK(normfs_fs_publish_err(&p, EIO) == NORMFS_FS_ERR_STATE);
-	CHECK(normfs_fs_publish_done_durable(&p) == 1);
+	CHECK(normfs_fs_sys_sync_dir(root, strlen(root), &e) == 0 && e == 0);
+	CHECK(path_in(path, sizeof(path), "sync-dir-file"));
+	CHECK(normfs_fs_sys_sync_dir(path, strlen(path), &e) == -1 && e == ENOENT);
+	fd = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL, &ino, &e);
+	CHECK(fd >= 0);
+	CHECK(normfs_fs_sys_close(fd, &e) == 0);
+	CHECK(normfs_fs_sys_sync_dir(path, strlen(path), &e) == -1 && e == ENOTDIR);
 	return 0;
 }
 
 static int
-test_plan_walks_append_and_restore(void)
+test_open_does_not_follow_a_symlink(void)
 {
-	struct normfs_fs_plan p;
-	const char dst[] = "d";
+	char target[512];
+	char link[512];
+	uint64_t ino;
+	int e;
 
-	normfs_fs_append_init(&p, dst, 1u, 5u, 100u, 8u);
-	CHECK(p.op == NORMFS_FS_OP_WRITE);
-	CHECK(normfs_fs_append_ok(&p, 8u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_FSYNC_FILE);
-	CHECK(normfs_fs_append_err(&p, ENOSPC) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_TRUNCATE_BACK && p.os_error == ENOSPC);
-	CHECK(normfs_fs_append_err(&p, EIO) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_FAILED && p.restored == 0);
-	CHECK(p.os_error == ENOSPC);
-	CHECK(normfs_fs_append_boundary_holds(&p) == 1);
-
-	normfs_fs_restore_init(&p, dst, 1u, 5u, 100u);
-	CHECK(p.op == NORMFS_FS_OP_TRUNCATE_BACK);
-	CHECK(normfs_fs_restore_report(&p, 0) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_DONE);
-	CHECK(normfs_fs_restore_report(&p, 0) == NORMFS_FS_ERR_STATE);
-
-	normfs_fs_append_init(&p, dst, 1u, 5u, 100u, 8u);
-	CHECK(normfs_fs_append_ok(&p, 3u) == NORMFS_FS_OK);
-	CHECK(normfs_fs_append_ok(&p, 5u) == NORMFS_FS_OK);
-	CHECK(normfs_fs_append_ok(&p, 0u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_DONE);
-	CHECK(normfs_fs_append_boundary_holds(&p) == 1);
-	return 0;
-}
-
-static int
-test_plan_walks_create_and_remove(void)
-{
-	struct normfs_fs_plan p;
-	const char dst[] = "d";
-
-	normfs_fs_create_init(&p, dst, 1u, NORMFS_FS_TMP_TRUNC, 0u);
-	CHECK(normfs_fs_create_ok(&p, 9u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_FSYNC_FILE);
-	CHECK(normfs_fs_create_ok(&p, 0u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_FSYNC_DIR);
-	CHECK(normfs_fs_create_err(&p, EIO) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_FAILED && p.os_error == EIO);
-
-	normfs_fs_create_init(&p, dst, 1u, NORMFS_FS_TMP_EXCL, 3u);
-	CHECK(normfs_fs_create_ok(&p, 9u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_WRITE);
-	CHECK(normfs_fs_create_ok(&p, 3u) == NORMFS_FS_OK);
-	CHECK(normfs_fs_create_ok(&p, 0u) == NORMFS_FS_OK);
-	CHECK(normfs_fs_create_ok(&p, 0u) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_DONE);
-
-	normfs_fs_remove_init(&p, dst, 1u);
-	CHECK(p.op == NORMFS_FS_OP_UNLINK);
-	CHECK(normfs_fs_remove_ok(&p) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_FSYNC_DIR);
-	CHECK(normfs_fs_remove_ok(&p) == NORMFS_FS_OK);
-	CHECK(p.op == NORMFS_FS_OP_DONE);
-	CHECK(normfs_fs_remove_ok(&p) == NORMFS_FS_ERR_STATE);
+	CHECK(path_in(target, sizeof(target), "symlink-target"));
+	CHECK(path_in(link, sizeof(link), "symlink-temp"));
+	CHECK(symlink(target, link) == 0);
+	CHECK(normfs_fs_sys_open_create(link, strlen(link), NORMFS_FS_TMP_TRUNC,
+		&ino, &e) == -1 && e == ELOOP);
+	CHECK(access(target, F_OK) == -1 && errno == ENOENT);
 	return 0;
 }
 
@@ -454,9 +389,8 @@ main(void)
 	failed |= test_rename_replaces_and_fsync_parent_syncs();
 	failed |= test_ftruncate_keeps_the_prefix();
 	failed |= test_unlink_reports_absent();
-	failed |= test_plan_walks_publish();
-	failed |= test_plan_walks_append_and_restore();
-	failed |= test_plan_walks_create_and_remove();
+	failed |= test_sync_dir_rejects_missing_and_regular_paths();
+	failed |= test_open_does_not_follow_a_symlink();
 
 	if (failed == 0)
 		printf("fs: all tests passed\n");

@@ -446,11 +446,13 @@ async fn a_failed_commit_cuts_back_to_the_known_good_length() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("tail.wal");
     let fs = test_fs();
-    let file = fs
-        .create_durable(&path, Runs::default(), normfs_fs::TmpMode::Excl, true)
+    let (file, inode) = fs
+        .create_durable_with_inode(&path, Runs::default(), normfs_fs::TmpMode::Excl, true)
         .await
         .unwrap();
     let mut tail = FileTail {
+        inode,
+        needs_restore: false,
         file: std::sync::Arc::new(file),
         flushed_len: 0,
     };
@@ -844,4 +846,64 @@ async fn an_injected_flush_failure_makes_a_close_fail() {
 
     crate::heal(&file_path);
     assert_eq!(read_file_content(&file_path).await, b"hdr");
+}
+
+#[tokio::test]
+async fn failed_restore_blocks_later_batches_until_the_tail_is_repaired() {
+    use crate::ack_file_writer::{FileTail, commit};
+    use normfs_fs::{Runs, TmpMode};
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("unrestored.wal");
+    let fs = test_fs();
+    let (file, inode) = fs
+        .create_durable_with_inode(&path, Runs::default(), TmpMode::Excl, true)
+        .await
+        .unwrap();
+    let mut tail = FileTail {
+        inode,
+        file: std::sync::Arc::new(file),
+        flushed_len: 0,
+        needs_restore: false,
+    };
+    let settings = AckFileWriterSettings {
+        max_retries: 1,
+        ..Default::default()
+    };
+    normfs_fs::fault::fail_flushes(&path, 1);
+    normfs_fs::fault::fail_truncates(&path, 2);
+    assert!(
+        !commit(
+            &fs,
+            &path,
+            &mut tail,
+            Runs(vec![Bytes::from_static(b"long torn batch")]),
+            &settings
+        )
+        .await
+    );
+    assert!(tail.needs_restore);
+    assert!(
+        !commit(
+            &fs,
+            &path,
+            &mut tail,
+            Runs(vec![Bytes::from_static(b"new")]),
+            &settings
+        )
+        .await
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"long torn batch");
+    assert_eq!(tail.flushed_len, 0);
+    assert!(
+        commit(
+            &fs,
+            &path,
+            &mut tail,
+            Runs(vec![Bytes::from_static(b"new")]),
+            &settings
+        )
+        .await
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    assert!(!tail.needs_restore);
 }
