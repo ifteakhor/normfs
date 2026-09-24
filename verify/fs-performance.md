@@ -66,3 +66,9 @@ The [paired September 24 comparison](../benchmarks/fs-vs-dev-2026-09-24/README.m
 reruns dev and FS together with alternating version order, adding CPU
 comparisons and a red/blue chart. It supersedes the FS-only chart for comparing
 the two implementations on macOS 27.0.
+
+The subsequent [controlled store diagnosis](../benchmarks/fs-diagnosis/README.md)
+adds the missing directory barrier to dev in an isolated benchmark copy and
+preprovisions directories for both versions. It reproduces the slowdown in
+dev while measuring small FS queue waits; matching publication barriers
+removes the observed FS throughput disadvantage in that workload.
