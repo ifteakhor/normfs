@@ -6,6 +6,9 @@ publish = false
 
 [workspace]
 
+[features]
+macos-ssd = []
+
 [dependencies]
 normfs-fs = { path = "../../normfs-fs" }
 bytes = "1"
@@ -17,3 +20,8 @@ tokio = { version = "1", features = ["full"] }
 [[bin]]
 name = "fs_io"
 path = "main.rs"
+
+[[bin]]
+name = "ssd_io"
+path = "ssd.rs"
+required-features = ["macos-ssd"]

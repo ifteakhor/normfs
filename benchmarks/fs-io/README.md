@@ -6,6 +6,10 @@ This standalone harness compares direct file operations with the public
 codecs, encryption, queue scheduling or application flush loops in these runs.
 The red baseline is **Raw I/O**, not a measurement of the `dev` branch.
 
+A separate [uncached SSD throughput test](SSD.md) measures 32 GiB bulk transfers
+through APFS with a final write flush. Its different sync frequency means those
+rates cannot be used directly as the denominator for this FS-overhead test.
+
 ## Measurements
 
 The [PNG](results-2026-09-24/raw-io-vs-fs.png),

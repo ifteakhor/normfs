@@ -6,6 +6,11 @@ boundaries and timed-phase CPU accounting. It includes 32 KiB and 4 MiB sizes
 from norma-core and excludes NormFS application, WAL and Store execution.
 The older application-path evidence below answers a different question.
 
+The separate [uncached SSD measurement](../benchmarks/fs-io/SSD.md) transfers
+32 GiB per phase through APFS with a final full write flush. Its best observed
+read/write medians are 4.510/0.572 GB/s. Different sync frequency means these
+bulk rates cannot directly quantify overhead in the sync-per-block FS test.
+
 The available measurements do **not** establish either maximum physical disk
 throughput or minimum CPU consumption. They show roughly unchanged WAL
 performance versus dev, with slower store migration under stronger directory

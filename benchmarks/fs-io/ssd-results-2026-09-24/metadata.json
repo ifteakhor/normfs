@@ -1,0 +1,30 @@
+{
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "started_at": "2026-09-24T17:06:23+0500",
+  "head": "e05bf1b3b84636b43e619bd4c212418180ea2c1f",
+  "binary_sha256": "cfd1ae260aba27c8ce4b52fa9cf9a24ffd56a99b398ed05e8a13c9429ff5dc44",
+  "source_sha256": "983a898fe849d3070fd2ebab972c00a021cd32c7e6780c393728fe2b8ec683e5",
+  "total_bytes_per_phase": 34359738368,
+  "rounds": 3,
+  "cases": [
+    [
+      1048576,
+      1
+    ],
+    [
+      4194304,
+      1
+    ],
+    [
+      4194304,
+      8
+    ]
+  ],
+  "cache_policy": "F_NOCACHE on every file descriptor; no fallback",
+  "write_sync": "F_FULLFSYNC once per file at end of timed write; no fallback",
+  "read_order": "read follows write and untimed spot verification, with F_NOCACHE still enabled",
+  "temporary_parent": "/Users/iftikhor/Projects/normfs/benchmarks/fs-io/ssd-results-2026-09-24",
+  "free_bytes_before": 117555200000,
+  "finished_at": "2026-09-24T17:17:39+0500",
+  "free_bytes_after": 116736000000
+}
