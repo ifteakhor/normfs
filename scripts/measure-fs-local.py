@@ -139,20 +139,21 @@ def plot(output):
 
     throughput = ["throughput_80", "throughput_4096"]
     latency = ["latency_0", "latency_4", "latency_12"]
-    panel(axes[0, 0], throughput, "write_mib_s", "WAL writes", "MiB/s", ["80 B records", "4 KiB records"])
-    panel(axes[0, 1], throughput, "scan_mib_s", "Cached WAL scans", "MiB/s", ["80 B records", "4 KiB records"])
-    panel(axes[1, 0], latency, "p99_ms", "Commit latency · p99", "Milliseconds", ["No readers", "4 readers", "12 readers"])
-    panel(axes[1, 1], ["publication_1", "publication_12"], "publish_mib_s", "Store migration", "MiB/s", ["1 queue", "12 queues"])
+    panel(axes[0, 0], throughput, "write_mib_s", "WAL writes · ↑ Higher is better", "MiB/s", ["80 B records", "4 KiB records"])
+    panel(axes[0, 1], throughput, "scan_mib_s", "Cached WAL scans · ↑ Higher is better", "MiB/s", ["80 B records", "4 KiB records"])
+    panel(axes[1, 0], latency, "p99_ms", "Commit latency · p99 · ↓ Lower is better", "Milliseconds", ["No readers", "4 readers", "12 readers"])
+    panel(axes[1, 1], ["publication_1", "publication_12"], "publish_mib_s", "Store migration · ↑ Higher is better", "MiB/s", ["1 queue", "12 queues"])
     all_cases = [case for case, _, _ in CASES]
     labels = ["WAL\n80 B", "WAL\n4 KiB", "Ack\n0 readers", "Ack\n4 readers", "Ack\n12 readers", "Store\n1 queue", "Store\n12 queues"]
-    panel(axes[2, 0], all_cases, "cpu_percent", "CPU utilization", "% · 100% = one core", labels)
-    panel(axes[2, 1], all_cases, "cpu_seconds", "CPU time", "User + system seconds", labels)
+    panel(axes[2, 0], all_cases, "cpu_percent", "CPU utilization · ↓ Lower is better*", "% · 100% = one core", labels)
+    panel(axes[2, 1], all_cases, "cpu_seconds", "CPU time · ↓ Lower is better*", "User + system seconds", labels)
     fig.suptitle("FS vs dev — Mac" if len(versions) == 2 else "FS — Mac", fontsize=22, weight="bold", y=0.98)
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.951), ncol=2, frameon=False, fontsize=13)
     caveat = "Reads are cached."
     if len(versions) == 2:
         caveat += " FS adds directory durability absent in dev."
+    caveat += "\n*CPU: lower is better only for equal work and throughput; extra I/O waiting can reduce utilization."
     fig.text(0.5, 0.025,
              f"Median of {metadata['rounds']} runs; whiskers: min–max. CPU includes setup, validation and cleanup.\n"
              + caveat,
