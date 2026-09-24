@@ -61,3 +61,8 @@ adds fresh current-checkout measurements and whole-process CPU accounting on
 macOS 27.0. CPU includes setup and validation, so it does not isolate the FS
 executor's overhead. That run still does not establish a disk ceiling or a
 minimum CPU cost.
+
+The [paired September 24 comparison](../benchmarks/fs-vs-dev-2026-09-24/README.md)
+reruns dev and FS together with alternating version order, adding CPU
+comparisons and a red/blue chart. It supersedes the FS-only chart for comparing
+the two implementations on macOS 27.0.

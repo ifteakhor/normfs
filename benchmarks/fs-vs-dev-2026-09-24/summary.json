@@ -1,0 +1,416 @@
+[
+  {
+    "case": "throughput_80",
+    "version": "dev",
+    "metric": "write_mib_s",
+    "median": 294.58290359715454,
+    "minimum": 275.92806405222626,
+    "maximum": 305.62843738174195,
+    "runs": 4
+  },
+  {
+    "case": "throughput_4096",
+    "version": "dev",
+    "metric": "write_mib_s",
+    "median": 1201.7999871385693,
+    "minimum": 655.2885168298916,
+    "maximum": 1266.5419527913957,
+    "runs": 4
+  },
+  {
+    "case": "throughput_80",
+    "version": "fs",
+    "metric": "write_mib_s",
+    "median": 308.3483470937281,
+    "minimum": 272.3505862057136,
+    "maximum": 313.6561711500416,
+    "runs": 4
+  },
+  {
+    "case": "throughput_4096",
+    "version": "fs",
+    "metric": "write_mib_s",
+    "median": 1200.280695647953,
+    "minimum": 1075.2453887959746,
+    "maximum": 1265.6873503495049,
+    "runs": 4
+  },
+  {
+    "case": "throughput_80",
+    "version": "dev",
+    "metric": "scan_mib_s",
+    "median": 4081.9730556078193,
+    "minimum": 3877.548775564676,
+    "maximum": 4184.456789861074,
+    "runs": 4
+  },
+  {
+    "case": "throughput_4096",
+    "version": "dev",
+    "metric": "scan_mib_s",
+    "median": 8219.809284102821,
+    "minimum": 7405.1430749284455,
+    "maximum": 8351.127957289871,
+    "runs": 4
+  },
+  {
+    "case": "throughput_80",
+    "version": "fs",
+    "metric": "scan_mib_s",
+    "median": 4131.327994486048,
+    "minimum": 3746.138561943864,
+    "maximum": 4211.988716642003,
+    "runs": 4
+  },
+  {
+    "case": "throughput_4096",
+    "version": "fs",
+    "metric": "scan_mib_s",
+    "median": 8061.955258019304,
+    "minimum": 5103.878071550769,
+    "maximum": 8242.764439694969,
+    "runs": 4
+  },
+  {
+    "case": "latency_0",
+    "version": "dev",
+    "metric": "p99_ms",
+    "median": 6.0435835,
+    "minimum": 5.877209000000001,
+    "maximum": 6.207708,
+    "runs": 4
+  },
+  {
+    "case": "latency_4",
+    "version": "dev",
+    "metric": "p99_ms",
+    "median": 4.314270500000001,
+    "minimum": 4.159541999999999,
+    "maximum": 5.886749999999999,
+    "runs": 4
+  },
+  {
+    "case": "latency_12",
+    "version": "dev",
+    "metric": "p99_ms",
+    "median": 6.710478999999999,
+    "minimum": 5.180042,
+    "maximum": 7.761625,
+    "runs": 4
+  },
+  {
+    "case": "latency_0",
+    "version": "fs",
+    "metric": "p99_ms",
+    "median": 6.055125,
+    "minimum": 5.006667,
+    "maximum": 20.735,
+    "runs": 4
+  },
+  {
+    "case": "latency_4",
+    "version": "fs",
+    "metric": "p99_ms",
+    "median": 5.502562999999999,
+    "minimum": 4.259167000000001,
+    "maximum": 5.989833,
+    "runs": 4
+  },
+  {
+    "case": "latency_12",
+    "version": "fs",
+    "metric": "p99_ms",
+    "median": 6.5056035,
+    "minimum": 4.965041,
+    "maximum": 12.426542000000001,
+    "runs": 4
+  },
+  {
+    "case": "publication_1",
+    "version": "dev",
+    "metric": "publish_mib_s",
+    "median": 262.3151004907983,
+    "minimum": 247.57353229353313,
+    "maximum": 263.9974887073888,
+    "runs": 4
+  },
+  {
+    "case": "publication_12",
+    "version": "dev",
+    "metric": "publish_mib_s",
+    "median": 256.63773918537544,
+    "minimum": 206.1738232722862,
+    "maximum": 268.3789335816304,
+    "runs": 4
+  },
+  {
+    "case": "publication_1",
+    "version": "fs",
+    "metric": "publish_mib_s",
+    "median": 145.86269028422652,
+    "minimum": 144.13773710269726,
+    "maximum": 154.25468000012253,
+    "runs": 4
+  },
+  {
+    "case": "publication_12",
+    "version": "fs",
+    "metric": "publish_mib_s",
+    "median": 143.39935660919647,
+    "minimum": 143.2998882800858,
+    "maximum": 145.4405362254402,
+    "runs": 4
+  },
+  {
+    "case": "throughput_80",
+    "version": "dev",
+    "metric": "cpu_percent",
+    "median": 121.86729463842127,
+    "minimum": 110.49078090407056,
+    "maximum": 124.72504326113881,
+    "runs": 4
+  },
+  {
+    "case": "throughput_4096",
+    "version": "dev",
+    "metric": "cpu_percent",
+    "median": 70.67944692331172,
+    "minimum": 54.164551441785584,
+    "maximum": 72.07555246098039,
+    "runs": 4
+  },
+  {
+    "case": "latency_0",
+    "version": "dev",
+    "metric": "cpu_percent",
+    "median": 8.4594935474146,
+    "minimum": 6.60862951296737,
+    "maximum": 8.99280530294815,
+    "runs": 4
+  },
+  {
+    "case": "latency_4",
+    "version": "dev",
+    "metric": "cpu_percent",
+    "median": 339.7583809478067,
+    "minimum": 336.1570267274486,
+    "maximum": 343.24455698728,
+    "runs": 4
+  },
+  {
+    "case": "latency_12",
+    "version": "dev",
+    "metric": "cpu_percent",
+    "median": 840.6811586620972,
+    "minimum": 752.4779422915018,
+    "maximum": 877.2606037971384,
+    "runs": 4
+  },
+  {
+    "case": "publication_1",
+    "version": "dev",
+    "metric": "cpu_percent",
+    "median": 91.17293083559679,
+    "minimum": 76.93463015448624,
+    "maximum": 93.21342609913283,
+    "runs": 4
+  },
+  {
+    "case": "publication_12",
+    "version": "dev",
+    "metric": "cpu_percent",
+    "median": 93.89786080880287,
+    "minimum": 89.07729132190416,
+    "maximum": 94.66875767162209,
+    "runs": 4
+  },
+  {
+    "case": "throughput_80",
+    "version": "fs",
+    "metric": "cpu_percent",
+    "median": 121.48674653211125,
+    "minimum": 116.26431308572883,
+    "maximum": 125.39609080365277,
+    "runs": 4
+  },
+  {
+    "case": "throughput_4096",
+    "version": "fs",
+    "metric": "cpu_percent",
+    "median": 69.70883520063143,
+    "minimum": 61.10696611397973,
+    "maximum": 71.24286352875085,
+    "runs": 4
+  },
+  {
+    "case": "latency_0",
+    "version": "fs",
+    "metric": "cpu_percent",
+    "median": 7.89491413679832,
+    "minimum": 6.689135323561586,
+    "maximum": 8.551478665054628,
+    "runs": 4
+  },
+  {
+    "case": "latency_4",
+    "version": "fs",
+    "metric": "cpu_percent",
+    "median": 349.0548558922138,
+    "minimum": 345.5424308081854,
+    "maximum": 361.05801720482214,
+    "runs": 4
+  },
+  {
+    "case": "latency_12",
+    "version": "fs",
+    "metric": "cpu_percent",
+    "median": 796.0851526877747,
+    "minimum": 584.8796211764984,
+    "maximum": 811.594120277938,
+    "runs": 4
+  },
+  {
+    "case": "publication_1",
+    "version": "fs",
+    "metric": "cpu_percent",
+    "median": 65.80713295716768,
+    "minimum": 59.8443402227849,
+    "maximum": 68.44088677925554,
+    "runs": 4
+  },
+  {
+    "case": "publication_12",
+    "version": "fs",
+    "metric": "cpu_percent",
+    "median": 62.271768679752824,
+    "minimum": 59.29533268891262,
+    "maximum": 63.427077497597104,
+    "runs": 4
+  },
+  {
+    "case": "throughput_80",
+    "version": "dev",
+    "metric": "cpu_seconds",
+    "median": 4.570834500000004,
+    "minimum": 4.498836000000001,
+    "maximum": 4.867137000000014,
+    "runs": 4
+  },
+  {
+    "case": "throughput_4096",
+    "version": "dev",
+    "metric": "cpu_seconds",
+    "median": 4.612838999999996,
+    "minimum": 4.539133000000007,
+    "maximum": 5.2715379999999925,
+    "runs": 4
+  },
+  {
+    "case": "latency_0",
+    "version": "dev",
+    "metric": "cpu_seconds",
+    "median": 0.18793299999999036,
+    "minimum": 0.13988799999999912,
+    "maximum": 0.20018899999999995,
+    "runs": 4
+  },
+  {
+    "case": "latency_4",
+    "version": "dev",
+    "metric": "cpu_seconds",
+    "median": 7.497573499999994,
+    "minimum": 7.475973999999999,
+    "maximum": 7.526583000000002,
+    "runs": 4
+  },
+  {
+    "case": "latency_12",
+    "version": "dev",
+    "metric": "cpu_seconds",
+    "median": 18.665181999999994,
+    "minimum": 17.564489999999992,
+    "maximum": 19.740783000000008,
+    "runs": 4
+  },
+  {
+    "case": "publication_1",
+    "version": "dev",
+    "metric": "cpu_seconds",
+    "median": 1.9760484999999974,
+    "minimum": 1.9564479999999804,
+    "maximum": 1.9875779999999992,
+    "runs": 4
+  },
+  {
+    "case": "publication_12",
+    "version": "dev",
+    "metric": "cpu_seconds",
+    "median": 2.0296689999999984,
+    "minimum": 1.9636430000000047,
+    "maximum": 2.593764,
+    "runs": 4
+  },
+  {
+    "case": "throughput_80",
+    "version": "fs",
+    "metric": "cpu_seconds",
+    "median": 4.494532999999999,
+    "minimum": 4.449567999999999,
+    "maximum": 4.814966000000027,
+    "runs": 4
+  },
+  {
+    "case": "throughput_4096",
+    "version": "fs",
+    "metric": "cpu_seconds",
+    "median": 4.786485999999996,
+    "minimum": 4.374867999999992,
+    "maximum": 4.983809000000001,
+    "runs": 4
+  },
+  {
+    "case": "latency_0",
+    "version": "fs",
+    "metric": "cpu_seconds",
+    "median": 0.17519450000001147,
+    "minimum": 0.16530099999998527,
+    "maximum": 0.18575900000000445,
+    "runs": 4
+  },
+  {
+    "case": "latency_4",
+    "version": "fs",
+    "metric": "cpu_seconds",
+    "median": 7.614305999999996,
+    "minimum": 7.506237999999968,
+    "maximum": 7.720955999999999,
+    "runs": 4
+  },
+  {
+    "case": "latency_12",
+    "version": "fs",
+    "metric": "cpu_seconds",
+    "median": 17.817248499999994,
+    "minimum": 14.346879000000001,
+    "maximum": 18.006249999999994,
+    "runs": 4
+  },
+  {
+    "case": "publication_1",
+    "version": "fs",
+    "metric": "cpu_seconds",
+    "median": 2.1859129999999993,
+    "minimum": 2.046075000000002,
+    "maximum": 2.380336,
+    "runs": 4
+  },
+  {
+    "case": "publication_12",
+    "version": "fs",
+    "metric": "cpu_seconds",
+    "median": 2.1524634999999996,
+    "minimum": 2.0807749999999956,
+    "maximum": 2.216883999999993,
+    "runs": 4
+  }
+]
