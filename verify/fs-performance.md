@@ -1,5 +1,11 @@
 # FS performance: what the Mac measurements establish
 
+The latest [filesystem-only comparison](../benchmarks/fs-io/README.md) isolates
+the public FS layer against direct blocking file operations, with matching sync
+boundaries and timed-phase CPU accounting. It includes 32 KiB and 4 MiB sizes
+from norma-core and excludes NormFS application, WAL and Store execution.
+The older application-path evidence below answers a different question.
+
 The available measurements do **not** establish either maximum physical disk
 throughput or minimum CPU consumption. They show roughly unchanged WAL
 performance versus dev, with slower store migration under stronger directory

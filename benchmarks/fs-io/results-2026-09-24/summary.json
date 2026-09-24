@@ -1,0 +1,552 @@
+[
+  {
+    "case": 0,
+    "backend": "fs",
+    "operation": "append",
+    "block_bytes": 32768,
+    "workers": 1,
+    "pattern": "structured",
+    "operations": 256,
+    "payload_mib": 8.0,
+    "mib_s": {
+      "median": 8.110368109048109,
+      "min": 7.429540959255263,
+      "max": 9.359518409630445
+    },
+    "cpu_seconds_per_gib": {
+      "median": 4.500992,
+      "min": 3.961216,
+      "max": 5.0688
+    },
+    "p99_ms": {
+      "median": 5.521854,
+      "min": 4.98675,
+      "max": 6.920583
+    }
+  },
+  {
+    "case": 0,
+    "backend": "raw",
+    "operation": "append",
+    "block_bytes": 32768,
+    "workers": 1,
+    "pattern": "structured",
+    "operations": 256,
+    "payload_mib": 8.0,
+    "mib_s": {
+      "median": 8.010032815060923,
+      "min": 7.5823984571714735,
+      "max": 9.15361394690389
+    },
+    "cpu_seconds_per_gib": {
+      "median": 3.2356480000000003,
+      "min": 2.7758080000000005,
+      "max": 3.833856
+    },
+    "p99_ms": {
+      "median": 5.0981665,
+      "min": 4.874875,
+      "max": 5.413125
+    }
+  },
+  {
+    "case": 1,
+    "backend": "fs",
+    "operation": "append",
+    "block_bytes": 1048576,
+    "workers": 1,
+    "pattern": "entropy",
+    "operations": 256,
+    "payload_mib": 256.0,
+    "mib_s": {
+      "median": 241.2064459127342,
+      "min": 233.64722319671316,
+      "max": 255.75127140275868
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.249438,
+      "min": 0.220516,
+      "max": 0.27915200000000007
+    },
+    "p99_ms": {
+      "median": 7.04025,
+      "min": 5.968292,
+      "max": 8.68725
+    }
+  },
+  {
+    "case": 1,
+    "backend": "raw",
+    "operation": "append",
+    "block_bytes": 1048576,
+    "workers": 1,
+    "pattern": "entropy",
+    "operations": 256,
+    "payload_mib": 256.0,
+    "mib_s": {
+      "median": 260.00823977538886,
+      "min": 228.65301380414417,
+      "max": 264.2971578511926
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.21871799999999997,
+      "min": 0.195836,
+      "max": 0.25198400000000004
+    },
+    "p99_ms": {
+      "median": 5.9196665,
+      "min": 4.9930829999999995,
+      "max": 6.015375
+    }
+  },
+  {
+    "case": 2,
+    "backend": "fs",
+    "operation": "append",
+    "block_bytes": 4194304,
+    "workers": 1,
+    "pattern": "entropy",
+    "operations": 128,
+    "payload_mib": 512.0,
+    "mib_s": {
+      "median": 820.6866363157899,
+      "min": 494.8388046888393,
+      "max": 827.3936796091697
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.13652599999999998,
+      "min": 0.12004999999999999,
+      "max": 0.14300200000000002
+    },
+    "p99_ms": {
+      "median": 9.6991045,
+      "min": 5.773833,
+      "max": 14.130542
+    }
+  },
+  {
+    "case": 2,
+    "backend": "raw",
+    "operation": "append",
+    "block_bytes": 4194304,
+    "workers": 1,
+    "pattern": "entropy",
+    "operations": 128,
+    "payload_mib": 512.0,
+    "mib_s": {
+      "median": 820.2226512172613,
+      "min": 459.43394222571334,
+      "max": 866.6970199085097
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.12668500000000002,
+      "min": 0.12238599999999998,
+      "max": 0.130122
+    },
+    "p99_ms": {
+      "median": 6.570541500000001,
+      "min": 5.7945,
+      "max": 13.43175
+    }
+  },
+  {
+    "case": 3,
+    "backend": "fs",
+    "operation": "append",
+    "block_bytes": 4194304,
+    "workers": 8,
+    "pattern": "entropy",
+    "operations": 128,
+    "payload_mib": 512.0,
+    "mib_s": {
+      "median": 1403.6426866651946,
+      "min": 549.5387637973312,
+      "max": 1561.9357478510992
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.25869000000000003,
+      "min": 0.22361199999999998,
+      "max": 0.35621800000000003
+    },
+    "p99_ms": {
+      "median": 31.214875,
+      "min": 27.596292000000002,
+      "max": 86.515375
+    }
+  },
+  {
+    "case": 3,
+    "backend": "raw",
+    "operation": "append",
+    "block_bytes": 4194304,
+    "workers": 8,
+    "pattern": "entropy",
+    "operations": 128,
+    "payload_mib": 512.0,
+    "mib_s": {
+      "median": 1524.5877890409965,
+      "min": 556.5650441256017,
+      "max": 1534.0163251395538
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.21321800000000002,
+      "min": 0.203756,
+      "max": 0.41476599999999997
+    },
+    "p99_ms": {
+      "median": 31.2507915,
+      "min": 29.314583000000002,
+      "max": 88.782916
+    }
+  },
+  {
+    "case": 4,
+    "backend": "fs",
+    "operation": "publish",
+    "block_bytes": 32768,
+    "workers": 8,
+    "pattern": "structured",
+    "operations": 256,
+    "payload_mib": 8.0,
+    "mib_s": {
+      "median": 6.098470067168669,
+      "min": 4.933114797745509,
+      "max": 6.145340964134309
+    },
+    "cpu_seconds_per_gib": {
+      "median": 31.235904,
+      "min": 27.977600000000002,
+      "max": 31.763455999999998
+    },
+    "p99_ms": {
+      "median": 55.0275415,
+      "min": 54.01425,
+      "max": 78.002459
+    }
+  },
+  {
+    "case": 4,
+    "backend": "raw",
+    "operation": "publish",
+    "block_bytes": 32768,
+    "workers": 8,
+    "pattern": "structured",
+    "operations": 256,
+    "payload_mib": 8.0,
+    "mib_s": {
+      "median": 6.042528587324276,
+      "min": 5.6834807412146935,
+      "max": 6.247195672907405
+    },
+    "cpu_seconds_per_gib": {
+      "median": 26.033727999999996,
+      "min": 23.733248000000003,
+      "max": 32.427008
+    },
+    "p99_ms": {
+      "median": 60.93775050000001,
+      "min": 54.044250000000005,
+      "max": 65.090792
+    }
+  },
+  {
+    "case": 5,
+    "backend": "fs",
+    "operation": "publish",
+    "block_bytes": 1048576,
+    "workers": 8,
+    "pattern": "entropy",
+    "operations": 256,
+    "payload_mib": 256.0,
+    "mib_s": {
+      "median": 189.6648744339866,
+      "min": 164.65603531100132,
+      "max": 191.21277694949572
+    },
+    "cpu_seconds_per_gib": {
+      "median": 1.10544,
+      "min": 1.034148,
+      "max": 1.2107160000000001
+    },
+    "p99_ms": {
+      "median": 61.4839795,
+      "min": 54.178917,
+      "max": 68.67975
+    }
+  },
+  {
+    "case": 5,
+    "backend": "raw",
+    "operation": "publish",
+    "block_bytes": 1048576,
+    "workers": 8,
+    "pattern": "entropy",
+    "operations": 256,
+    "payload_mib": 256.0,
+    "mib_s": {
+      "median": 195.60180117847386,
+      "min": 169.87859510736294,
+      "max": 200.95683461636213
+    },
+    "cpu_seconds_per_gib": {
+      "median": 1.027212,
+      "min": 0.935408,
+      "max": 1.25362
+    },
+    "p99_ms": {
+      "median": 58.9878335,
+      "min": 55.94975,
+      "max": 67.996791
+    }
+  },
+  {
+    "case": 6,
+    "backend": "fs",
+    "operation": "publish",
+    "block_bytes": 4194304,
+    "workers": 1,
+    "pattern": "entropy",
+    "operations": 128,
+    "payload_mib": 512.0,
+    "mib_s": {
+      "median": 391.19534330840565,
+      "min": 304.03379196882315,
+      "max": 495.6696671462013
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.20905700000000002,
+      "min": 0.188396,
+      "max": 0.23014400000000002
+    },
+    "p99_ms": {
+      "median": 14.0748125,
+      "min": 10.914083,
+      "max": 19.998083
+    }
+  },
+  {
+    "case": 6,
+    "backend": "raw",
+    "operation": "publish",
+    "block_bytes": 4194304,
+    "workers": 1,
+    "pattern": "entropy",
+    "operations": 128,
+    "payload_mib": 512.0,
+    "mib_s": {
+      "median": 403.23228044269456,
+      "min": 315.2816458296021,
+      "max": 471.95004410995364
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.21868800000000002,
+      "min": 0.19063799999999997,
+      "max": 0.23371199999999998
+    },
+    "p99_ms": {
+      "median": 15.8630205,
+      "min": 12.068958,
+      "max": 17.973665999999998
+    }
+  },
+  {
+    "case": 7,
+    "backend": "fs",
+    "operation": "publish",
+    "block_bytes": 4194304,
+    "workers": 8,
+    "pattern": "entropy",
+    "operations": 128,
+    "payload_mib": 512.0,
+    "mib_s": {
+      "median": 554.1422150243221,
+      "min": 374.0675592562046,
+      "max": 738.9533598834561
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.39255599999999996,
+      "min": 0.343122,
+      "max": 0.517686
+    },
+    "p99_ms": {
+      "median": 86.76889550000001,
+      "min": 59.710083,
+      "max": 135.662958
+    }
+  },
+  {
+    "case": 7,
+    "backend": "raw",
+    "operation": "publish",
+    "block_bytes": 4194304,
+    "workers": 8,
+    "pattern": "entropy",
+    "operations": 128,
+    "payload_mib": 512.0,
+    "mib_s": {
+      "median": 550.6734183656406,
+      "min": 407.338160038065,
+      "max": 742.2628251907621
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.40199,
+      "min": 0.35148200000000007,
+      "max": 0.454348
+    },
+    "p99_ms": {
+      "median": 82.9347915,
+      "min": 55.86325,
+      "max": 106.625167
+    }
+  },
+  {
+    "case": 8,
+    "backend": "fs",
+    "operation": "read",
+    "block_bytes": 32768,
+    "workers": 1,
+    "pattern": "structured",
+    "operations": 131072,
+    "payload_mib": 4096.0,
+    "mib_s": {
+      "median": 2546.7146189784853,
+      "min": 2421.120195155528,
+      "max": 2598.9109070955897
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.5786942500000001,
+      "min": 0.56814525,
+      "max": 0.608657
+    },
+    "p99_ms": {
+      "median": 0.0236255,
+      "min": 0.018167,
+      "max": 0.024916999999999998
+    }
+  },
+  {
+    "case": 8,
+    "backend": "raw",
+    "operation": "read",
+    "block_bytes": 32768,
+    "workers": 1,
+    "pattern": "structured",
+    "operations": 131072,
+    "payload_mib": 4096.0,
+    "mib_s": {
+      "median": 15534.991006418872,
+      "min": 15317.813745287584,
+      "max": 17054.618857540227
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.065702125,
+      "min": 0.060038499999999995,
+      "max": 0.06658924999999999
+    },
+    "p99_ms": {
+      "median": 0.002896,
+      "min": 0.002417,
+      "max": 0.003042
+    }
+  },
+  {
+    "case": 9,
+    "backend": "fs",
+    "operation": "read",
+    "block_bytes": 4194304,
+    "workers": 1,
+    "pattern": "entropy",
+    "operations": 1024,
+    "payload_mib": 4096.0,
+    "mib_s": {
+      "median": 13260.273693092618,
+      "min": 12481.670289317073,
+      "max": 14208.197005087592
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.0831755,
+      "min": 0.07775449999999999,
+      "max": 0.08765374999999999
+    },
+    "p99_ms": {
+      "median": 0.42479199999999995,
+      "min": 0.389042,
+      "max": 0.451
+    }
+  },
+  {
+    "case": 9,
+    "backend": "raw",
+    "operation": "read",
+    "block_bytes": 4194304,
+    "workers": 1,
+    "pattern": "entropy",
+    "operations": 1024,
+    "payload_mib": 4096.0,
+    "mib_s": {
+      "median": 18799.309557143526,
+      "min": 18385.820564311376,
+      "max": 19348.4768861045
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.054350625,
+      "min": 0.052923250000000005,
+      "max": 0.05542975
+    },
+    "p99_ms": {
+      "median": 0.310604,
+      "min": 0.274875,
+      "max": 0.336791
+    }
+  },
+  {
+    "case": 10,
+    "backend": "fs",
+    "operation": "read",
+    "block_bytes": 4194304,
+    "workers": 8,
+    "pattern": "entropy",
+    "operations": 1024,
+    "payload_mib": 4096.0,
+    "mib_s": {
+      "median": 50205.04342650676,
+      "min": 44742.59490119025,
+      "max": 52404.875204046046
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.14804574999999998,
+      "min": 0.1466915,
+      "max": 0.1492195
+    },
+    "p99_ms": {
+      "median": 1.1605415,
+      "min": 0.9210419999999999,
+      "max": 1.188541
+    }
+  },
+  {
+    "case": 10,
+    "backend": "raw",
+    "operation": "read",
+    "block_bytes": 4194304,
+    "workers": 8,
+    "pattern": "entropy",
+    "operations": 1024,
+    "payload_mib": 4096.0,
+    "mib_s": {
+      "median": 65171.10701904558,
+      "min": 61240.2804416112,
+      "max": 65986.64443848982
+    },
+    "cpu_seconds_per_gib": {
+      "median": 0.11281574999999999,
+      "min": 0.10693675,
+      "max": 0.11524074999999999
+    },
+    "p99_ms": {
+      "median": 1.3240625,
+      "min": 1.15,
+      "max": 1.512
+    }
+  }
+]

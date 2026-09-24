@@ -1,0 +1,19 @@
+[package]
+name = "normfs-io-benchmark"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+normfs-fs = { path = "../../normfs-fs" }
+bytes = "1"
+libc = "0.2"
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+
+[[bin]]
+name = "fs_io"
+path = "main.rs"

@@ -1,0 +1,97 @@
+{
+  "head": "d0ce83f258c72e470638e550c1e9e4a421ae1185",
+  "status": "M normfs-wal/c/CMakeLists.txt\n M normfs-wal/c/src/wal_ring.c\n?? benchmarks/fs-comparison-2026-09-21/\n?? benchmarks/fs-driver/\n?? benchmarks/fs-io/\n?? normfs-store/examples/fs_publication.rs\n?? normfs-wal/examples/fs_comparison.rs\n?? scripts/benchmark-fs-io.py\n?? scripts/compare-fs.py\n?? scripts/plot-fs-comparison.py",
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "macos": "27.0",
+  "logical_cpus": 12,
+  "binary_sha256": "ae14309e23bca94f0eeb1ec10e152f753cac0b55ef7776b7c6617fb90b28de96",
+  "source_sha256": "fc2c2bc5b90293024b059aceab07dc0ae12f61dfc9ecd9738f8d3460744c11af",
+  "rounds": 4,
+  "cases": [
+    [
+      "append",
+      32768,
+      1,
+      256,
+      "structured"
+    ],
+    [
+      "append",
+      1048576,
+      1,
+      256,
+      "entropy"
+    ],
+    [
+      "append",
+      4194304,
+      1,
+      128,
+      "entropy"
+    ],
+    [
+      "append",
+      4194304,
+      8,
+      16,
+      "entropy"
+    ],
+    [
+      "publish",
+      32768,
+      8,
+      32,
+      "structured"
+    ],
+    [
+      "publish",
+      1048576,
+      8,
+      32,
+      "entropy"
+    ],
+    [
+      "publish",
+      4194304,
+      1,
+      128,
+      "entropy"
+    ],
+    [
+      "publish",
+      4194304,
+      8,
+      16,
+      "entropy"
+    ],
+    [
+      "read",
+      32768,
+      1,
+      131072,
+      "structured"
+    ],
+    [
+      "read",
+      4194304,
+      1,
+      1024,
+      "entropy"
+    ],
+    [
+      "read",
+      4194304,
+      8,
+      128,
+      "entropy"
+    ]
+  ],
+  "started_at": "2026-09-24T16:54:34+0500",
+  "cpu_scope": "getrusage(RUSAGE_SELF), timed workers only; excludes setup/verification/cleanup",
+  "read_fixture": "64 MiB per client, freshly written and synced; cached, no cache eviction",
+  "barriers": {
+    "append": "file sync per operation",
+    "publish": "file sync, rename, parent sync per operation"
+  },
+  "finished_at": "2026-09-24T16:59:08+0500"
+}
