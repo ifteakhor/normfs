@@ -1,0 +1,14 @@
+{
+  "started": "2026-09-24T15:50:42.001127+05:00",
+  "revision": "9e49e83a9be5e597462d84d3d07fc1ad4cf1bf50",
+  "working_tree_status": " M normfs-wal/c/CMakeLists.txt\n M normfs-wal/c/src/wal_ring.c\n?? benchmarks/\n?? normfs-store/examples/fs_publication.rs\n?? normfs-wal/examples/fs_comparison.rs\n?? scripts/compare-fs.py\n?? scripts/measure-fs-local.py\n?? scripts/plot-fs-comparison.py\n",
+  "os": "macOS-27.0-arm64-arm-64bit",
+  "macos": "27.0",
+  "logical_cpus": 12,
+  "rounds": 4,
+  "cpu_scope": "Whole child process, including setup, warmup, validation and teardown; 100% = one core",
+  "binary_sha256": {
+    "fs_comparison": "e56ec75ea79d1abae9ee29c5dd68eec22eac0d17a760b9ee99341ac1f759d5c3",
+    "fs_publication": "d925da58e85ac3c31846c9e5da048751f383c913c8024cbc249a583f6d9ea2dd"
+  }
+}

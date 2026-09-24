@@ -55,3 +55,9 @@ seconds per GiB and CPU utilization over the same timed interval, alongside
 throughput and commit p99. Sweep worker counts and batch sizes under a fixed
 workload and profile the expensive cases, particularly store publication.
 Keep durability guarantees fixed when attributing performance differences.
+
+A [September 24 follow-up](../benchmarks/fs-local-2026-09-24/README.md)
+adds fresh current-checkout measurements and whole-process CPU accounting on
+macOS 27.0. CPU includes setup and validation, so it does not isolate the FS
+executor's overhead. That run still does not establish a disk ceiling or a
+minimum CPU cost.
