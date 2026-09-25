@@ -6,15 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use uintn::UintN;
 
-use crate::WalFile;
 use crate::ranges::RangeStore;
 use crate::store_file;
+use crate::{DiskUsage, WalFile};
 use normfs_wal::WalStore;
 
 pub struct StoreWriteWorker {
     root_dir: PathBuf,
     wal_store: Arc<WalStore>,
     range_store: Arc<RangeStore>,
+    disk_usage: Arc<DiskUsage>,
     crypto_ctx: Arc<CryptoContext>,
     shutting_down: Arc<AtomicBool>,
 }
@@ -25,11 +26,13 @@ impl StoreWriteWorker {
         crypto_ctx: Arc<CryptoContext>,
         wal_store: Arc<WalStore>,
         range_store: Arc<RangeStore>,
+        disk_usage: Arc<DiskUsage>,
     ) -> Self {
         Self {
             root_dir,
             wal_store,
             range_store,
+            disk_usage,
             crypto_ctx,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
@@ -138,8 +141,15 @@ impl StoreWriteWorker {
             }
         };
 
-        if let Err(e) =
-            store_file::land_local(&self.root_dir, queue_id, file_id, &sealed, true).await
+        if let Err(e) = store_file::land_local(
+            &self.root_dir,
+            queue_id,
+            file_id,
+            &sealed,
+            true,
+            &self.disk_usage,
+        )
+        .await
         {
             if !self.shutting_down.load(Ordering::Relaxed) {
                 log::error!(target: "normfs-store",

@@ -8,6 +8,7 @@ use tokio::io::AsyncWriteExt;
 use uintn::UintN;
 use uuid::Uuid;
 
+use crate::DiskUsage;
 use crate::header::{CompressionType, EncryptionType, FileAuthentication, StoreHeader};
 use crate::store_header_v1::StoreHeaderV1;
 
@@ -141,6 +142,7 @@ pub async fn land_local(
     file_id: &UintN,
     file: &SealedFile,
     fsync: bool,
+    usage: &DiskUsage,
 ) -> io::Result<()> {
     let store_path = queue.to_store_path(root, file_id);
     let parent = store_path
@@ -161,7 +163,9 @@ pub async fn land_local(
     }
     drop(out);
 
-    fs::rename(&temp_path, &store_path).await?;
+    usage
+        .publish(queue, &temp_path, &store_path, file.len() as u64)
+        .await?;
     if fsync {
         fs::File::open(parent).await?.sync_all().await?;
     }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uintn::UintN;
 
+use crate::DiskUsage;
 use crate::ranges::RangeStore;
 use crate::store_file::{self, SealedFile};
 
@@ -30,6 +31,7 @@ pub trait SealedFileSink: Send + Sync {
 pub struct LocalStoreSink {
     root: PathBuf,
     range_store: Arc<RangeStore>,
+    disk_usage: Arc<DiskUsage>,
     store_done_tx: mpsc::UnboundedSender<(QueueId, UintN)>,
     fsync: bool,
 }
@@ -38,12 +40,14 @@ impl LocalStoreSink {
     pub(crate) fn new(
         root: PathBuf,
         range_store: Arc<RangeStore>,
+        disk_usage: Arc<DiskUsage>,
         store_done_tx: mpsc::UnboundedSender<(QueueId, UintN)>,
         fsync: bool,
     ) -> Self {
         Self {
             root,
             range_store,
+            disk_usage,
             store_done_tx,
             fsync,
         }
@@ -58,7 +62,15 @@ impl SealedFileSink for LocalStoreSink {
         file: &'a SealedFile,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            store_file::land_local(&self.root, queue, file_id, file, self.fsync).await?;
+            store_file::land_local(
+                &self.root,
+                queue,
+                file_id,
+                file,
+                self.fsync,
+                &self.disk_usage,
+            )
+            .await?;
             if let Some(last) = file.last_entry_id() {
                 self.range_store
                     .record_range(queue, file_id, &file.entries_before, &last)
