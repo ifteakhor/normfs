@@ -26,8 +26,7 @@ pub trait SealedFileSink: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
-/// The local store directory, as the WAL migration lands a file: temp, sync,
-/// rename, range recorded, offload told.
+/// The local store directory, landed exactly as the WAL migration lands a file.
 pub struct LocalStoreSink {
     root: PathBuf,
     range_store: Arc<RangeStore>,

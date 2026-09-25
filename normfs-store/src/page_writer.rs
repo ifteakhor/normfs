@@ -202,10 +202,8 @@ impl Task {
         }
     }
 
-    /// Compressing, encrypting and signing a page is CPU work that would
-    /// otherwise sit on a runtime worker thread; three queues sealing at once
-    /// on a four-core box starved everything else, including the appenders
-    /// whose pages this is meant to free.
+    /// Off the runtime: three queues sealing at once on a four-core box
+    /// starved everything else, including the appenders whose pages this frees.
     async fn build(&self, runs: FileRuns) -> Option<Built> {
         let first = UintN::from(runs.first_entry_id);
         let last = UintN::from(runs.last_entry_id);
@@ -285,8 +283,6 @@ impl Task {
                         }
                         close_attempts = close_attempts.saturating_add(1);
                         if close_attempts >= self.settings.close_max_attempts {
-                            // Retain this file and keep retrying after the
-                            // caller learns that shutdown is incomplete.
                             self.done.send_replace(Some(false));
                         }
                     }

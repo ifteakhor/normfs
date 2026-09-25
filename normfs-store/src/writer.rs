@@ -102,8 +102,7 @@ impl StoreWriteWorker {
             }
         };
 
-        // Off the runtime for the same reason as the page writer: a file's
-        // worth of zstd and AES on a worker thread stalls every other task.
+        // Off the runtime, as in the page writer.
         let build = {
             let (queue_id, file_id, crypto) =
                 (queue_id.clone(), file_id.clone(), self.crypto_ctx.clone());

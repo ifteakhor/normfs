@@ -275,8 +275,6 @@ impl PersistStore {
         ))
     }
 
-    /// Starts a page-per-file writer for `queue`: its sealed pages become
-    /// store files through `sink`, with no `.wal` in between.
     pub fn start_page_writer(
         &self,
         queue: &QueueId,
@@ -330,9 +328,7 @@ impl PersistStore {
         }
     }
 
-    /// Flushes and stops `queue`'s page writer. `false` when an outstanding file did
-    /// not land within the close budget; it keeps trying, and the pool reports
-    /// the gap until it does.
+    /// As [`PageStoreWriter::close`]; the writer is forgotten only once complete.
     pub async fn close_page_writer(&self, queue: &QueueId) -> bool {
         let writer = self.page_writers.read().unwrap().get(queue).cloned();
         match writer {

@@ -134,8 +134,7 @@ fn compress_and_encrypt(
     Ok(out)
 }
 
-/// Writes `file` under `root` as `queue`'s store file `file_id`: temp file,
-/// sync, rename, then the directory synced so the name survives a crash too.
+/// The directory is synced after the rename so the name survives a crash too.
 pub async fn land_local(
     root: &Path,
     queue: &QueueId,

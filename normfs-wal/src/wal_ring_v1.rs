@@ -585,15 +585,12 @@ impl WalRing {
         unsafe { normfs_wal_page_offset(self.page(page_index), index) as usize }
     }
 
-    /// Where page `page_index` splits into ids below `entry_id` and ids at or
-    /// above it: the whole page when every id is below, the start of entry 0
-    /// when none is. Proved to land between two entries, never inside one.
+    /// `normfs_wal_page_cut` on page `page_index`.
     pub fn page_cut(&self, page_index: usize, entry_id: u64) -> usize {
         unsafe { normfs_wal_page_cut(self.page(page_index), entry_id) }
     }
 
-    /// Index of the first entry of page `page_index` that begins at or after
-    /// byte `from`; `None` when every entry begins before it.
+    /// `normfs_wal_page_first_from` on page `page_index`.
     pub fn page_first_index_from(&self, page_index: usize, from: usize) -> Option<u32> {
         let r = unsafe { normfs_wal_page_first_from(self.page(page_index), from) };
         (r.found != 0).then_some(r.index)

@@ -42,8 +42,7 @@ pub struct NormFS {
     mem: Arc<mem::MemStore>,
     disk_monitor: Option<Arc<DiskMonitor>>,
     cloud_downloader: Option<Arc<CloudDownloader>>,
-    /// The sink a cloud-direct queue lands through; `None` without cloud
-    /// settings, which `new` has already refused for any rule that asks.
+    /// `None` without cloud settings; `new` refuses any rule that asks for cloud then.
     cloud_sink: Option<Arc<normfs_cloud::CloudSink>>,
     memory_pointers: Arc<memory_pointers::MemoryPointers>,
     memory_pointer_task: JoinHandle<()>,
@@ -1047,11 +1046,10 @@ impl NormFS {
         }
     }
 
-    /// Where a cloud-direct queue resumes: the pointer names the last file
-    /// landed and its last id. The bucket is asked once for a later file, for
-    /// the crash between a PUT and the pointer write, since the next file
-    /// written at a lower id would overwrite acked records. An unreachable
-    /// bucket prevents writing until its next unused file id is known.
+    /// The pointer names the last landed file. The bucket is asked once for a
+    /// later one, for a crash between the PUT and the pointer write: a file
+    /// written at a lower id would overwrite acked records. Until the bucket
+    /// answers, the queue does not write.
     async fn continue_cloud_queue(
         &self,
         queue: &QueueId,
@@ -1140,12 +1138,9 @@ impl NormFS {
                             header,
                             wal_settings.clone(),
                             last_entry_id.clone(),
-                            // Live. The records reach the file as pages, from the same
-                            // memory they were accepted into. Rotation is decided at
-                            // enqueue time, before the bytes enter a page, and the
-                            // writer carries that decision out rather than making its
-                            // own -- which is what keeps a page's bytes belonging to
-                            // exactly one file.
+                            // Rotation is decided at enqueue, before the bytes enter a
+                            // page, and the writer only carries it out: that keeps a
+                            // page's bytes in exactly one file.
                             self.mem.pool(queue),
                         )
                         .await?;

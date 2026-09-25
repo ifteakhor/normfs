@@ -46,7 +46,6 @@ impl Persist {
         !self.wal && !self.store && !self.cloud
     }
 
-    /// Who takes pages out of this queue's pool.
     pub fn drainer(self) -> Drainer {
         if self.wal {
             Drainer::Wal
@@ -215,7 +214,6 @@ impl QueueSettings {
         }
     }
 
-    /// The same rules with the default queue's pipeline replaced.
     pub fn with_default_persist(mut self, persist: Persist) -> Self {
         self.default_config.persist = persist;
         self

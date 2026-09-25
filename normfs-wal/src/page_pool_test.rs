@@ -1443,7 +1443,6 @@ async fn seal_cuts_the_active_page_between_entries_and_the_next_append_starts_a_
     );
     assert_eq!(pool.epoch(), 1, "and does not open an empty file");
 
-    // Same page, next file: no rotation, stamped with the new epoch.
     let p2 = pool.place(2, &small).await.unwrap();
     assert_eq!((p2.rotate, p2.epoch), (RotateHint::None, 1));
     pool.place(3, &small).await.unwrap();
