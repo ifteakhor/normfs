@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "normfs-fs"
-version = "0.3.3"
+version = "0.3.5"
 dependencies = [
  "bytes",
  "cc",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "uintn"
-version = "0.3.3"
+version = "0.3.5"
 dependencies = [
  "bytes",
  "cc",

@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Barrier};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn cpu() -> f64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -34,9 +34,9 @@ fn control(file: &File, command: libc::c_int, value: libc::c_int) {
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     assert_eq!(
-        args.len(),
-        5,
-        "ssd_io BLOCK_BYTES CLIENTS TOTAL_MIB TEMP_PARENT"
+        args.len() - usize::from(args.last().is_some_and(|arg| arg == "--smoke")),
+        6,
+        "ssd_io BLOCK_BYTES CLIENTS FIXTURE_MIB TEMP_PARENT MIN_SECONDS [--smoke]"
     );
     let block: usize = args[1].parse().unwrap();
     let clients: usize = args[2].parse().unwrap();
@@ -46,6 +46,14 @@ fn main() {
     assert!(total >= clients * block && total <= 64usize << 30);
     assert_eq!(total % (clients * block), 0);
     let count = total / clients / block;
+    let minimum_seconds: f64 = args[5].parse().unwrap();
+    let smoke = args.last().is_some_and(|arg| arg == "--smoke");
+    assert!(minimum_seconds.is_finite() && minimum_seconds > 0.0 && minimum_seconds <= 3600.0);
+    assert!(
+        smoke || minimum_seconds >= 30.0,
+        "measurements must run for at least 30 seconds"
+    );
+    let duration = Duration::from_secs_f64(minimum_seconds);
     let mut state = 0x9e3779b97f4a7c15u64;
     let data: Arc<Vec<Vec<u8>>> = Arc::new(
         (0..16)
@@ -87,7 +95,10 @@ fn main() {
                     let mut buffer = vec![0u8; block];
                     ready.wait();
                     go.wait();
-                    for index in 0..count {
+                    let active = Instant::now();
+                    let mut operations = 0;
+                    while operations < count || active.elapsed() < duration {
+                        let index = operations % count;
                         let offset = (index * block) as u64;
                         if operation == "write" {
                             file.write_all_at(&data[index % data.len()], offset)
@@ -95,11 +106,13 @@ fn main() {
                         } else {
                             file.read_exact_at(&mut buffer, offset).unwrap();
                         }
+                        operations += 1;
                     }
+                    let active_seconds = active.elapsed().as_secs_f64();
                     if operation == "write" {
                         control(&file, libc::F_FULLFSYNC, 0);
                     }
-                    buffer
+                    (buffer, operations, active_seconds)
                 })
             })
             .collect();
@@ -110,9 +123,21 @@ fn main() {
         let buffers: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let seconds = start.elapsed().as_secs_f64();
         let cpu_seconds = cpu() - cpu_start;
+        let worker_operations: Vec<_> = buffers
+            .iter()
+            .map(|(_, operations, _)| *operations)
+            .collect();
+        let worker_active_seconds: Vec<_> =
+            buffers.iter().map(|(_, _, seconds)| *seconds).collect();
+        assert!(
+            worker_active_seconds
+                .iter()
+                .all(|seconds| *seconds >= minimum_seconds)
+        );
+        let transferred = worker_operations.iter().sum::<usize>() * block;
         if operation == "read" {
-            for buffer in buffers {
-                assert_eq!(buffer, data[(count - 1) % data.len()]);
+            for (buffer, operations, _) in buffers {
+                assert_eq!(buffer, data[((operations - 1) % count) % data.len()]);
             }
         } else {
             // Spot checks stay outside timing so memory comparisons cannot limit SSD bandwidth.
@@ -128,9 +153,12 @@ fn main() {
         }
         results.push(serde_json::json!({
             "operation":operation, "block_bytes":block, "clients":clients,
-            "total_bytes":total, "seconds":seconds, "mib_s":total as f64/1048576.0/seconds,
-            "gb_s":total as f64/1e9/seconds, "cpu_seconds":cpu_seconds,
-            "cpu_seconds_per_gib":cpu_seconds/(total as f64/1073741824.0),
+            "total_bytes":transferred, "fixture_bytes":total, "seconds":seconds,
+            "minimum_seconds":minimum_seconds, "smoke":smoke,
+            "worker_operations":worker_operations, "worker_active_seconds":worker_active_seconds,
+            "mib_s":transferred as f64/1048576.0/seconds,
+            "gb_s":transferred as f64/1e9/seconds, "cpu_seconds":cpu_seconds,
+            "cpu_seconds_per_gib":cpu_seconds/(transferred as f64/1073741824.0),
             "nocache":true, "full_sync_on_write":true, "spot_checks_passed":true
         }));
     }

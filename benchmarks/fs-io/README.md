@@ -1,5 +1,9 @@
 # Filesystem layer versus raw I/O
 
+**Current results and protocol:** [minimum-duration measurements](DURATION.md).
+The scripts now default to 35 seconds per worker. The measurements and method
+below describe the historical September 24 fixed-work run.
+
 This standalone harness compares direct file operations with the public
 `normfs-fs` API. It does not instantiate the NormFS application or depend on
 `normfs`, `normfs-wal` or `normfs-store`. There are no WAL_STORE/STORE modes,
@@ -10,7 +14,7 @@ A separate [uncached SSD throughput test](SSD.md) measures 32 GiB bulk transfers
 through APFS with a final write flush. Its different sync frequency means those
 rates cannot be used directly as the denominator for this FS-overhead test.
 
-## Measurements
+## Historical September 24 measurements
 
 The [PNG](results-2026-09-24/raw-io-vs-fs.png),
 [median table](results-2026-09-24/table.md),
@@ -112,7 +116,7 @@ with one or eight independent clients. It deliberately omits the application
 policies: sync is enabled for every measured write. The station uses a published
 NormFS dependency and is not the application being executed by this harness.
 
-## Reproduction
+## Running the current duration-controlled harness
 
 From the repository root, with Cargo on PATH and Matplotlib installed for Python:
 
@@ -125,8 +129,8 @@ python3 scripts/plot-fs-io.py /tmp/fs-io-results
 The output directory must not exist. The binary can also run individual cases:
 
 ```sh
-benchmarks/fs-io/target/release/fs_io raw append 4194304 1 128 entropy
-benchmarks/fs-io/target/release/fs_io fs append 4194304 1 128 entropy
+benchmarks/fs-io/target/release/fs_io raw append 4194304 1 35 entropy
+benchmarks/fs-io/target/release/fs_io fs append 4194304 1 35 entropy
 ```
 
 This benchmark cannot establish maximum disk bandwidth or minimum possible CPU

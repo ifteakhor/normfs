@@ -19,9 +19,15 @@ def main():
     parser.add_argument("--extra", type=Path, help="Additional concurrency sweep results")
     args = parser.parse_args()
     rows = [json.loads(line) for line in (args.results / "runs.jsonl").read_text().splitlines()]
+    metadata = [json.loads((args.results / "metadata.json").read_text())]
     if args.extra:
+        metadata.append(json.loads((args.extra / "metadata.json").read_text()))
         rows += [json.loads(line) for line in (args.extra / "runs.jsonl").read_text().splitlines()]
-    assert len(rows) == (30 if args.extra else 18)
+    assert len(rows) == sum(len(meta["cases"]) * meta["rounds"] * 2 for meta in metadata)
+    minimum_seconds = metadata[0].get("minimum_seconds")
+    if minimum_seconds is not None:
+        assert minimum_seconds >= 30
+        assert all(not row["smoke"] and row["seconds"] >= minimum_seconds and min(row["worker_active_seconds"]) >= minimum_seconds for row in rows)
     cases = sorted({(row["block_bytes"], row["clients"]) for row in rows})
     colors = {"write": "#d94b4b", "read": "#327ac2"}
     summary = []
@@ -31,7 +37,7 @@ def main():
             assert len(values) == 3 and {row["round"] for row in values} == {1, 2, 3}
             assert all(row["spot_checks_passed"] and row["nocache"] for row in values)
             item = {"block_bytes": block, "clients": clients, "operation": operation}
-            for metric in ["gb_s", "mib_s", "cpu_seconds_per_gib"]:
+            for metric in ["gb_s", "mib_s", "cpu_seconds_per_gib", "seconds", "total_bytes"]:
                 numbers = [row[metric] for row in values]
                 item[metric] = {"median": median(numbers), "min": min(numbers), "max": max(numbers)}
             summary.append(item)
@@ -54,7 +60,8 @@ def main():
         ax.set_axisbelow(True)
         ax.spines[["top", "right"]].set_visible(False)
     fig.suptitle("Uncached sequential SSD throughput", fontsize=21, y=0.97)
-    fig.text(0.5, 0.9, "macOS · APFS · 32 GiB/run · 3 rounds · medians; whiskers = min–max", ha="center", fontsize=12)
+    workload = f"≥{minimum_seconds:g} s/client/phase · 32 GiB fixture" if minimum_seconds is not None else "32 GiB/run"
+    fig.text(0.5, 0.9, f"macOS · APFS · {workload} · 3 rounds · medians; whiskers = min–max", ha="center", fontsize=12)
     fig.legend(handles=[Patch(color=color, label=operation.capitalize()) for operation, color in colors.items()], loc="upper center", bbox_to_anchor=(0.5, 0.88), ncol=2, frameon=False, fontsize=12)
     fig.text(0.5, 0.06, "F_NOCACHE on every file · F_FULLFSYNC at end of each written file · no NormFS or FS layer\nGB/s = decimal 10⁹ bytes/s. Measured filesystem throughput; not a proven hardware maximum.\nDifferent sync frequency from the FS-layer benchmark: those rates are not directly comparable.", ha="center", fontsize=10, linespacing=1.5)
     fig.subplots_adjust(left=0.07, right=0.98, top=0.74, bottom=0.22, wspace=0.23)

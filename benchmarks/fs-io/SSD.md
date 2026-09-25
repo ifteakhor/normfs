@@ -1,5 +1,10 @@
 # Uncached SSD throughput on the Mac
 
+**Current results and protocol:** [minimum-duration measurements](DURATION.md).
+The historical September 24 results below used fixed transfer volumes and
+allowed short reads. Current scripts require at least 30 seconds of active I/O
+for every worker in both phases and default to 35 seconds.
+
 This measures bulk filesystem throughput on the internal SSD, without NormFS,
 WAL, Store or the FS layer. It complements the [FS overhead comparison](README.md),
 but uses a different sync frequency: a full flush at the end of each file,
@@ -82,17 +87,5 @@ steady-state endurance workload here.
 
 ## Reproduction
 
-On macOS, from the repository root:
-
-```sh
-cargo build --release --locked --manifest-path benchmarks/fs-io/Cargo.toml --features macos-ssd --bin ssd_io
-python3 scripts/benchmark-ssd.py /path/on/test/volume/ssd-results
-python3 scripts/benchmark-ssd.py /path/on/test/volume/ssd-results/extended --extended
-python3 scripts/plot-ssd.py /path/on/test/volume/ssd-results --extra /path/on/test/volume/ssd-results/extended
-```
-
-The output directory must not already exist. Plotting needs Matplotlib. The
-macOS-only binary is opt-in so the existing FS-only build stays portable. The
-measurement creates at most 32 GiB of temporary payload at once and writes
-480 GiB across all fifteen cases; read traffic is another 480 GiB plus spot checks.
-Successful completion removes the payload and retains only small result files.
+Use [the current duration-controlled commands](DURATION.md#reproduction).
+The historical fixed-volume protocol is available at revision `40388cc`.

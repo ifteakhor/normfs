@@ -38,10 +38,14 @@ def main():
     assert len(runs) == len(metadata["cases"]) * 2 * metadata["rounds"]
     assert all(len(rows) == metadata["rounds"] for rows in grouped.values())
     assert all(row["verified"] and row["quantiles_checked"] for row in runs)
+    minimum_seconds = metadata.get("minimum_seconds")
+    if minimum_seconds is not None:
+        assert minimum_seconds >= 30
+        assert all(not row["smoke"] and row["seconds"] >= minimum_seconds and min(row["worker_active_seconds"]) >= minimum_seconds for row in runs)
     summary = []
     for (case, backend), rows in sorted(grouped.items()):
-        item = {key: rows[0][key] for key in ["case", "backend", "operation", "block_bytes", "workers", "pattern", "operations", "payload_mib"]}
-        for metric, _ in METRICS:
+        item = {key: rows[0][key] for key in ["case", "backend", "operation", "block_bytes", "workers", "pattern"]}
+        for metric in [key for key, _ in METRICS] + ["operations", "payload_mib", "seconds"]:
             values = [row[metric] for row in rows]
             item[metric] = {"median": median(values), "min": min(values), "max": max(values)}
         summary.append(item)
@@ -53,6 +57,8 @@ def main():
         labels = [f"{label(indexed[case, 'raw'])} · {indexed[case, 'raw']['workers']} client(s)" for case in cases]
         for metric_index, (metric, title) in enumerate(METRICS):
             ax = axes[operation_index, metric_index]
+            if operation == "read" and metric == "p99_ms" and minimum_seconds is not None:
+                title = "Sampled-offset p99 · ms · lower is better ↓"
             maximum = max(indexed[case, backend][metric]["max"] for case in cases for backend in COLORS)
             for backend_index, backend in enumerate(COLORS):
                 values = [indexed[case, backend][metric]["median"] for case in cases]
@@ -80,9 +86,11 @@ def main():
                 names = {"append": "Append + file sync", "publish": "Create + write + file sync\n+ rename + directory sync", "read": "Cached reads · NOT SSD bandwidth"}
                 ax.set_ylabel(names[operation], fontsize=11, labelpad=14)
     fig.suptitle("Raw I/O vs FS layer — filesystem operations only", fontsize=21, x=0.5, y=0.98)
-    fig.text(0.5, 0.94, f"Mac · macOS {metadata['macos']} · {metadata['rounds']} paired rounds · medians; whiskers = min–max · equal sync barriers", ha="center", fontsize=12)
+    duration_label = f" · ≥{minimum_seconds:g} s/client" if minimum_seconds is not None else ""
+    fig.text(0.5, 0.94, f"Mac · macOS {metadata['macos']} · {metadata['rounds']} paired rounds{duration_label} · medians; whiskers = min–max · equal sync barriers", ha="center", fontsize=12)
     fig.legend(handles=[Patch(color=COLORS[key], label=NAMES[key]) for key in COLORS], loc="upper center", bbox_to_anchor=(0.5, 0.93), ncol=2, frameon=False, fontsize=12)
-    fig.text(0.5, 0.038, "Raw I/O: dedicated blocking threads  |  FS layer: public async API + default worker pool\n32 KiB: synthetic structured data; 1/4 MiB: deterministic entropy. No NormFS application, WAL, Store, compression or encryption.\nReads: 64 MiB fixture/client, cached; 4 GiB logical traffic/run. CPU excludes fixture creation, verification and cleanup.", ha="center", va="center", fontsize=10, linespacing=1.6)
+    read_label = f"≥{minimum_seconds:g} s/client; read p99 sampled every 64 ops" if minimum_seconds is not None else "4 GiB logical traffic/run"
+    fig.text(0.5, 0.038, f"Raw I/O: dedicated blocking threads  |  FS layer: public async API + default worker pool\n32 KiB: synthetic structured data; 1/4 MiB: deterministic entropy. No NormFS application, WAL, Store, compression or encryption.\nReads: 64 MiB fixture/client, cached; {read_label}. CPU excludes fixture creation, verification and cleanup.", ha="center", va="center", fontsize=10, linespacing=1.6)
     fig.subplots_adjust(left=0.15, right=0.98, top=0.865, bottom=0.11, wspace=0.17, hspace=0.42)
     fig.savefig(args.results / "raw-io-vs-fs.png", dpi=170, facecolor="white")
     plt.close(fig)

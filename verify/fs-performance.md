@@ -1,5 +1,10 @@
 # FS performance: what the Mac measurements establish
 
+The [September 25 duration-controlled measurements](../benchmarks/fs-io/DURATION.md)
+replace fixed byte counts with at least 35 seconds of active I/O per worker.
+Both the FS comparison and SSD phases enforce the duration in the binary and
+runner; older results below remain historical evidence.
+
 The latest [filesystem-only comparison](../benchmarks/fs-io/README.md) isolates
 the public FS layer against direct blocking file operations, with matching sync
 boundaries and timed-phase CPU accounting. It includes 32 KiB and 4 MiB sizes

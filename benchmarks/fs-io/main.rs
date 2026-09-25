@@ -4,10 +4,18 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 
 const FIXTURE: usize = 64 << 20;
+const MAX_WRITE_BYTES: usize = 64usize << 30;
+
+struct Completed {
+    samples: Vec<f64>,
+    buffer: Vec<u8>,
+    operations: usize,
+    active_seconds: f64,
+}
 
 fn cpu() -> (f64, f64) {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -51,10 +59,9 @@ struct Work {
     path: PathBuf,
     file: Arc<File>,
     ino: u64,
-    destinations: Vec<(PathBuf, PathBuf)>,
 }
 
-fn prepare(root: &Path, worker: usize, op: &str, count: usize, data: &[Bytes]) -> Work {
+fn prepare(root: &Path, worker: usize, op: &str, data: &[Bytes]) -> Work {
     let dir = root.join(worker.to_string());
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("data");
@@ -78,9 +85,6 @@ fn prepare(root: &Path, worker: usize, op: &str, count: usize, data: &[Bytes]) -
         path,
         file: Arc::new(file),
         ino,
-        destinations: (0..if op == "publish" { count } else { 0 })
-            .map(|i| (dir.join(format!("{i}.tmp")), dir.join(format!("{i}.bin"))))
-            .collect(),
     }
 }
 
@@ -106,11 +110,23 @@ fn raw_publish(tmp: &Path, dst: &Path, parent: &Path, data: &[u8]) {
     File::open(parent).unwrap().sync_all().unwrap();
 }
 
-fn raw_worker(work: &Work, data: &[Bytes], op: &str, count: usize) -> (Vec<f64>, Vec<u8>) {
+fn raw_worker(
+    work: &Work,
+    data: &[Bytes],
+    op: &str,
+    duration: Duration,
+    limit: usize,
+) -> Completed {
     let size = data[0].len();
     let mut buffer = vec![0; size];
-    let mut samples = Vec::with_capacity(count);
-    for index in 0..count {
+    let mut samples = Vec::with_capacity(4096);
+    let active = Instant::now();
+    let mut index = 0;
+    while active.elapsed() < duration {
+        assert!(
+            op == "read" || index < limit,
+            "write footprint cap reached before deadline"
+        );
         let start = Instant::now();
         match op {
             "append" => {
@@ -120,8 +136,11 @@ fn raw_worker(work: &Work, data: &[Bytes], op: &str, count: usize) -> (Vec<f64>,
                 work.file.sync_all().unwrap();
             }
             "publish" => {
-                let (tmp, dst) = &work.destinations[index];
-                raw_publish(tmp, dst, &work.dir, &data[index % data.len()]);
+                let (tmp, dst) = (
+                    work.dir.join(format!("{index}.tmp")),
+                    work.dir.join(format!("{index}.bin")),
+                );
+                raw_publish(&tmp, &dst, &work.dir, &data[index % data.len()]);
             }
             "read" => {
                 let offset = (index % (FIXTURE / size)) * size;
@@ -135,9 +154,17 @@ fn raw_worker(work: &Work, data: &[Bytes], op: &str, count: usize) -> (Vec<f64>,
             }
             _ => unreachable!(),
         }
-        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        if op != "read" || index % 64 == 0 {
+            samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        index += 1;
     }
-    (samples, buffer)
+    Completed {
+        samples,
+        buffer,
+        operations: index,
+        active_seconds: active.elapsed().as_secs_f64(),
+    }
 }
 
 async fn fs_worker(
@@ -145,13 +172,20 @@ async fn fs_worker(
     work: &Work,
     data: &[Bytes],
     op: &str,
-    count: usize,
+    duration: Duration,
+    limit: usize,
     mut reader: Option<normfs_fs::ReadFile>,
-) -> (Vec<f64>, Vec<u8>) {
+) -> Completed {
     let size = data[0].len();
     let mut buffer = vec![0; size];
-    let mut samples = Vec::with_capacity(count);
-    for index in 0..count {
+    let mut samples = Vec::with_capacity(4096);
+    let active = Instant::now();
+    let mut index = 0;
+    while active.elapsed() < duration {
+        assert!(
+            op == "read" || index < limit,
+            "write footprint cap reached before deadline"
+        );
         let start = Instant::now();
         match op {
             "append" => {
@@ -169,7 +203,10 @@ async fn fs_worker(
                 assert!(matches!(result, AppendOutcome::Committed));
             }
             "publish" => {
-                let (tmp, dst) = &work.destinations[index];
+                let (tmp, dst) = (
+                    work.dir.join(format!("{index}.tmp")),
+                    work.dir.join(format!("{index}.bin")),
+                );
                 fs.publish(
                     PublishSpec {
                         tmp: tmp.clone(),
@@ -195,9 +232,17 @@ async fn fs_worker(
             }
             _ => unreachable!(),
         }
-        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        if op != "read" || index % 64 == 0 {
+            samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        index += 1;
     }
-    (samples, buffer)
+    Completed {
+        samples,
+        buffer,
+        operations: index,
+        active_seconds: active.elapsed().as_secs_f64(),
+    }
 }
 
 fn verify(work: &Work, data: &[Bytes], op: &str, count: usize, buffer: &[u8]) {
@@ -216,7 +261,10 @@ fn verify(work: &Work, data: &[Bytes], op: &str, count: usize, buffer: &[u8]) {
                 .read_exact_at(&mut buffer, (index * size) as u64)
                 .unwrap();
         } else {
-            let (tmp, dst) = &work.destinations[index];
+            let (tmp, dst) = (
+                work.dir.join(format!("{index}.tmp")),
+                work.dir.join(format!("{index}.bin")),
+            );
             assert!(!tmp.exists());
             let file = File::open(dst).unwrap();
             assert_eq!(file.metadata().unwrap().len(), size as u64);
@@ -233,24 +281,31 @@ fn verify(work: &Work, data: &[Bytes], op: &str, count: usize, buffer: &[u8]) {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     assert_eq!(
-        args.len(),
+        args.len() - usize::from(args.last().is_some_and(|arg| arg == "--smoke")),
         7,
-        "fs_io raw|fs append|publish|read BYTES WORKERS OPS_PER_WORKER PATTERN"
+        "fs_io raw|fs append|publish|read BYTES WORKERS MIN_SECONDS PATTERN [--smoke]"
     );
     let backend = &args[1];
     let op = args[2].clone();
     let size: usize = args[3].parse().unwrap();
     let workers: usize = args[4].parse().unwrap();
-    let count: usize = args[5].parse().unwrap();
+    let minimum_seconds: f64 = args[5].parse().unwrap();
+    let smoke = args.last().is_some_and(|arg| arg == "--smoke");
+    assert!(minimum_seconds.is_finite() && minimum_seconds > 0.0 && minimum_seconds <= 3600.0);
+    assert!(
+        smoke || minimum_seconds >= 30.0,
+        "measurements must run for at least 30 seconds"
+    );
+    let duration = Duration::from_secs_f64(minimum_seconds);
+    let limit = MAX_WRITE_BYTES / size / workers;
     assert!(matches!(backend.as_str(), "raw" | "fs"));
     assert!(matches!(op.as_str(), "append" | "publish" | "read"));
     assert!([32 << 10, 1 << 20, 4 << 20].contains(&size));
     assert!([1, 8].contains(&workers));
-    assert!((1..=131072).contains(&count));
     let data = corpus(size, &args[6]);
     let tmp = tempfile::tempdir().unwrap();
     let works: Vec<_> = (0..workers)
-        .map(|w| Arc::new(prepare(tmp.path(), w, &op, count, &data)))
+        .map(|w| Arc::new(prepare(tmp.path(), w, &op, &data)))
         .collect();
     File::open(tmp.path()).unwrap().sync_all().unwrap();
     File::open(tmp.path().parent().unwrap())
@@ -273,7 +328,7 @@ async fn main() {
                 std::thread::spawn(move || {
                     ready.wait();
                     go.wait();
-                    raw_worker(&work, &data, &op, count)
+                    raw_worker(&work, &data, &op, duration, limit)
                 })
             })
             .collect();
@@ -307,7 +362,7 @@ async fn main() {
                 };
                 ready.wait().await;
                 go.wait().await;
-                fs_worker(&fs, &work, &data, &op, count, reader).await
+                fs_worker(&fs, &work, &data, &op, duration, limit, reader).await
             }));
         }
         ready.wait().await;
@@ -323,20 +378,34 @@ async fn main() {
         (elapsed, after.0 - before.0, after.1 - before.1, done)
     };
     let mut samples = Vec::new();
-    for (work, (latencies, buffer)) in works.iter().zip(completed) {
-        verify(work, &data, &op, count, &buffer);
-        samples.extend(latencies);
+    let mut worker_operations = Vec::new();
+    let mut worker_active_seconds = Vec::new();
+    for (work, done) in works.iter().zip(completed) {
+        assert!(done.active_seconds >= minimum_seconds);
+        assert!(done.operations > 0);
+        verify(work, &data, &op, done.operations, &done.buffer);
+        let expected_samples = if op == "read" {
+            done.operations.div_ceil(64)
+        } else {
+            done.operations
+        };
+        assert_eq!(done.samples.len(), expected_samples);
+        worker_operations.push(done.operations);
+        worker_active_seconds.push(done.active_seconds);
+        samples.extend(done.samples);
     }
-    assert_eq!(samples.len(), workers * count);
+    let operations: usize = worker_operations.iter().sum();
     samples.sort_by(f64::total_cmp);
     let percentile =
         |p: f64| samples[((samples.len() as f64 * p).ceil() as usize).saturating_sub(1)];
-    let mib = (size * workers * count) as f64 / 1048576.0;
+    let mib = (size * operations) as f64 / 1048576.0;
     println!(
         "RESULT {}",
         serde_json::json!({
             "backend":backend, "operation":op, "block_bytes":size, "workers":workers,
-            "operations":workers*count, "pattern":args[6], "payload_mib":mib,
+            "operations":operations, "minimum_seconds":minimum_seconds, "smoke":smoke,
+            "worker_operations":worker_operations, "worker_active_seconds":worker_active_seconds,
+            "latency_sample_stride":if op == "read" {64} else {1}, "pattern":args[6], "payload_mib":mib,
             "seconds":elapsed, "mib_s":mib/elapsed, "user_seconds":user,
             "system_seconds":system, "cpu_percent":100.0*(user+system)/elapsed,
             "cpu_seconds_per_gib":(user+system)/(mib/1024.0),
