@@ -1,9 +1,0 @@
-PASS: 36 runs; 4 profiled and 2 disabled rounds per variant and queue count.
-PASS: all publication rates and summary medians/ranges recomputed from raw records.
-PASS: 384 process/read/file-sync counts per profiled run; 384 directory-sync counts per stronger variant.
-PASS: disabled controls record zero counts and zero stage time.
-PASS: diagnostic FS C sources byte-identical to working-tree originals.
-PASS: Python syntax and probe rustfmt check.
-Probe concurrent-count/reset/disabled test passed before measurements.
-Both release builds passed --locked --offline before measurements.
-Chart visually inspected.
