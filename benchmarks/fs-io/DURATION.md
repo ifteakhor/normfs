@@ -1,5 +1,7 @@
 # Measurements with a minimum I/O duration
 
+**Latest results:** [after read-ahead](READ-AHEAD.md), same protocol, same day.
+
 The September 24 fixed-volume runs could finish cached reads in a fraction of a
 second and uncached SSD reads in roughly 7–15 seconds. A fixed byte count was
 not an adequate duration requirement. The current binaries and runners require

@@ -1,6 +1,7 @@
 # Filesystem layer versus raw I/O
 
-**Current results and protocol:** [minimum-duration measurements](DURATION.md).
+**Current results:** [after read-ahead](READ-AHEAD.md); protocol in
+[minimum-duration measurements](DURATION.md).
 The scripts now default to 35 seconds per worker. The measurements and method
 below describe the historical September 24 fixed-work run.
 

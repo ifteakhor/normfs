@@ -18,4 +18,4 @@ target/
 
 # Proof build directories
 build-verify/
-.wp-cache/
+.wpcache/

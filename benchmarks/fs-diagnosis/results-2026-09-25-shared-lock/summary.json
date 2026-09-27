@@ -1,0 +1,1406 @@
+[
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "seconds",
+    "median": 1.5640695625,
+    "minimum": 1.5306914169999999,
+    "maximum": 1.6241958749999998
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "publish_mib_s",
+    "median": 245.54912741395339,
+    "minimum": 236.42468615431008,
+    "maximum": 250.86702370919483
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "user_seconds",
+    "median": 1.5163234999999997,
+    "minimum": 1.4373940000000047,
+    "maximum": 1.7585520000000017
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "system_seconds",
+    "median": 0.47695299999999996,
+    "minimum": 0.4367100000000006,
+    "maximum": 0.5846
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "admission_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "queue_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "open_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "write_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "file_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "close_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "stat_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "rename_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dir_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "other_plan_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "mkdir_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "read_wal_ms_per_file",
+    "median": 0.16440467317708335,
+    "minimum": 0.14862637760416667,
+    "maximum": 0.1883114192708333
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "process_ms_per_file",
+    "median": 16.235949807291664,
+    "minimum": 15.892608382812499,
+    "maximum": 16.865821200520834
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_write_await_ms_per_file",
+    "median": 0.23910920572916666,
+    "minimum": 0.2042015859375,
+    "maximum": 0.39993697656250005
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_file_sync_await_ms_per_file",
+    "median": 9.318032653645833,
+    "minimum": 8.6997497734375,
+    "maximum": 9.508736098958334
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_rename_await_ms_per_file",
+    "median": 0.9705500377604166,
+    "minimum": 0.8930991562499999,
+    "maximum": 1.1576871848958332
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_dir_queue_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_dir_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "seconds",
+    "median": 1.5770209375,
+    "minimum": 1.529805584,
+    "maximum": 1.633877292
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "publish_mib_s",
+    "median": 243.50496761095476,
+    "minimum": 235.02376945942646,
+    "maximum": 251.01228810784625
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "user_seconds",
+    "median": 1.5580534999999998,
+    "minimum": 1.4408899999999996,
+    "maximum": 1.585661
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "system_seconds",
+    "median": 0.46346400000000054,
+    "minimum": 0.44198199999999943,
+    "maximum": 0.4888119999999998
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "admission_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "queue_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "open_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "write_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "file_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "close_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "stat_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "rename_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dir_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "other_plan_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "mkdir_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "read_wal_ms_per_file",
+    "median": 0.15934277864583335,
+    "minimum": 0.15303547135416665,
+    "maximum": 0.1766932395833333
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "process_ms_per_file",
+    "median": 16.373512868489584,
+    "minimum": 15.869476432291664,
+    "maximum": 16.9685730234375
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_write_await_ms_per_file",
+    "median": 0.22312033072916665,
+    "minimum": 0.19420792447916668,
+    "maximum": 0.42422915625
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_file_sync_await_ms_per_file",
+    "median": 9.17761542578125,
+    "minimum": 8.8569275,
+    "maximum": 9.611639731770833
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_rename_await_ms_per_file",
+    "median": 1.0970507955729167,
+    "minimum": 1.004537875,
+    "maximum": 1.3134585468750002
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_dir_queue_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_dir_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "seconds",
+    "median": 2.8016614165,
+    "minimum": 2.752756625,
+    "maximum": 2.874936542
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "publish_mib_s",
+    "median": 137.0668482487922,
+    "minimum": 133.56816555431297,
+    "maximum": 139.49653104549336
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "user_seconds",
+    "median": 1.5507635000000022,
+    "minimum": 1.5180030000000002,
+    "maximum": 1.6898119999999999
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "system_seconds",
+    "median": 0.572711,
+    "minimum": 0.5206979999999994,
+    "maximum": 0.632138
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "admission_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "queue_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "open_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "write_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "file_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "close_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "stat_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "rename_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dir_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "other_plan_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "mkdir_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "read_wal_ms_per_file",
+    "median": 0.16395072916666667,
+    "minimum": 0.1563500364583333,
+    "maximum": 0.17013409114583333
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "process_ms_per_file",
+    "median": 29.082758851562495,
+    "minimum": 28.591965723958335,
+    "maximum": 29.857001276041668
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_write_await_ms_per_file",
+    "median": 2.3590495169270835,
+    "minimum": 2.2728044791666666,
+    "maximum": 2.4389089609375003
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_file_sync_await_ms_per_file",
+    "median": 11.616538194010417,
+    "minimum": 11.215310747395835,
+    "maximum": 11.689452609375001
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_rename_await_ms_per_file",
+    "median": 0.6017794609375,
+    "minimum": 0.574183921875,
+    "maximum": 0.6807694348958333
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_dir_queue_ms_per_file",
+    "median": 0.01174887890625,
+    "minimum": 0.01032315625,
+    "maximum": 0.017071075520833333
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_dir_sync_ms_per_file",
+    "median": 7.27953645703125,
+    "minimum": 7.180083026041667,
+    "maximum": 7.498304695312501
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "seconds",
+    "median": 2.923923167,
+    "minimum": 2.9176645,
+    "maximum": 2.955148
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "publish_mib_s",
+    "median": 131.33077916303176,
+    "minimum": 129.94273044869496,
+    "maximum": 131.61211647192474
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "user_seconds",
+    "median": 1.6513724999999981,
+    "minimum": 1.582516,
+    "maximum": 1.8058770000000024
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "system_seconds",
+    "median": 0.5844729999999994,
+    "minimum": 0.5495009999999994,
+    "maximum": 0.6384919999999998
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "admission_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "queue_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "open_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "write_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "file_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "close_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "stat_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "rename_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dir_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "other_plan_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "mkdir_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "read_wal_ms_per_file",
+    "median": 0.17262350520833333,
+    "minimum": 0.16684029947916668,
+    "maximum": 0.1845942890625
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "process_ms_per_file",
+    "median": 30.355388355468754,
+    "minimum": 30.280111744791668,
+    "maximum": 30.7084631015625
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_write_await_ms_per_file",
+    "median": 2.17484669921875,
+    "minimum": 1.9604229687499999,
+    "maximum": 2.3258975703124998
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_file_sync_await_ms_per_file",
+    "median": 11.752152696614584,
+    "minimum": 11.557294236979166,
+    "maximum": 11.997458182291666
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_rename_await_ms_per_file",
+    "median": 0.6894106276041667,
+    "minimum": 0.5417581744791667,
+    "maximum": 0.9398287838541667
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_dir_queue_ms_per_file",
+    "median": 0.01066218359375,
+    "minimum": 0.0099015546875,
+    "maximum": 0.012055765625
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_dir_sync_ms_per_file",
+    "median": 7.93463579296875,
+    "minimum": 7.7464991484375005,
+    "maximum": 8.056765408854167
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "seconds",
+    "median": 2.5613653955,
+    "minimum": 2.5170952079999998,
+    "maximum": 2.690954
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "publish_mib_s",
+    "median": 149.92131517334224,
+    "minimum": 142.70032115004568,
+    "maximum": 152.5568038823266
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "user_seconds",
+    "median": 1.6347584999999967,
+    "minimum": 1.545881,
+    "maximum": 1.9780440000000041
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "system_seconds",
+    "median": 0.4968325000000009,
+    "minimum": 0.4501059999999999,
+    "maximum": 0.5332319999999999
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "admission_ms_per_file",
+    "median": 0.00022846223958333334,
+    "minimum": 0.0002088046875,
+    "maximum": 0.000322515625
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "queue_ms_per_file",
+    "median": 0.029504566406250002,
+    "minimum": 0.027760104166666664,
+    "maximum": 0.03487555208333334
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "open_ms_per_file",
+    "median": 1.9338897018229169,
+    "minimum": 1.7434652447916665,
+    "maximum": 2.0278920390625
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "write_ms_per_file",
+    "median": 0.19046500390624999,
+    "minimum": 0.14624372395833332,
+    "maximum": 0.20450228645833332
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "file_sync_ms_per_file",
+    "median": 8.83529477734375,
+    "minimum": 8.547401919270834,
+    "maximum": 9.567664708333334
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "close_ms_per_file",
+    "median": 0.005889996093750001,
+    "minimum": 0.005245763020833333,
+    "maximum": 0.006654341145833333
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "stat_ms_per_file",
+    "median": 0.06568978776041667,
+    "minimum": 0.06077425260416666,
+    "maximum": 0.07133138020833334
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "rename_ms_per_file",
+    "median": 0.911745625,
+    "minimum": 0.8173873567708334,
+    "maximum": 0.9882388151041667
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dir_sync_ms_per_file",
+    "median": 10.567369294270833,
+    "minimum": 10.496765739583333,
+    "maximum": 11.022822166666666
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "other_plan_ms_per_file",
+    "median": 6.0016927083333336e-05,
+    "minimum": 4.3710937499999994e-05,
+    "maximum": 6.911197916666666e-05
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "mkdir_ms_per_file",
+    "median": 0.0001228828125,
+    "minimum": 2.1265625e-05,
+    "maximum": 0.00018771614583333333
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "read_wal_ms_per_file",
+    "median": 0.16741591015625001,
+    "minimum": 0.1630501302083333,
+    "maximum": 0.2070221223958333
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "process_ms_per_file",
+    "median": 26.619233938802083,
+    "minimum": 26.17755384635417,
+    "maximum": 27.97565797395833
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_write_await_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_file_sync_await_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_rename_await_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_dir_queue_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": true,
+    "metric": "dev_dir_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "seconds",
+    "median": 2.8937459165,
+    "minimum": 2.703783833,
+    "maximum": 2.958796833
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "publish_mib_s",
+    "median": 132.71073794328458,
+    "minimum": 129.78248310839663,
+    "maximum": 142.02318813850235
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "user_seconds",
+    "median": 1.6513604999999991,
+    "minimum": 1.554252,
+    "maximum": 1.8819889999999972
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "system_seconds",
+    "median": 0.5574435000000004,
+    "minimum": 0.5006639999999996,
+    "maximum": 0.602545000000001
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "admission_ms_per_file",
+    "median": 0.000259734375,
+    "minimum": 0.000226453125,
+    "maximum": 0.0003570729166666667
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "queue_ms_per_file",
+    "median": 0.024832486979166665,
+    "minimum": 0.022918916666666667,
+    "maximum": 0.034344546875
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "open_ms_per_file",
+    "median": 2.7875860898437494,
+    "minimum": 2.4556084244791667,
+    "maximum": 3.068744953125
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "write_ms_per_file",
+    "median": 0.41385119140625,
+    "minimum": 0.31717426302083335,
+    "maximum": 0.44684461458333335
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "file_sync_ms_per_file",
+    "median": 12.770267614583332,
+    "minimum": 11.9575213984375,
+    "maximum": 14.314784174479167
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "close_ms_per_file",
+    "median": 0.0066780690104166675,
+    "minimum": 0.005846950520833334,
+    "maximum": 0.007090166666666666
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "stat_ms_per_file",
+    "median": 0.009676774739583335,
+    "minimum": 0.008515531250000001,
+    "maximum": 0.010173604166666666
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "rename_ms_per_file",
+    "median": 0.8995752486979165,
+    "minimum": 0.7129193619791666,
+    "maximum": 1.3058449114583335
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dir_sync_ms_per_file",
+    "median": 8.661580345052084,
+    "minimum": 8.279357385416667,
+    "maximum": 8.981442708333333
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "other_plan_ms_per_file",
+    "median": 5.695572916666666e-05,
+    "minimum": 4.4270833333333337e-05,
+    "maximum": 6.58515625e-05
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "mkdir_ms_per_file",
+    "median": 0.00017816927083333335,
+    "minimum": 0.00014540364583333335,
+    "maximum": 0.00032140104166666667
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "read_wal_ms_per_file",
+    "median": 0.17885252734374998,
+    "minimum": 0.152809453125,
+    "maximum": 0.214581703125
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "process_ms_per_file",
+    "median": 30.042949593750002,
+    "minimum": 28.065284398437502,
+    "maximum": 30.729098763020833
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_write_await_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_file_sync_await_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_rename_await_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_dir_queue_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": true,
+    "metric": "dev_dir_sync_ms_per_file",
+    "median": 0.0,
+    "minimum": 0.0,
+    "maximum": 0.0
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": false,
+    "metric": "seconds",
+    "median": 1.5892824585,
+    "minimum": 1.5672275839999998,
+    "maximum": 1.611337333
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": false,
+    "metric": "publish_mib_s",
+    "median": 241.66501190388504,
+    "minimum": 238.3113654327526,
+    "maximum": 245.0186583750175
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": false,
+    "metric": "user_seconds",
+    "median": 1.5887994999999986,
+    "minimum": 1.574864999999999,
+    "maximum": 1.602733999999998
+  },
+  {
+    "version": "dev",
+    "queues": 1,
+    "profiled": false,
+    "metric": "system_seconds",
+    "median": 0.4586334999999999,
+    "minimum": 0.45075800000000044,
+    "maximum": 0.4665089999999994
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": false,
+    "metric": "seconds",
+    "median": 1.569920542,
+    "minimum": 1.56182175,
+    "maximum": 1.578019334
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": false,
+    "metric": "publish_mib_s",
+    "median": 244.6048759705531,
+    "minimum": 243.34302611275865,
+    "maximum": 245.86672582834757
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": false,
+    "metric": "user_seconds",
+    "median": 1.4665369999999989,
+    "minimum": 1.4473309999999984,
+    "maximum": 1.4857429999999994
+  },
+  {
+    "version": "dev",
+    "queues": 12,
+    "profiled": false,
+    "metric": "system_seconds",
+    "median": 0.44907750000000046,
+    "minimum": 0.44793900000000164,
+    "maximum": 0.4502159999999993
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": false,
+    "metric": "seconds",
+    "median": 2.7739815835000003,
+    "minimum": 2.712924542,
+    "maximum": 2.835038625
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": false,
+    "metric": "publish_mib_s",
+    "median": 138.49627836622972,
+    "minimum": 135.4478900618153,
+    "maximum": 141.54466667064418
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": false,
+    "metric": "user_seconds",
+    "median": 1.5826260000000012,
+    "minimum": 1.5683450000000008,
+    "maximum": 1.5969070000000016
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 1,
+    "profiled": false,
+    "metric": "system_seconds",
+    "median": 0.5750609999999989,
+    "minimum": 0.5505639999999996,
+    "maximum": 0.5995579999999983
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": false,
+    "metric": "seconds",
+    "median": 3.0119517085,
+    "minimum": 3.001797042,
+    "maximum": 3.022106375
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": false,
+    "metric": "publish_mib_s",
+    "median": 127.49353310944394,
+    "minimum": 127.0636941097085,
+    "maximum": 127.92337210917938
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": false,
+    "metric": "user_seconds",
+    "median": 1.8151924999999984,
+    "minimum": 1.755004999999997,
+    "maximum": 1.8753799999999998
+  },
+  {
+    "version": "dev_dirsync",
+    "queues": 12,
+    "profiled": false,
+    "metric": "system_seconds",
+    "median": 0.629268999999999,
+    "minimum": 0.6009779999999978,
+    "maximum": 0.6575600000000001
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": false,
+    "metric": "seconds",
+    "median": 2.5911279165,
+    "minimum": 2.580180542,
+    "maximum": 2.6020752910000002
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": false,
+    "metric": "publish_mib_s",
+    "median": 148.20065506629038,
+    "minimum": 147.57451536017064,
+    "maximum": 148.82679477241015
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": false,
+    "metric": "user_seconds",
+    "median": 1.7522515000000034,
+    "minimum": 1.627826000000006,
+    "maximum": 1.8766770000000008
+  },
+  {
+    "version": "fs",
+    "queues": 1,
+    "profiled": false,
+    "metric": "system_seconds",
+    "median": 0.5151504999999998,
+    "minimum": 0.47586899999999943,
+    "maximum": 0.5544320000000003
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": false,
+    "metric": "seconds",
+    "median": 3.0238593335,
+    "minimum": 2.9919295,
+    "maximum": 3.055789167
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": false,
+    "metric": "publish_mib_s",
+    "median": 127.00419495497377,
+    "minimum": 125.66311974231827,
+    "maximum": 128.34527016762928
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": false,
+    "metric": "user_seconds",
+    "median": 1.766806500000003,
+    "minimum": 1.703993000000004,
+    "maximum": 1.829620000000002
+  },
+  {
+    "version": "fs",
+    "queues": 12,
+    "profiled": false,
+    "metric": "system_seconds",
+    "median": 0.5710965000000003,
+    "minimum": 0.5482829999999996,
+    "maximum": 0.593910000000001
+  }
+]

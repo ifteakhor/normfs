@@ -1,7 +1,4 @@
-//! Directory scans over the 3-hex-chunk layout, on an executor thread.
-//!
-//! The walk itself stays in `uintn::paths`, which three crates already agree
-//! on; what changes is where it runs.
+//! Reuse `uintn::paths` so all storage crates agree on the directory layout.
 
 use std::io;
 use std::path::Path;

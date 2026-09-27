@@ -98,12 +98,10 @@ test_open_create_excl_then_trunc(void)
 	CHECK(write(fd, "abc", 3) == 3);
 	CHECK(normfs_fs_sys_close(fd, &e) == 0 && e == 0);
 
-	/* A second exclusive create fails with EEXIST and reports no inode. */
 	fd2 = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL,
 	    &ino2, &e);
 	CHECK(fd2 == -1 && e == EEXIST && ino2 == 0u);
 
-	/* Truncating open reuses the inode and empties it. */
 	fd2 = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_TRUNC,
 	    &ino2, &e);
 	CHECK(fd2 >= 0 && e == 0 && ino2 == ino);
@@ -146,7 +144,6 @@ test_pwritev_all_writes_every_run(void)
 	fd = normfs_fs_sys_open_create(path, strlen(path), NORMFS_FS_TMP_EXCL,
 	    &ino, &e);
 	CHECK(fd >= 0);
-	/* At an offset: the file gets a hole first, the runs after it. */
 	CHECK(normfs_fs_sys_pwritev_all(fd, iov, 3u, 16u, &e) == 0 && e == 0);
 	CHECK(normfs_fs_sys_fsync(fd, &e) == 0 && e == 0);
 	CHECK(normfs_fs_sys_close(fd, &e) == 0);
@@ -274,8 +271,6 @@ test_rename_replaces_and_fsync_parent_syncs(void)
 	CHECK(read_whole(dst, back, sizeof(back), &got) == 0);
 	CHECK(got == 4u && memcmp(back, "new!", 4) == 0);
 
-	/* The parent of a file, of a file in a subdirectory, and of a bare
-	 * name (the working directory). */
 	CHECK(normfs_fs_sys_fsync_parent(dst, strlen(dst), &e) == 0 && e == 0);
 	CHECK(path_in(sub, sizeof(sub), "subdir"));
 	CHECK(mkdir(sub, 0700) == 0);
@@ -283,12 +278,10 @@ test_rename_replaces_and_fsync_parent_syncs(void)
 	CHECK(normfs_fs_sys_fsync_parent(sub, strlen(sub), &e) == 0 && e == 0);
 	CHECK(normfs_fs_sys_fsync_parent("leaf", 4u, &e) == 0 && e == 0);
 
-	/* A parent that is not a directory is a failure, not a sync. */
 	CHECK(path_in(sub, sizeof(sub), "ren.dst/x"));
 	CHECK(normfs_fs_sys_fsync_parent(sub, strlen(sub), &e) == -1);
 	CHECK(e == ENOTDIR);
 
-	/* A missing source is a failure with its errno. */
 	CHECK(normfs_fs_sys_rename(src, strlen(src), dst, strlen(dst), &e) == -1);
 	CHECK(e == ENOENT);
 	return 0;

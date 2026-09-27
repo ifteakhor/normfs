@@ -10,14 +10,16 @@
 //! A job, once submitted, runs to completion whether or not the future that
 //! submitted it is still polled. What that buys is in [`Fs::publish`].
 
+use std::collections::HashSet;
 use std::fs::{File, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use tokio::sync::{Semaphore, oneshot};
 
+mod dir_sync;
 mod directory;
 mod executor;
 pub mod fault;
@@ -27,6 +29,8 @@ mod read;
 mod scan;
 pub use read::ReadFile;
 
+#[cfg(test)]
+mod dir_sync_test;
 #[cfg(test)]
 mod directory_test;
 #[cfg(test)]
@@ -47,7 +51,6 @@ use plan::Plan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
-    /// The thread pool.
     Pool,
 }
 
@@ -81,7 +84,6 @@ fn default_threads() -> usize {
 #[derive(Debug)]
 pub enum FsError {
     Os(io::Error),
-    /// The executor has shut down.
     ExecutorGone,
     JobPanicked,
     Plan(PlanError),
@@ -144,7 +146,6 @@ pub struct PublishSpec {
     pub sync: bool,
 }
 
-/// What a finished publish tells its accounting.
 #[derive(Debug, Clone, Copy)]
 pub struct PublishReport {
     /// The length of the file the publish replaced, if there was one.
@@ -152,7 +153,6 @@ pub struct PublishReport {
     pub new_len: u64,
 }
 
-/// How an append ended.
 #[derive(Debug)]
 pub enum AppendOutcome {
     /// Written and synced: the bytes are on the medium.
@@ -167,6 +167,8 @@ pub enum AppendOutcome {
 pub struct Fs {
     exec: Arc<dyn Executor>,
     slots: Arc<Semaphore>,
+    // Avoid repeated pool round trips for already provisioned store directories.
+    provisioned: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl std::fmt::Debug for Fs {
@@ -191,6 +193,7 @@ impl Fs {
         Ok(Fs {
             exec,
             slots: Arc::new(Semaphore::new(threads.saturating_mul(32).clamp(1, 1024))),
+            provisioned: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -318,8 +321,7 @@ impl Fs {
         let total = spec.runs.total();
         let plan = Plan::publish(&spec.tmp, &spec.dst, spec.tmp_mode, total.max(1))?;
         let runs = if total == 0 {
-            // The planner has no empty publish; a one-byte file is not what
-            // anyone asks for either, so refuse rather than invent.
+            // The planner requires a nonempty publication.
             return Err(FsError::Os(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "publish of an empty file",
@@ -467,8 +469,15 @@ impl Fs {
 
     /// Creates durable directories below an already durable, provisioned ancestor.
     pub async fn mkdir_all(&self, path: &Path) -> Result<(), FsError> {
-        let path = path.to_path_buf();
-        self.run_blocking(move || directory::mkdir_all(&path)).await
+        if self.provisioned.lock().unwrap().contains(path) {
+            return Ok(());
+        }
+        let key = path.to_path_buf();
+        let path = key.clone();
+        self.run_blocking(move || directory::mkdir_all(&path))
+            .await?;
+        self.provisioned.lock().unwrap().insert(key);
+        Ok(())
     }
 
     /// unlink without a directory sync: for eviction, where the name coming
@@ -479,6 +488,10 @@ impl Fs {
     }
 
     pub async fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
+        self.provisioned
+            .lock()
+            .unwrap()
+            .retain(|known| !known.starts_with(path));
         let path = path.to_path_buf();
         self.run_blocking(move || std::fs::remove_dir_all(&path))
             .await

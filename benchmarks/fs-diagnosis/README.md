@@ -6,6 +6,45 @@ spends time. Production sources and their durability policy are unchanged.
 Instrumented Rust copies live under `target/fs-diagnosis`; C sources are not
 modified by the instrumentation.
 
+## Results — September 25, 2026
+
+Two reruns of the same 36-run protocol on the current checkout, after the
+reader's read-ahead, the provisioned-directory cache and the shared directory
+sync landed in `normfs-fs`. The `dev` binary is unchanged.
+
+[First rerun](results-2026-09-25/): `Fs::mkdir_all` calls fell from 768 to 2
+per run and FS submissions from 1920 to 1154, but one-queue FS throughput fell
+from 138.72 to 122.53 MiB/s while every timed operation got cheaper (open
+2.66 → 0.10 ms, file sync 11.50 → 4.04 ms, directory sync 7.56 → 3.75 ms) and
+20 ms per file moved outside every timer. That is the signature of the four
+workers taking turns. The cause is #37's `DiskUsage::publish`, merged the
+morning of the 25th and absent from the September 24 build: it held a
+per-queue `tokio::sync::Mutex` across the whole publication, so one queue's
+landings ran one at a time and never overlapped at the directory barrier.
+
+[Second rerun](results-2026-09-25-shared-lock/): publications hold the shared
+side of a per-queue `RwLock` and account through an atomic; rescans and
+evictions hold the exclusive side, which keeps the invariant the mutex was
+for. Twelve-queue numbers are unchanged, since twelve queues publish into
+twelve directories and four workers rarely meet in one.
+
+| Median throughput (MiB/s) | 1 queue | 12 queues |
+|---|---:|---:|
+| dev, profiled | 245.55 | 243.50 |
+| dev + directory sync, profiled | 137.07 | 131.33 |
+| FS, profiled | 149.92 | 132.71 |
+| dev, timers disabled | 241.67 | 244.60 |
+| dev + directory sync, timers disabled | 138.50 | 127.49 |
+| FS, timers disabled | 148.20 | 127.00 |
+
+One-queue FS is 22% above the serialized first rerun and 8% above September 24,
+and for the first time above dev with the matching barrier in both control
+conditions (ranges 143–153 against 134–139). Directory sync per file rose to
+10.57 ms because that timer now includes waiting for a sync another worker
+runs; file processing fell from 32.51 to 26.62 ms per file. The dev variants
+moved by up to 10% between the three series on their own, so the FS-versus-dev
+ordering is this host's, not a universal one.
+
 ## Results — September 24, 2026
 
 [Chart](results-2026-09-24/fs-diagnosis.png) ·

@@ -6,43 +6,10 @@
 
 #include "normfs/fs_sys.h"
 
-/*
- * The protocols NormFS uses to put bytes on disk, as step machines.
- *
- * A plan names the next operation; an executor performs it and reports the
- * outcome through one of the apply functions; the plan names the next one.
- * The planner never touches the kernel, so it does not care whether the
- * executor is a thread blocking in write(2) or an io_uring completion: the
- * only thing asked of an executor is that it reports an outcome after, and
- * only after, the operation it names has produced it.
- *
- * What is proved, per kind, is stated on the apply functions and holds by
- * induction over any sequence of reports:
- *
- *   PUBLISH   temp, write, fsync, close, stat, rename, dir fsync. At every
- *             step the durable directory entry for dst is what it was before
- *             the step, or the new inode with all its bytes on the medium.
- *             So a power cut at any point leaves the old file, no file, or
- *             the whole new file under the name -- never a torn one.
- *
- *   APPEND    write, fsync at a known offset. The synced prefix of the file
- *             is either the offset the plan started at or that offset plus
- *             the whole batch, and it is the latter exactly when the plan
- *             reached DONE. That biconditional is what lets the WAL advance
- *             its durable watermark on DONE and on nothing else.
- *
- *   CREATE    create, write, fsync, dir fsync. DONE means the name durably
- *             resolves to the inode holding all the bytes.
- *
- *   REMOVE    unlink, dir fsync. DONE means the name is durably absent.
- *
- *   RESTORE   one ftruncate, for an APPEND whose truncate-back failed: it
- *             re-establishes the precondition the next APPEND needs.
- *
- * The fsync steps are always in the plan. An executor configured to skip
- * fsync reports them done without doing them, and then nothing here applies
- * to it; that is what "no fsync" means.
- */
+/* The executor must report each operation only after it completes. WP proves
+ * the resulting transitions against the kernel model in fs_sys.h; see
+ * verify/fs.md for crash guarantees and assumptions. Skipping a planned
+ * fsync invalidates the durability guarantees. */
 
 #define NORMFS_FS_OK 0
 /* The report does not fit the state: a terminal op, or a count the step
@@ -67,7 +34,6 @@ enum normfs_fs_op {
 	/* lstat dst; report its length, or absent. */
 	NORMFS_FS_OP_STAT_DST = 5,
 	NORMFS_FS_OP_RENAME = 6,
-	/* fsync the directory holding dst. */
 	NORMFS_FS_OP_FSYNC_DIR = 7,
 	/* ftruncate the file to at. */
 	NORMFS_FS_OP_TRUNCATE_BACK = 8,
@@ -158,7 +124,6 @@ struct normfs_fs_plan {
       fs_dur_synced((p)->ino) == (p)->total && \
       fs_dur_len((p)->ino) == (p)->total))
 
-/* What holds of the kernel at each op of an APPEND plan. */
 #define NORMFS_FS_APPEND_STATE(p) \
     ((p)->total > 0 && \
      ((p)->op == NORMFS_FS_OP_WRITE || (p)->op == NORMFS_FS_OP_FSYNC_FILE || \
@@ -180,7 +145,6 @@ struct normfs_fs_plan {
         fs_dur_synced((p)->ino) == (p)->at && \
         ((p)->restored != 0 ==> fs_vol_len((p)->ino) == (p)->at)))
 
-/* What holds of the kernel at each op of a CREATE plan. */
 #define NORMFS_FS_CREATE_STATE(p) \
     (((p)->op == NORMFS_FS_OP_OPEN || (p)->op == NORMFS_FS_OP_WRITE || \
       (p)->op == NORMFS_FS_OP_FSYNC_FILE || (p)->op == NORMFS_FS_OP_FSYNC_DIR || \
@@ -203,7 +167,6 @@ struct normfs_fs_plan {
         fs_dur_synced((p)->ino) == (p)->total && \
         fs_dur_len((p)->ino) == (p)->total))
 
-/* What holds of the kernel at each op of a REMOVE plan. */
 #define NORMFS_FS_REMOVE_STATE(p) \
     (((p)->op == NORMFS_FS_OP_UNLINK || (p)->op == NORMFS_FS_OP_FSYNC_DIR || \
       (p)->op == NORMFS_FS_OP_DONE || (p)->op == NORMFS_FS_OP_FAILED) && \
@@ -212,10 +175,6 @@ struct normfs_fs_plan {
      ((p)->op == NORMFS_FS_OP_DONE ==> \
         fs_vol_ino((p)->dst, (p)->dst_len) == 0 && \
         fs_dur_ino((p)->dst, (p)->dst_len) == 0))
-
-/* ------------------------------------------------------------------------
- * Construction. */
-
 /*@ requires \valid(plan);
     requires tmp_len < NORMFS_FS_PATH_MAX && dst_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(tmp + (0 .. tmp_len));
@@ -368,7 +327,6 @@ int normfs_fs_plan_next(const struct normfs_fs_plan *plan);
 */
 int normfs_fs_publish_ok(struct normfs_fs_plan *plan, uint64_t n);
 
-/* STAT_DST found no file. Only that step can report absence. */
 /*@ requires \valid(plan);
     requires NORMFS_FS_PLAN_WF(plan);
     requires plan->kind == NORMFS_FS_PUBLISH;
@@ -385,8 +343,6 @@ int normfs_fs_publish_ok(struct normfs_fs_plan *plan, uint64_t n);
 */
 int normfs_fs_publish_absent(struct normfs_fs_plan *plan);
 
-/* Any step failed. The plan is over; the durable entry for dst is what it
- * was or the complete new file, as on every other step. */
 /*@ requires \valid(plan);
     requires NORMFS_FS_PLAN_WF(plan);
     requires plan->kind == NORMFS_FS_PUBLISH;
@@ -416,7 +372,6 @@ int normfs_fs_publish_err(struct normfs_fs_plan *plan, int os_error);
     ensures \result == NORMFS_FS_OK || \result == NORMFS_FS_ERR_STATE;
     ensures NORMFS_FS_PLAN_WF(plan);
     ensures NORMFS_FS_APPEND_STATE(plan);
-    // The whole-batch boundary: the synced prefix never lands in between.
     ensures fs_dur_synced(plan->ino) == plan->at ||
             fs_dur_synced(plan->ino) == plan->at + plan->total;
     ensures \result == NORMFS_FS_OK <==>
@@ -495,7 +450,6 @@ int normfs_fs_append_err(struct normfs_fs_plan *plan, int os_error);
               \old(plan->op) == NORMFS_FS_OP_FSYNC_DIR;
     ensures \result == NORMFS_FS_ERR_STATE ==>
               plan->op == \old(plan->op) && plan->written == \old(plan->written);
-    // An empty file skips WRITE: a marker has no bytes.
     ensures \result == NORMFS_FS_OK && \old(plan->op) == NORMFS_FS_OP_OPEN ==>
               plan->ino == n &&
               (plan->total > 0 ==> plan->op == NORMFS_FS_OP_WRITE) &&
@@ -535,7 +489,6 @@ int normfs_fs_create_ok(struct normfs_fs_plan *plan, uint64_t n);
 */
 int normfs_fs_create_err(struct normfs_fs_plan *plan, int os_error);
 
-/* UNLINK done, or the name was already absent: the same state either way. */
 /*@ requires \valid(plan);
     requires NORMFS_FS_PLAN_WF(plan);
     requires plan->kind == NORMFS_FS_REMOVE;

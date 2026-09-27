@@ -14,7 +14,7 @@ use crate::ranges::RangeStoreError;
 
 mod compression;
 mod disk_usage;
-pub use disk_usage::DiskUsage;
+pub use disk_usage::{DiskUsage, QueueBytes};
 pub mod header;
 pub mod page_writer;
 pub mod parser;

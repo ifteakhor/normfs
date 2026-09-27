@@ -302,7 +302,9 @@ async fn publish_store_file(monitor: &QueueMonitor, root: &Path, queue: &QueueId
     let path = queue.to_store_path(root, &UintN::from(id));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::rename(&temp_file, &path).unwrap();
-    *monitor.store_bytes.lock().await += 100;
+    let bump = monitor.store_bytes.clone().exclusive().await;
+    bump.set(bump.get() + 100);
+    drop(bump);
 }
 
 #[tokio::test]

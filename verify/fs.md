@@ -104,7 +104,20 @@ User closures and publish accounting have separate panic boundaries. A normal
 job panic is an error. Accounting runs after DONE: its panic is logged without
 changing the successful publication result or retiring a worker. A publish cleans a temporary
 name only after successfully opening it. Reads use positioned I/O on the same
-pool, so cancelling a read cannot advance a shared kernel cursor.
+pool, so cancelling a read cannot advance a shared kernel cursor. A read fills
+a window ahead of the caller, from 64 KiB doubling to 1 MiB while the caller
+drains it, and a seek inside the window is free; each fill is still one
+positioned read on the pool.
+
+FSYNC_DIR is shared between plans on the same parent directory. A plan that
+arrives while no sync is running performs one; a plan that arrives during a
+sync waits for the next one, which starts after its own rename completed. Every
+plan is therefore reported done only after a directory sync that began after
+its entry existed, which is what the directory certificate requires. A failed
+shared sync fails every plan waiting on it with the same `errno`. The
+provisioned-directory cache in `Fs` remembers paths a `mkdir_all` has made
+durable and skips the pool for them; `remove_dir_all` forgets the subtree
+before removing it.
 
 Memory-pointer snapshots retain their serialization lock in a task that owns
 the flush to completion. A dropped caller cannot release the fixed temporary

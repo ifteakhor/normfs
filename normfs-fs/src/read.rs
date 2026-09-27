@@ -12,13 +12,21 @@ use crate::{Fs, FsError};
 
 type ReadJob = Pin<Box<dyn Future<Output = Result<(Vec<u8>, io::Result<usize>), FsError>> + Send>>;
 
+// Start small for header probes; grow sequential reads to amortize pool handoffs.
+const AHEAD_MIN: usize = 64 * 1024;
+const AHEAD_MAX: usize = 1024 * 1024;
+// Two 2 MiB fills outperformed one 4 MiB fill with eight cached readers on the Mac.
+const FILL_MAX: usize = 2 * 1024 * 1024;
+
 pub struct ReadFile {
     fs: Fs,
     file: Arc<File>,
+    /// File position of the next byte the caller gets.
     offset: u64,
     pub(crate) buffer: Vec<u8>,
     start: usize,
     end: usize,
+    ahead: usize,
     pending: Option<ReadJob>,
 }
 
@@ -31,6 +39,7 @@ impl ReadFile {
             buffer: Vec::new(),
             start: 0,
             end: 0,
+            ahead: AHEAD_MIN,
             pending: None,
         }
     }
@@ -38,6 +47,11 @@ impl ReadFile {
     pub fn metadata(&self) -> impl Future<Output = io::Result<Metadata>> + Send + 'static {
         let (fs, file) = (self.fs.clone(), self.file.clone());
         async move { fs.metadata(file).await.map_err(Into::into) }
+    }
+
+    /// File position of the first byte in the window.
+    fn window_base(&self) -> u64 {
+        self.offset - self.start as u64
     }
 
     pub async fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
@@ -54,9 +68,16 @@ impl ReadFile {
             if let Ok((buffer, _)) = result {
                 self.buffer = buffer;
             }
+            self.start = 0;
+            self.end = 0;
         }
-        self.start = 0;
-        self.end = 0;
+        let base = self.window_base();
+        if offset >= base && offset <= base + self.end as u64 {
+            self.start = (offset - base) as usize;
+        } else {
+            self.start = 0;
+            self.end = 0;
+        }
         self.offset = offset;
         Ok(offset)
     }
@@ -76,7 +97,11 @@ impl AsyncRead for ReadFile {
                 let fs = self.fs.clone();
                 let file = self.file.clone();
                 let offset = self.offset;
-                let len = buf.remaining().min(1024 * 1024);
+                // A seek empties the window without demonstrating sequential demand.
+                if self.end > 0 {
+                    self.ahead = (self.ahead * 2).min(AHEAD_MAX);
+                }
+                let len = buf.remaining().clamp(self.ahead, FILL_MAX);
                 let mut buffer = std::mem::take(&mut self.buffer);
                 self.pending = Some(Box::pin(async move {
                     fs.run_blocking(move || {

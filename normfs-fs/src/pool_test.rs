@@ -105,7 +105,6 @@ async fn accounting_runs_on_the_executor_even_when_the_future_is_dropped() {
         },
         Some(then),
     );
-    // Poll once so the job is submitted, then drop the future.
     let mut fut = Box::pin(fut);
     let waker = std::task::Waker::noop();
     let mut cx = std::task::Context::from_waker(waker);

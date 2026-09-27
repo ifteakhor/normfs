@@ -1,0 +1,14 @@
+{
+  "complete": true,
+  "measurements": 66,
+  "required_seconds": 35.0,
+  "minimum_wall_seconds": 35.000038875,
+  "maximum_wall_seconds": 35.667976542,
+  "minimum_worker_io_seconds": 35.000000041,
+  "maximum_worker_io_seconds": 35.6678825,
+  "measured_logical_bytes": {
+    "read": 21763508142080,
+    "write": 375738040320
+  },
+  "byte_scope": "Measured phases only; excludes fixture preparation and verification; FS reads are cached"
+}

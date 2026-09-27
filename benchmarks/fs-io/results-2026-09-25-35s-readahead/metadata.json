@@ -1,0 +1,91 @@
+{
+  "head": "77b447a0154d41660979f7c0c3ad44bf7b9c643a",
+  "status": "M .gitignore\n A normfs-fs/src/dir_sync.rs\n A normfs-fs/src/dir_sync_test.rs\n M normfs-fs/src/lib.rs\n M normfs-fs/src/pool.rs\n M normfs-fs/src/read.rs\n M normfs-fs/src/read_test.rs\n M verify/fs.md\n?? benchmarks/fs-comparison-2026-09-21/\n?? benchmarks/fs-driver/\n?? benchmarks/fs-io/results-2026-09-25-35s-readahead-4mib-fill/\n?? normfs-store/examples/fs_publication.rs\n?? normfs-wal/examples/fs_comparison.rs\n?? scripts/compare-fs.py\n?? scripts/plot-fs-comparison.py",
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "macos": "27.0",
+  "logical_cpus": 12,
+  "binary_sha256": "4f32ac7ab809ce7e8ff359c32a96dd6f7c042b796387e43ade914935404e411c",
+  "source_sha256": "7dfb9c3760b104a5016e9d69595a1b8a0b67d387424971bd394f3c31c0bff525",
+  "rounds": 3,
+  "minimum_seconds": 35.0,
+  "stop_rule": "each worker executes I/O until its active duration reaches minimum_seconds; no padding",
+  "latency_sampling": "every operation for writes; every 64th operation per client for cached reads",
+  "max_write_footprint_bytes": 68719476736,
+  "write_reserve_bytes": 12884901888,
+  "cases": [
+    [
+      "append",
+      32768,
+      1,
+      "structured"
+    ],
+    [
+      "append",
+      1048576,
+      1,
+      "entropy"
+    ],
+    [
+      "append",
+      4194304,
+      1,
+      "entropy"
+    ],
+    [
+      "append",
+      4194304,
+      8,
+      "entropy"
+    ],
+    [
+      "publish",
+      32768,
+      8,
+      "structured"
+    ],
+    [
+      "publish",
+      1048576,
+      8,
+      "entropy"
+    ],
+    [
+      "publish",
+      4194304,
+      1,
+      "entropy"
+    ],
+    [
+      "publish",
+      4194304,
+      8,
+      "entropy"
+    ],
+    [
+      "read",
+      32768,
+      1,
+      "structured"
+    ],
+    [
+      "read",
+      4194304,
+      1,
+      "entropy"
+    ],
+    [
+      "read",
+      4194304,
+      8,
+      "entropy"
+    ]
+  ],
+  "started_at": "2026-09-25T21:09:36+0500",
+  "cpu_scope": "getrusage(RUSAGE_SELF), timed workers only; excludes setup/verification/cleanup",
+  "read_fixture": "64 MiB per client, freshly written and synced; cached, no cache eviction",
+  "barriers": {
+    "append": "file sync per operation",
+    "publish": "file sync, rename, parent sync per operation"
+  },
+  "finished_at": "2026-09-25T21:52:21+0500"
+}

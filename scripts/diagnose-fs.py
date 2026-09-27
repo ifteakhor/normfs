@@ -116,7 +116,7 @@ def prepare():
             replace(lib, "        let permit = self\n", "        let admission = normfs_bench_probe::Timer::new(normfs_bench_probe::Metric::Admission);\n        let permit = self\n")
             replace(lib, "        self.exec.submit(Job { task, permit })", """        drop(admission);
         self.exec.submit(Job { task, permit, queued: normfs_bench_probe::now() })""")
-            replace(lib, "        self.run_blocking(move || directory::mkdir_all(&path)).await", """        self.run_blocking(move || {
+            replace(lib, "        self.run_blocking(move || directory::mkdir_all(&path))\n            .await", """        self.run_blocking(move || {
             let _timer = normfs_bench_probe::Timer::new(normfs_bench_probe::Metric::Mkdir);
             directory::mkdir_all(&path)
         }).await""")

@@ -1,5 +1,12 @@
 # FS performance: what the Mac measurements establish
 
+The [September 25 afternoon rerun](../benchmarks/fs-io/READ-AHEAD.md) follows
+the reader's read-ahead window: the 32 KiB cached-read gap against raw I/O
+went from −84.9% to −16.6% at a seventh of the CPU; write ratios stayed within
+the morning spread. The [store diagnosis rerun](../benchmarks/fs-diagnosis/README.md)
+of the same day found #37's per-queue disk-usage mutex serializing one
+queue's publications and replaced it with a shared/exclusive split.
+
 The [September 25 duration-controlled measurements](../benchmarks/fs-io/DURATION.md)
 replace fixed byte counts with at least 35 seconds of active I/O per worker.
 Both the FS comparison and SSD phases enforce the duration in the binary and

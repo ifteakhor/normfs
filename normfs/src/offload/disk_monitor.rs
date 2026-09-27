@@ -5,15 +5,15 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tokio::time;
 use uintn::UintN;
 
 use crate::Error;
 use normfs_cloud::offloader::QueueOffloader;
 use normfs_cloud::S3Client;
-use normfs_store::{DiskUsage, StoreError};
 use normfs_fs::Fs;
+use normfs_store::{DiskUsage, QueueBytes, StoreError};
 use normfs_types::QueueId;
 use normfs_wal::WalSettings;
 
@@ -435,8 +435,8 @@ struct QueueMonitor {
     store_dir: PathBuf,
     wal_dir: PathBuf,
     offloader: Option<QueueOffloader>,
-    store_bytes: Arc<Mutex<u64>>,
-    /// The last eviction's `next`. Publication takes `store_bytes`' lock, so
+    store_bytes: Arc<QueueBytes>,
+    /// The last eviction's `next`. Publication takes `store_bytes`' shared side, so
     /// cleanup starts here instead of walking the store for its oldest file.
     cursor: std::sync::Mutex<Option<UintN>>,
     forget_range: Option<ForgetRange>,
@@ -491,11 +491,11 @@ impl QueueMonitor {
     }
 
     async fn rescan_store(&self) -> Result<(), Error> {
-        let mut tracked = self.store_bytes.clone().lock_owned().await;
+        let tracked = self.store_bytes.clone().exclusive().await;
         let dir = self.store_dir.clone();
         let min = blocking(move || {
             let store = scan(&dir, FileKind::Store)?;
-            *tracked = store.total;
+            tracked.set(store.total);
             Ok(store.min)
         })
         .await?;
@@ -511,7 +511,7 @@ impl QueueMonitor {
 
     async fn get_queue_size(&self) -> Result<u64, Error> {
         let wal = Self::scan_dir(&self.wal_dir, FileKind::Wal).await?.total;
-        Ok((*self.store_bytes.lock().await).saturating_add(wal))
+        Ok(self.store_bytes.bytes().saturating_add(wal))
     }
 
     /// `None` when the queue is already under its limit.
@@ -522,11 +522,14 @@ impl QueueMonitor {
         wal_total: u64,
     ) -> Result<Option<Eviction>, Error> {
         let max_size = self.config.max_size as u64;
-        let mut tracked = self.store_bytes.clone().lock_owned().await;
+        let tracked = self.store_bytes.clone().exclusive().await;
         let store_dir = self.store_dir.clone();
         let wal_dir = self.wal_dir.clone();
         blocking(move || {
-            let to_free = tracked.saturating_add(wal_total).saturating_sub(max_size);
+            let to_free = tracked
+                .get()
+                .saturating_add(wal_total)
+                .saturating_sub(max_size);
             if to_free == 0 {
                 return Ok(None);
             }
@@ -535,12 +538,12 @@ impl QueueMonitor {
                 Ok(eviction) => {
                     for event in &eviction.events {
                         if event.kind == FileKind::Store && event.result.is_ok() {
-                            *tracked = tracked.saturating_sub(event.size);
+                            tracked.sub(event.size);
                         }
                     }
                 }
                 // Deletions before the failure are not reported back.
-                Err(_) => *tracked = scan(&store_dir, FileKind::Store)?.total,
+                Err(_) => tracked.set(scan(&store_dir, FileKind::Store)?.total),
             }
             result.map(Some)
         })
@@ -679,7 +682,7 @@ impl QueueMonitor {
             self.rescan_store().await?;
         }
         let wal_scan = Self::scan_dir(&self.wal_dir, FileKind::Wal).await?;
-        let current_size = (*self.store_bytes.lock().await).saturating_add(wal_scan.total);
+        let current_size = self.store_bytes.bytes().saturating_add(wal_scan.total);
 
         if current_size > self.config.max_size as u64 {
             self.cleanup_oldest_files(current_size, wal_scan).await?;

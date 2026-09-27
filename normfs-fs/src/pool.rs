@@ -1,11 +1,4 @@
-//! The thread-pool executor: a bounded set of threads that each run one
-//! plan at a time through the syscall shims in `c/src/fs_sys.c`.
-//!
-//! Bounded on purpose. Threads blocked in fsync cost no CPU, but a card
-//! commits one journal at a time, so past a handful of concurrent fsyncs each
-//! one only waits longer; and a pool of a few threads is what keeps twelve
-//! queues' landings from all running at once on four cores. tokio's default
-//! blocking pool is 512 threads and would let them.
+//! A bounded pool limits concurrent flushes, which can contend on the device's journal.
 
 use std::ffi::CStr;
 use std::fs::File;
@@ -65,8 +58,7 @@ unsafe extern "C" {
     fn normfs_fs_sys_unlink(path: *const c_char, path_len: usize, os_error: *mut c_int) -> c_int;
 }
 
-/// The most runs one pwritev step hands down; the shim's iovec array is
-/// sized to it, and a write with more runs is split across steps.
+// Must match the shim's fixed-size iovec array.
 const IOV_MAX: usize = 1024;
 
 pub(crate) struct Pool {
@@ -132,8 +124,6 @@ fn path_of(c: &CStr) -> &Path {
     Path::new(std::ffi::OsStr::from_bytes(c.to_bytes()))
 }
 
-/// Drives one plan to `Done` or `Failed`, then the accounting closure, then
-/// the reply.
 fn run_plan(job: PlanJob) {
     let PlanJob {
         mut plan,
@@ -185,8 +175,6 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool, bool),
         }
     }
     let sync = res.sync;
-    // The descriptor a Publish or Create opened; closed on the way out
-    // unless Create hands it back.
     let mut owned: Option<OwnedFd> = None;
     let mut absent = false;
     let mut opened = false;
@@ -252,11 +240,8 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool, bool),
                 }
             }
             Op::FsyncFile => {
-                // Stands in for the bytes reaching the page cache and the sync
-                // then failing; the planner cuts the file back either way.
-                // Appends only: a test schedules the failure on a file's path
-                // before the file exists, and the failure it means is the
-                // flush's, not the creation's.
+                // Fail after writing to exercise rollback; a fault armed before
+                // file creation must affect the append, not the creation sync.
                 if plan.kind() == Kind::Append && crate::fault::take_failure(path_of(plan.dst())) {
                     plan.err(libc::EIO)?;
                     continue;
@@ -328,18 +313,22 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool, bool),
                     plan.ok(0)?;
                     continue;
                 }
-                // SAFETY: dst is a NUL-terminated path owned by the plan.
-                let rc = unsafe {
-                    normfs_fs_sys_fsync_parent(
-                        plan.dst().as_ptr(),
-                        plan.dst().to_bytes().len(),
-                        &mut e.0,
-                    )
-                };
-                if rc == 0 {
+                let dst = plan.dst();
+                let err = crate::dir_sync::sync_parent(dst, || {
+                    // SAFETY: dst is a NUL-terminated path owned by the plan.
+                    let rc = unsafe {
+                        normfs_fs_sys_fsync_parent(dst.as_ptr(), dst.to_bytes().len(), &mut e.0)
+                    };
+                    match rc {
+                        0 => 0,
+                        _ if e.0 > 0 => e.0,
+                        _ => libc::EIO,
+                    }
+                });
+                if err == 0 {
                     plan.ok(0)?;
                 } else {
-                    plan.err(e.0)?;
+                    plan.err(err)?;
                 }
             }
             Op::TruncateBack => {
@@ -382,8 +371,6 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool, bool),
     }
 }
 
-/// The iovecs for the bytes not yet written, at most `IOV_MAX` of them, and
-/// how many bytes they cover.
 fn tail_iovs(runs: &[bytes::Bytes], written: u64) -> (Vec<Iov>, u64) {
     let mut skip = written;
     let mut out = Vec::new();

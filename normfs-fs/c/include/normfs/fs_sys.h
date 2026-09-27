@@ -19,7 +19,7 @@
  * The shims, normfs_fs_sys_*, are the syscalls the thread-pool executor uses.
  * They carry errno contracts only, EINTR is retried inside them except for
  * close, and tests/test_fs.c checks them against a real filesystem. The
- * io_uring executor performs the same operations without them.
+ * executor may also implement these operations without the shims.
  *
  * Four worlds rather than one so that frames do the work: a rename touches
  * names and nothing durable; a file fsync touches durable data and no name.
@@ -68,7 +68,6 @@
 /* ------------------------------------------------------------------------
  * Completions: what a finished operation lets the planner conclude. */
 
-/* open with O_CREAT: the name now resolves to an empty inode. */
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     requires ino > 0;
@@ -110,7 +109,6 @@ void normfs_fs_world_write_ok(uint64_t ino, uint64_t n);
 */
 void normfs_fs_world_write_err(uint64_t ino);
 
-/* fsync(2) on a file: everything in the page cache is on the medium. */
 /*@ assigns normfs_fs_dur_data;
     ensures fs_dur_synced(ino) == fs_vol_len(ino);
     ensures fs_dur_len(ino) == fs_vol_len(ino);
@@ -135,7 +133,6 @@ void normfs_fs_world_fsync_ok(uint64_t ino);
 */
 void normfs_fs_world_fsync_err(uint64_t ino);
 
-/* rename(2): atomic in the namespace, and nothing durable moves. */
 /*@ requires src_len < NORMFS_FS_PATH_MAX && dst_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(src + (0 .. src_len));
     requires \valid_read(dst + (0 .. dst_len));
@@ -182,7 +179,6 @@ void normfs_fs_world_fsync_dir_err(const char *name, size_t name_len);
 */
 void normfs_fs_world_truncate_ok(uint64_t ino, uint64_t len);
 
-/* unlink(2), or an unlink that found the name already absent. */
 /*@ requires path_len < NORMFS_FS_PATH_MAX;
     requires \valid_read(path + (0 .. path_len));
     assigns normfs_fs_vol_names;
