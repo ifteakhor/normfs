@@ -1047,41 +1047,73 @@ impl NormFS {
         }
     }
 
-    /// The pointer names the last landed file. The bucket is asked once for a
-    /// later one, for a crash between the PUT and the pointer write: a file
-    /// written at a lower id would overwrite acked records. Until the bucket
-    /// answers, the queue does not write. A later file found there is written
+    /// The last file this queue landed straight in the bucket, and the last id
+    /// in it. The pointer names it; the bucket is asked for a later one, for a
+    /// crash between the PUT and the pointer write, when the queue is
+    /// cloud-direct now or was in an earlier life -- a store queue that never
+    /// was does not wait on S3 to start. A later file found there is written
     /// back to the pointer before the queue starts, since readers bound their
     /// file walk by it.
-    async fn continue_cloud_queue(
+    async fn cloud_landed(
         &self,
         queue: &QueueId,
-    ) -> Result<(UintN, normfs_wal::WalHeader, Option<UintN>), Error> {
+        persist: Persist,
+    ) -> Result<Option<(UintN, UintN)>, Error> {
         let mut landed = self.memory_pointers.last_landed(queue);
-        if let Some(downloader) = &self.cloud_downloader {
-            if let Some(max_file) = downloader.find_max_id(queue).await? {
-                if landed.as_ref().is_none_or(|(_, f)| max_file > *f) {
-                    let (_, last) = downloader.get_file_range(queue, &max_file).await?
-                        .ok_or_else(|| std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("cloud file {max_file} has no recoverable range for queue {queue}"),
-                        ))?;
-                    self.memory_pointers
-                        .mark_landed(queue, &last, &max_file)
-                        .map_err(Error::Io)?;
-                    landed = Some((last, max_file));
-                }
+        let ask_bucket = persist.cloud && (!persist.store || landed.is_some());
+        let Some(downloader) = self.cloud_downloader.as_ref().filter(|_| ask_bucket) else {
+            return Ok(landed);
+        };
+        let Some(max_file) = downloader.find_max_id(queue).await? else {
+            return Ok(landed);
+        };
+        if landed.as_ref().is_none_or(|(_, f)| max_file > *f) {
+            let (_, last) = downloader
+                .get_file_range(queue, &max_file)
+                .await?
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("cloud file {max_file} has no recoverable range for queue {queue}"),
+                    )
+                })?;
+            self.memory_pointers
+                .mark_landed(queue, &last, &max_file)
+                .map_err(Error::Io)?;
+            landed = Some((last, max_file));
+        }
+        Ok(landed)
+    }
+
+    /// Where a queue resumes: after every file and id any earlier life used,
+    /// whatever its persistence was then. Local files, a cloud-direct life's
+    /// objects and a memory life's last id share one id space and one file id
+    /// space, so resuming from one source alone hands out an id again or
+    /// writes a file over one that holds acked records.
+    async fn resume_point(
+        &self,
+        queue: &QueueId,
+        persist: Persist,
+    ) -> Result<(UintN, normfs_wal::WalHeader, Option<UintN>), Error> {
+        let (mut file_id, mut header, mut last_id) = self.continue_queue(queue).await?;
+
+        if let Some((last, file)) = self.cloud_landed(queue, persist).await? {
+            if file >= file_id {
+                file_id = file.increment();
+            }
+            if last_id.as_ref().is_none_or(|l| last > *l) {
+                last_id = Some(last);
+            }
+        }
+        if let Some(last) = self.memory_pointers.last_id(queue) {
+            if last_id.as_ref().is_none_or(|l| last > *l) {
+                last_id = Some(last);
             }
         }
 
-        let mut header = normfs_wal::WalHeader::default();
-        let (file_id, last_id) = match landed {
-            Some((last, file)) => {
-                header.num_entries_before = last.increment();
-                (file.increment(), Some(last))
-            }
-            None => (UintN::one(), None),
-        };
+        if let Some(last) = &last_id {
+            header.num_entries_before = last.increment();
+        }
         Ok((file_id, header, last_id))
     }
 
@@ -1105,11 +1137,21 @@ impl NormFS {
             return Ok(());
         }
 
-        let (file_id, header, last_entry_id) = if persist.store {
-            self.continue_queue(queue).await?
-        } else {
-            self.continue_cloud_queue(queue).await?
-        };
+        if persist.cloud
+            && queue
+                .as_str()
+                .split('/')
+                .filter(|c| !c.is_empty())
+                .skip(1)
+                .any(normfs_cloud::is_id_component)
+        {
+            return Err(ConfigError::CloudQueuePathLooksLikeIds {
+                queue: queue.to_string(),
+            }
+            .into());
+        }
+
+        let (file_id, header, last_entry_id) = self.resume_point(queue, persist).await?;
 
         log::info!(target: "normfs", "----------------------------------------");
         log::info!(target: "normfs", "Queue '{}' - Recovery complete:", queue);

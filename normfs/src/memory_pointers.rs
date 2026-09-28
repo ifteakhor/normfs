@@ -89,13 +89,22 @@ impl MemoryPointers {
         let file = file.map(|f| to_u64(f, "file id")).transpose()?;
 
         let mut state = self.state.lock().unwrap();
-        let entry = state
-            .queues
-            .entry(queue.as_str().to_string())
-            .or_insert(Pointer { id, file });
-        if id >= entry.id {
+        let state = &mut *state;
+        let Some(entry) = state.queues.get_mut(queue.as_str()) else {
+            state
+                .queues
+                .insert(queue.as_str().to_string(), Pointer { id, file });
+            state.dirty = true;
+            return Ok(());
+        };
+        // Independent: a memory life can leave the id ahead of the first file a
+        // cloud-direct life lands, and readers bound their walk by the file.
+        if id > entry.id {
             entry.id = id;
-            entry.file = file.or(entry.file);
+            state.dirty = true;
+        }
+        if file.is_some_and(|file| entry.file.is_none_or(|f| file > f)) {
+            entry.file = file;
             state.dirty = true;
         }
         Ok(())

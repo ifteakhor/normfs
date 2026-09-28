@@ -26,7 +26,7 @@ enum End {
 /// `UintN::to_file_path` pads every component to three lowercase hex digits,
 /// so at one level lexicographic order is numeric order. Anything else under
 /// the prefix is not one of ours.
-fn is_component(name: &str) -> bool {
+pub fn is_id_component(name: &str) -> bool {
     name.len() == 3 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -61,13 +61,13 @@ fn find_id_recursive<'a>(
             .contents
             .iter()
             .filter_map(|o| o.key.strip_prefix(prefix)?.strip_suffix(suffix.as_str()))
-            .filter(|stem| is_component(stem))
+            .filter(|stem| is_id_component(stem))
             .collect();
         let mut dirs: Vec<&str> = listing
             .common_prefixes
             .iter()
             .filter_map(|p| p.prefix.strip_prefix(prefix)?.strip_suffix('/'))
-            .filter(|name| is_component(name))
+            .filter(|name| is_id_component(name))
             .collect();
         files.sort_unstable();
         dirs.sort_unstable();

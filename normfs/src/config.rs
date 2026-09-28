@@ -101,6 +101,12 @@ pub enum ConfigError {
         pattern: String,
         compression: CompressionType,
     },
+    /// A cloud key has no segment between a queue's path and its file ids, so
+    /// below another queue a component like `abc` reads as that queue's id
+    /// directory: its recovery would take this queue's files for its own.
+    CloudQueuePathLooksLikeIds {
+        queue: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -126,6 +132,13 @@ impl std::fmt::Display for ConfigError {
                 write!(
                     f,
                     "rule '{pattern}': {compression:?} compression cannot be written"
+                )
+            }
+            ConfigError::CloudQueuePathLooksLikeIds { queue } => {
+                write!(
+                    f,
+                    "queue '{queue}': a cloud queue path component of three hex digits \
+                     collides with a parent queue's file ids"
                 )
             }
         }

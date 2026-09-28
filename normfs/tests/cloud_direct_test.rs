@@ -57,6 +57,10 @@ async fn s3() -> Option<CloudSettings> {
 }
 
 fn settings(cloud: CloudSettings) -> NormFsSettings {
+    settings_with(cloud, Persist::CLOUD)
+}
+
+fn settings_with(cloud: CloudSettings, persist: Persist) -> NormFsSettings {
     NormFsSettings {
         mem_page_size: PAGE,
         max_memory_usage: 64 * 1024,
@@ -66,7 +70,7 @@ fn settings(cloud: CloudSettings) -> NormFsSettings {
             ..Default::default()
         },
         cloud_settings: Some(cloud),
-        queue_settings: QueueSettings::all_active().with_default_persist(Persist::CLOUD),
+        queue_settings: QueueSettings::all_active().with_default_persist(persist),
         ..NormFsSettings::all_active()
     }
 }
@@ -231,5 +235,155 @@ async fn records_recovered_from_the_bucket_are_readable_before_anything_lands() 
         read_all(&fs, &queue, 0, PER_PAGE + 1).await,
         [DataSource::Cloud; PER_PAGE as usize + 1]
     );
+    fs.close().await.unwrap();
+}
+
+fn bucket(cloud: &CloudSettings) -> S3Client {
+    S3Client::new(
+        url::Url::parse(&cloud.endpoint).unwrap(),
+        cloud.bucket.clone(),
+        cloud.region.clone(),
+        cloud.access_key.clone(),
+        cloud.secret_key.clone(),
+    )
+    .unwrap()
+}
+
+async fn object(cloud: &CloudSettings, queue: &normfs::QueueId, file: u64) -> Option<Bytes> {
+    bucket(cloud)
+        .get_object(&queue.to_cloud_key(&cloud.prefix, &UintN::from(file)))
+        .await
+        .unwrap()
+}
+
+async fn next_id(fs: &NormFS, queue: &normfs::QueueId) -> u64 {
+    fs.enqueue(queue, Bytes::from(vec![3u8; RECORD_LEN]))
+        .await
+        .unwrap()
+        .to_u64()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_cloud_queue_moved_to_store_writes_after_its_objects() {
+    let Some(cloud) = s3().await else { return };
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue;
+    {
+        let fs = open(temp.path(), settings(cloud.clone())).await;
+        queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, 2 * PER_PAGE).await;
+        fs.flush_queue(&queue).await.unwrap();
+        fs.close().await.unwrap();
+    }
+    let first = object(&cloud, &queue, 1).await.expect("object 1");
+
+    let store_cloud = Persist {
+        store: true,
+        cloud: true,
+        ..Persist::MEMORY
+    };
+    let fs = open(temp.path(), settings_with(cloud.clone(), store_cloud)).await;
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    assert_eq!(next_id(&fs, &queue).await, 2 * PER_PAGE);
+    fs.flush_queue(&queue).await.unwrap();
+    assert!(
+        UintN::from(3u64)
+            .to_file_path(queue.to_store_dir(temp.path()).to_str().unwrap(), "store")
+            .exists(),
+        "the local file continues the bucket's file ids"
+    );
+    fs.close().await.unwrap();
+    assert_eq!(object(&cloud, &queue, 1).await, Some(first));
+
+    let fs = open(temp.path(), settings_with(cloud, store_cloud)).await;
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    let sources = read_all(&fs, &queue, 0, 2 * PER_PAGE + 1).await;
+    assert_eq!(sources[0], DataSource::Cloud);
+    assert_eq!(*sources.last().unwrap(), DataSource::DiskStore);
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_store_queue_moved_to_cloud_writes_after_its_local_files() {
+    let Some(cloud) = s3().await else { return };
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue;
+    {
+        let fs = open(temp.path(), settings_with(cloud.clone(), Persist::STORE)).await;
+        queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, 2 * PER_PAGE).await;
+        fs.flush_queue(&queue).await.unwrap();
+        fs.close().await.unwrap();
+    }
+
+    let fs = open(temp.path(), settings(cloud.clone())).await;
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    assert_eq!(next_id(&fs, &queue).await, 2 * PER_PAGE);
+    fs.flush_queue(&queue).await.unwrap();
+    fs.close().await.unwrap();
+    assert!(object(&cloud, &queue, 1).await.is_none());
+
+    let fs = open(temp.path(), settings(cloud.clone())).await;
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    let sources = read_all(&fs, &queue, 0, 2 * PER_PAGE + 1).await;
+    assert_eq!(sources[0], DataSource::DiskStore);
+    assert_eq!(*sources.last().unwrap(), DataSource::Cloud);
+    fs.close().await.unwrap();
+    assert!(object(&cloud, &queue, 3).await.is_some());
+}
+
+#[tokio::test]
+async fn a_memory_queue_moved_to_cloud_keeps_its_ids_and_records_its_files() {
+    let Some(cloud) = s3().await else { return };
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue;
+    {
+        let fs = open(temp.path(), settings_with(cloud.clone(), Persist::MEMORY)).await;
+        queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, 3).await;
+        fs.close().await.unwrap();
+    }
+
+    {
+        let fs = open(temp.path(), settings(cloud.clone())).await;
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        assert_eq!(next_id(&fs, &queue).await, 3);
+        fs.flush_queue(&queue).await.unwrap();
+        fs.close().await.unwrap();
+    }
+
+    let fs = open(temp.path(), settings(cloud)).await;
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    assert_eq!(read_all(&fs, &queue, 3, 1).await, [DataSource::Cloud]);
+    fs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_cloud_queue_named_like_a_parents_file_ids_is_refused() {
+    let Some(cloud) = s3().await else { return };
+    let temp = tempfile::TempDir::new().unwrap();
+    let fs = open(temp.path(), settings(cloud)).await;
+    for name in ["abc", "cam0/abc", "cam0/left/001"] {
+        let err = fs
+            .ensure_queue_exists_for_write(&fs.resolve(name))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                normfs::Error::Config(normfs::ConfigError::CloudQueuePathLooksLikeIds { .. })
+            ),
+            "{name}: got {err:?}"
+        );
+    }
+    for name in ["cam0/left", "cam0/ABC", "cam0/abcd"] {
+        fs.ensure_queue_exists_for_write(&fs.resolve(name))
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    }
     fs.close().await.unwrap();
 }

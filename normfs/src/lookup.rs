@@ -116,8 +116,8 @@ async fn find_valid_file_backward(
     }
 }
 
-/// `cloud_last` bounds the walk for a cloud-direct queue, which has no local
-/// file to do it and should not pay for a LIST on every read.
+/// `cloud_last` is the last file a cloud-direct life landed: it bounds the
+/// walk with the local files, without a LIST on every read.
 pub async fn find_file_with_s3(
     queue: &QueueId,
     target_id: &UintN,
@@ -185,12 +185,10 @@ pub async fn find_file_with_s3(
     }
     .unwrap();
 
-    let last_file_id = match (&store_last_id, &wal_last_id) {
-        (Some(s), Some(w)) => Some(s.max(w).clone()),
-        (Some(s), None) => Some(s.clone()),
-        (None, Some(w)) => Some(w.clone()),
-        (None, None) => cloud_last,
-    };
+    let last_file_id = [store_last_id.clone(), wal_last_id.clone(), cloud_last]
+        .into_iter()
+        .flatten()
+        .max();
     let Some(last_file_id) = last_file_id else {
         return Ok(None);
     };

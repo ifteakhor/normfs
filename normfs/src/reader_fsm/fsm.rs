@@ -44,15 +44,11 @@ impl ReaderFSM {
         }
     }
 
-    /// The last file a cloud-direct queue landed, which bounds a file walk
-    /// the way the last local file bounds it for the others.
+    /// The last file any cloud-direct life of this queue landed. It bounds a
+    /// file walk alongside the last local file: a queue moved from store to
+    /// cloud-direct has both, and the landed ones come after.
     fn cloud_last(&self, queue: &QueueId) -> Option<UintN> {
-        let persist = self.queue_settings.get_config(&queue.to_string()).persist;
-        if persist.cloud && !persist.store {
-            self.pointers.last_landed(queue).map(|(_, file)| file)
-        } else {
-            None
-        }
+        self.pointers.last_landed(queue).map(|(_, file)| file)
     }
 
     /// A memory queue has no files, and a read must not go looking: its
@@ -999,10 +995,10 @@ impl ReaderFSM {
             store.get_last_file_id(&ctx.queue).await.ok().flatten()
         };
         let (wal_last_id, store_last_id) = tokio::join!(wal_last_id, store_last_id);
-        let last_file_id = match (wal_last_id, store_last_id) {
-            (Some(w), Some(s)) => Some(w.max(s)),
-            (w, s) => w.or(s).or_else(|| self.cloud_last(&ctx.queue)),
-        };
+        let last_file_id = [wal_last_id, store_last_id, self.cloud_last(&ctx.queue)]
+            .into_iter()
+            .flatten()
+            .max();
         if last_file_id.is_none_or(|last| next_file_id > last) {
             log::debug!(target: "normfs-reader-fsm",
                 "No file after {} for queue {}, completing read",

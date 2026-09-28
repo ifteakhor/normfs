@@ -8,6 +8,7 @@ pub mod sink;
 
 pub use client::S3Client;
 pub use downloader::CloudDownloader;
+pub use paths::is_id_component;
 pub use sink::{CloudSink, LandedIndex};
 
 #[derive(Debug, Clone)]
