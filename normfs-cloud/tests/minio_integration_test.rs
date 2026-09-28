@@ -605,3 +605,22 @@ async fn test_find_ids_follows_every_listing_page() {
         Some(uintn::UintN::from(1u64))
     );
 }
+
+#[tokio::test]
+async fn test_find_ids_under_a_prefix_the_server_would_encode() {
+    let Some(mut settings) = skip_if_no_s3() else {
+        return;
+    };
+    settings.prefix = format!("{} with space+plus", settings.prefix);
+    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+
+    put_ids(&client, &downloader, &queue, [1, 0x1000]).await;
+    assert_eq!(
+        downloader.find_max_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(0x1000u64))
+    );
+    assert_eq!(
+        downloader.find_min_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(1u64))
+    );
+}

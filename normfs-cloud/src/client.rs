@@ -177,6 +177,9 @@ impl S3Client {
             if let Some(delim) = delimiter {
                 query.query_mut().insert("delimiter", delim);
             }
+            // rusty-s3 asks for URL-encoded keys, and callers match keys
+            // against the prefix they passed: an encoded key matches nothing.
+            query.query_mut().remove("encoding-type");
             if let Some(max_keys) = self.list_page_size {
                 query.with_max_keys(max_keys);
             }
