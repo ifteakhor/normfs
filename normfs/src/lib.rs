@@ -313,6 +313,7 @@ impl NormFS {
             settings.mem_passive_page_size,
         )?);
 
+        settings.queue_settings.validate()?;
         let cloud_rules = settings.queue_settings.cloud_rules();
         if settings.cloud_settings.is_none() {
             if let Some(pattern) = cloud_rules.first() {

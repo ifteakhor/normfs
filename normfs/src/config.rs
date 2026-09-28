@@ -95,6 +95,12 @@ pub enum ConfigError {
     CloudWithoutSettings {
         pattern: String,
     },
+    /// Readable in old files, but no writer can produce it. Accepting it would
+    /// let a flush report records durable that no file ever held.
+    UnsupportedCompression {
+        pattern: String,
+        compression: CompressionType,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -111,6 +117,15 @@ impl std::fmt::Display for ConfigError {
                 write!(
                     f,
                     "rule '{pattern}': cloud requested but no cloud settings configured"
+                )
+            }
+            ConfigError::UnsupportedCompression {
+                pattern,
+                compression,
+            } => {
+                write!(
+                    f,
+                    "rule '{pattern}': {compression:?} compression cannot be written"
                 )
             }
         }
@@ -170,6 +185,17 @@ impl QueueConfig {
             ..Self::default()
         }
     }
+
+    fn validate(&self, pattern: &str) -> Result<(), ConfigError> {
+        self.persist.validate(pattern)?;
+        match self.compression_type {
+            CompressionType::None | CompressionType::Zstd => Ok(()),
+            compression => Err(ConfigError::UnsupportedCompression {
+                pattern: pattern.to_string(),
+                compression,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -183,11 +209,11 @@ impl QueueSettings {
         patterns: Vec<(String, QueueConfig)>,
         default_config: QueueConfig,
     ) -> Result<Self, ConfigError> {
-        default_config.persist.validate("default")?;
+        default_config.validate("default")?;
         let rules = patterns
             .into_iter()
             .map(|(pat, config)| {
-                config.persist.validate(&pat)?;
+                config.validate(&pat)?;
                 let glob = Glob::new(&pat)?;
                 Ok((glob.compile_matcher(), config))
             })
@@ -212,6 +238,14 @@ impl QueueSettings {
             rules: Vec::new(),
             default_config: QueueConfig::active(),
         }
+    }
+
+    /// `default_config` is public, so `new` alone cannot vouch for it.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        for (matcher, config) in &self.rules {
+            config.validate(matcher.glob().glob())?;
+        }
+        self.default_config.validate("default")
     }
 
     pub fn with_default_persist(mut self, persist: Persist) -> Self {

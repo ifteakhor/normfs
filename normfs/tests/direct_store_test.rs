@@ -11,6 +11,7 @@ use normfs::{
     ConfigError, DataSource, Error, NormFS, NormFsSettings, Persist, QueueConfig, QueueSettings,
     ReadPosition,
 };
+use normfs_types::CompressionType;
 use normfs_wal::WalSettings;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -429,6 +430,40 @@ async fn cloud_without_cloud_settings_is_refused() {
         .expect("refused");
     assert!(
         matches!(err, Error::Config(ConfigError::CloudWithoutSettings { .. })),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn compression_no_writer_supports_is_refused() {
+    let err = QueueSettings::new(
+        vec![(
+            "logs/*".to_string(),
+            QueueConfig {
+                compression_type: CompressionType::Gzip,
+                ..QueueConfig::default()
+            },
+        )],
+        QueueConfig::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ConfigError::UnsupportedCompression { .. }),
+        "got {err:?}"
+    );
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let mut xz = store_settings();
+    xz.queue_settings.default_config.compression_type = CompressionType::Xz;
+    let err = NormFS::new(temp.path().to_path_buf(), xz)
+        .await
+        .err()
+        .expect("refused");
+    assert!(
+        matches!(
+            err,
+            Error::Config(ConfigError::UnsupportedCompression { .. })
+        ),
         "got {err:?}"
     );
 }

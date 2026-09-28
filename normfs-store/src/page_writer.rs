@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use uintn::UintN;
 
+use crate::StoreError;
 use crate::header::{CompressionType, EncryptionType};
 use crate::sink::SealedFileSink;
 use crate::store_file::{self, SealedFile};
@@ -31,7 +32,7 @@ pub struct PageWriterSettings {
 }
 
 enum Request {
-    Flush(oneshot::Sender<()>),
+    Flush(oneshot::Sender<bool>),
     Close,
 }
 
@@ -91,14 +92,23 @@ impl PageStoreWriter {
         Self { tx, closing, done }
     }
 
-    /// Lands everything accepted so far, the open page included. `false` if
-    /// the writer is gone.
-    pub async fn flush(&self) -> bool {
+    /// Lands everything accepted so far, the open page included.
+    /// [`StoreError::FlushIncomplete`] once any file has failed to build, on
+    /// this flush or an earlier one: those records are in no file.
+    pub async fn flush(&self) -> Result<(), StoreError> {
+        let stopped = || {
+            StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "page writer stopped",
+            ))
+        };
         let (reply, done) = oneshot::channel();
-        if self.tx.send(Request::Flush(reply)).is_err() {
-            return false;
+        self.tx.send(Request::Flush(reply)).map_err(|_| stopped())?;
+        match done.await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(StoreError::FlushIncomplete),
+            Err(_) => Err(stopped()),
         }
-        done.await.is_ok()
     }
 
     /// As [`PageStoreWriter::flush`], then stops. `false` when an outstanding file
@@ -151,7 +161,7 @@ impl Task {
                         if let Some(runs) = self.seal() {
                             self.land(runs).await;
                         }
-                        let _ = reply.send(());
+                        let _ = reply.send(!self.build_failed);
                     }
                     Some(Request::Close) => {
                         self.catch_up().await;

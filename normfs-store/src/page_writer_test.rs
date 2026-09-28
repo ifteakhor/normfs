@@ -251,7 +251,7 @@ async fn full_pages_flushes_and_close_each_land_one_store_file() {
     assert_eq!(read_back(&f, 1).await, (0, vec![RECORD.to_vec(); 2]));
 
     // File 2: the flush takes the open page's single record.
-    assert!(writer.flush().await);
+    writer.flush().await.unwrap();
     assert_eq!(read_back(&f, 2).await, (2, vec![RECORD.to_vec()]));
     assert_eq!(
         f.store
@@ -260,7 +260,10 @@ async fn full_pages_flushes_and_close_each_land_one_store_file() {
             .unwrap(),
         Some((UintN::from(2u64), UintN::from(2u64)))
     );
-    assert!(writer.flush().await, "a flush with nothing owed is a no-op");
+    writer
+        .flush()
+        .await
+        .expect("a flush with nothing owed is a no-op");
     assert!(
         f.store
             .get_store_bytes(&f.queue, &UintN::from(3u64))
@@ -279,4 +282,34 @@ async fn full_pages_flushes_and_close_each_land_one_store_file() {
         !f.queue.to_wal_dir(f._dir.path()).exists(),
         "no .wal was ever written"
     );
+}
+
+#[tokio::test]
+async fn a_file_that_cannot_be_built_fails_every_later_flush() {
+    let f = fixture(4);
+    let sink = GatedSink::new();
+    let writer = PageStoreWriter::start(
+        &f.queue,
+        &UintN::one(),
+        WalHeader::default(),
+        PageWriterSettings {
+            compression: CompressionType::Gzip,
+            ..settings(1)
+        },
+        f.pool.clone(),
+        sink.clone(),
+        f.crypto.clone(),
+        f.store.written_sender_for_tests(),
+    );
+
+    f.pool.place(0, &RECORD).await.unwrap();
+    assert!(matches!(
+        writer.flush().await,
+        Err(crate::StoreError::FlushIncomplete)
+    ));
+    assert!(matches!(
+        writer.flush().await,
+        Err(crate::StoreError::FlushIncomplete)
+    ));
+    assert!(sink.landed().is_empty());
 }

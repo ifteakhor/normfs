@@ -47,6 +47,7 @@ mod signature_test;
 #[derive(Debug)]
 pub enum StoreError {
     CloseIncomplete,
+    FlushIncomplete,
     Io(std::io::Error),
     Header(header::StoreHeaderError),
     AnyHeader(store_header_v1::AnyStoreHeaderError),
@@ -66,6 +67,10 @@ impl std::fmt::Display for StoreError {
             StoreError::CloseIncomplete => write!(
                 f,
                 "store close incomplete: accepted records are not durable"
+            ),
+            StoreError::FlushIncomplete => write!(
+                f,
+                "store flush incomplete: a file could not be built, accepted records are not durable"
             ),
             StoreError::Io(e) => write!(f, "IO error: {}", e),
             StoreError::Header(e) => write!(f, "Store header error: {}", e),
@@ -320,11 +325,8 @@ impl PersistStore {
     pub async fn flush_page_writer(&self, queue: &QueueId) -> Result<(), StoreError> {
         let writer = self.page_writers.read().unwrap().get(queue).cloned();
         match writer {
-            Some(writer) if !writer.flush().await => Err(StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "page writer stopped",
-            ))),
-            _ => Ok(()),
+            Some(writer) => writer.flush().await,
+            None => Ok(()),
         }
     }
 
