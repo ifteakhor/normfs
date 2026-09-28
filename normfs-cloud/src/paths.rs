@@ -23,154 +23,93 @@ enum End {
     Max,
 }
 
-impl End {
-    /// The order to try directories in: the first with anything in it wins.
-    fn hex_digits(self) -> Vec<char> {
-        let mut digits = vec![
-            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
-        ];
-        if self == End::Max {
-            digits.reverse();
-        }
-        digits
-    }
-
-    fn better(self, candidate: &UintN, current: &UintN) -> bool {
-        match self {
-            End::Min => candidate < current,
-            End::Max => candidate > current,
-        }
-    }
+/// `UintN::to_file_path` pads every component to three lowercase hex digits,
+/// so at one level lexicographic order is numeric order. Anything else under
+/// the prefix is not one of ours.
+fn is_component(name: &str) -> bool {
+    name.len() == 3 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Files at a level are the ids with exactly this many digits; directories
-/// hold longer ones. So the smallest id is a file here if there is one, the
-/// largest is in a directory if there is one, and the two ends scan a level
-/// in opposite orders.
+/// An id path relative to the queue prefix, and how many components it has.
+/// More components is a larger id: the leading one is never `000`.
+type Found = (String, usize);
+
+/// Every id below a directory has more components than the files beside it,
+/// so a file on a level is smaller than anything under that level's
+/// directories. Between directories the name alone does not decide:
+/// `002/fff` is smaller than `001/000/000`. So the smallest id is a file here
+/// if there is one, and otherwise the shallowest, then first, among the
+/// directories; the largest is the deepest, then last. `bound` is the depth a
+/// candidate must beat, which is what lets a shallow subtree be dropped.
 fn find_id_recursive<'a>(
     client: &'a Arc<S3Client>,
-    current_prefix: &'a str,
+    prefix: &'a str,
     extension: &'a str,
     end: End,
-) -> Pin<Box<dyn Future<Output = Result<String, CloudError>> + Send + 'a>> {
+    level: usize,
+    bound: Option<usize>,
+) -> Pin<Box<dyn Future<Output = Result<Option<Found>, CloudError>> + Send + 'a>> {
     Box::pin(async move {
-        let delimiter = "/";
-
-        log::debug!("find_min_id_recursive: Listing prefix: {}", current_prefix);
-
-        let list_result = client.list_objects(current_prefix, Some(delimiter)).await?;
-
-        log::debug!(
-            "find_min_id_recursive: Got {} objects for prefix: {}",
-            list_result.contents.len(),
-            current_prefix
-        );
-
-        let mut min_file: Option<(String, UintN)> = None;
-
-        log::debug!(
-            "find_min_id_recursive: Processing {} objects",
-            list_result.contents.len()
-        );
-        for object in &list_result.contents {
-            let key = &object.key;
-            let relative_key = key.strip_prefix(current_prefix).unwrap_or(key);
-            let relative_key = relative_key.trim_start_matches('/');
-
-            if !relative_key.contains('/') && key.ends_with(&format!(".{}", extension)) {
-                log::debug!(
-                    "find_min_id_recursive: Found file at current level: {}",
-                    key
-                );
-                if let Ok(id) = path_to_id(relative_key, extension) {
-                    match &min_file {
-                        Some((_, min_id)) if end.better(&id, min_id) => {
-                            log::debug!(
-                                "find_min_id_recursive: New min file: {} (id: {:?})",
-                                relative_key,
-                                id
-                            );
-                            min_file = Some((relative_key.to_string(), id));
-                        }
-                        None => {
-                            log::debug!(
-                                "find_min_id_recursive: First min file: {} (id: {:?})",
-                                relative_key,
-                                id
-                            );
-                            min_file = Some((relative_key.to_string(), id));
-                        }
-                        _ => {}
-                    }
-                }
-            }
+        if end == End::Min && bound.is_some_and(|b| level + 1 >= b) {
+            return Ok(None);
         }
 
+        let listing = client.list_objects(prefix, Some("/")).await?;
+        let suffix = format!(".{extension}");
+
+        let mut files: Vec<&str> = listing
+            .contents
+            .iter()
+            .filter_map(|o| o.key.strip_prefix(prefix)?.strip_suffix(suffix.as_str()))
+            .filter(|stem| is_component(stem))
+            .collect();
+        let mut dirs: Vec<&str> = listing
+            .common_prefixes
+            .iter()
+            .filter_map(|p| p.prefix.strip_prefix(prefix)?.strip_suffix('/'))
+            .filter(|name| is_component(name))
+            .collect();
+        files.sort_unstable();
+        dirs.sort_unstable();
+
+        let here = |file: &&str| (format!("{file}{suffix}"), level + 1);
         if end == End::Min
-            && let Some((path, id)) = &min_file
+            && let Some(file) = files.first()
         {
-            log::debug!(
-                "find_min_id_recursive: Found file at current level, returning early: {} (id: {:?})",
-                path,
-                id
-            );
-            return Ok(path.clone());
+            return Ok(Some(here(file)));
         }
 
-        for hex_digit in end.hex_digits() {
-            let hex_str = hex_digit.to_string();
-
-            let mut found_dir = false;
-            log::debug!(
-                "find_min_id_recursive: Checking {} common prefixes for hex digit: {}",
-                list_result.common_prefixes.len(),
-                hex_str
-            );
-            for common_prefix in &list_result.common_prefixes {
-                let dir_name = common_prefix
-                    .prefix
-                    .strip_prefix(current_prefix)
-                    .unwrap_or(&common_prefix.prefix)
-                    .trim_start_matches('/')
-                    .trim_end_matches('/');
-
-                log::debug!("find_min_id_recursive: Found directory: {}", dir_name);
-
-                if dir_name == hex_str {
-                    found_dir = true;
-                    let subdir_prefix = &common_prefix.prefix;
-
-                    log::debug!(
-                        "find_min_id_recursive: Recursing into directory: {}",
-                        subdir_prefix
-                    );
-
-                    match find_id_recursive(client, subdir_prefix, extension, end).await {
-                        Ok(sub_path) => {
-                            let full_path = format!("{}/{}", hex_str, sub_path);
-                            return Ok(full_path);
-                        }
-                        Err(CloudError::NoFilesFound) => {
-                            log::debug!(
-                                "find_min_id_recursive: No files in directory {}, continuing",
-                                hex_str
-                            );
-                        }
-                        Err(e) => return Err(e),
-                    }
-                    break;
-                }
-            }
-            if found_dir {
-                break;
+        if end == End::Max {
+            dirs.reverse();
+        }
+        let mut best: Option<Found> = None;
+        for dir in dirs {
+            let sub_prefix = format!("{prefix}{dir}/");
+            let sub_bound = best.as_ref().map(|(_, depth)| *depth).or(bound);
+            if let Some((path, depth)) =
+                find_id_recursive(client, &sub_prefix, extension, end, level + 1, sub_bound).await?
+            {
+                best = Some((format!("{dir}/{path}"), depth));
             }
         }
 
-        match min_file {
-            Some((path, _)) => Ok(path),
-            None => Err(CloudError::NoFilesFound),
+        if best.is_none() && end == End::Max && bound.is_none_or(|b| level + 1 > b) {
+            best = files.last().map(here);
         }
+        Ok(best)
     })
+}
+
+async fn find_id(
+    client: &Arc<S3Client>,
+    prefix: &str,
+    extension: &str,
+    end: End,
+) -> Result<UintN, CloudError> {
+    let (path, _) = find_id_recursive(client, prefix, extension, end, 0, None)
+        .await?
+        .ok_or(CloudError::NoFilesFound)?;
+    path_to_id(&path, extension)
 }
 
 pub async fn find_min_id(
@@ -178,29 +117,18 @@ pub async fn find_min_id(
     prefix: &str,
     extension: &str,
 ) -> Result<UintN, CloudError> {
-    log::debug!(
-        "find_min_id: Starting search in prefix: {} with extension: {}",
-        prefix,
-        extension
-    );
-    let relative_path = find_id_recursive(client, prefix, extension, End::Min).await?;
-    log::debug!("find_min_id: Found min path: {}", relative_path);
-    let id = path_to_id(&relative_path, extension)?;
-    log::debug!("find_min_id: Min ID: {:?}", id);
-    Ok(id)
+    find_id(client, prefix, extension, End::Min).await
 }
 
-/// The highest file id under `prefix`: `find_min_id`'s descent, directories
-/// first and the digits reversed. One LIST per level, like it.
+/// One LIST per level for the smallest id in a contiguous range; the largest
+/// costs one per directory, since a shallow subtree is only known to be
+/// shallow once listed.
 pub async fn find_max_id(
     client: &Arc<S3Client>,
     prefix: &str,
     extension: &str,
 ) -> Result<UintN, CloudError> {
-    let relative_path = find_id_recursive(client, prefix, extension, End::Max).await?;
-    let id = path_to_id(&relative_path, extension)?;
-    log::debug!("find_max_id: Max ID: {:?}", id);
-    Ok(id)
+    find_id(client, prefix, extension, End::Max).await
 }
 
 #[cfg(test)]

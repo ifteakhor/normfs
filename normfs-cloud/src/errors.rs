@@ -10,6 +10,7 @@ pub enum CloudError {
     Io(std::io::Error),
     InvalidUrl(url::ParseError),
     InvalidStatusCode(u16),
+    TruncatedListingWithoutToken,
 }
 
 impl fmt::Display for CloudError {
@@ -23,6 +24,9 @@ impl fmt::Display for CloudError {
             CloudError::Io(e) => write!(f, "IO error: {}", e),
             CloudError::InvalidUrl(e) => write!(f, "Invalid URL: {}", e),
             CloudError::InvalidStatusCode(code) => write!(f, "Invalid status code: {}", code),
+            CloudError::TruncatedListingWithoutToken => {
+                write!(f, "listing truncated without a continuation token")
+            }
         }
     }
 }
@@ -37,7 +41,7 @@ impl std::error::Error for CloudError {
             CloudError::StoreHeader(e) => Some(e),
             CloudError::Io(e) => Some(e),
             CloudError::InvalidUrl(e) => Some(e),
-            CloudError::InvalidStatusCode(_) => None,
+            CloudError::InvalidStatusCode(_) | CloudError::TruncatedListingWithoutToken => None,
         }
     }
 }
