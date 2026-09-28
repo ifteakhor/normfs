@@ -218,3 +218,73 @@ async fn assert_records(fs: &NormFS, queue: &normfs::QueueId, count: u64, payloa
         assert_eq!(record.data.as_ref(), payload);
     }
 }
+
+#[tokio::test]
+async fn a_cloud_outage_is_a_cloud_error_not_a_missing_queue() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = NormFsSettings::all_active();
+    settings.queue_settings = QueueSettings::all_active().with_default_persist(Persist::CLOUD);
+    settings.cloud_settings = Some(normfs::CloudSettings {
+        endpoint,
+        bucket: "test".into(),
+        region: "us-east-1".into(),
+        access_key: "test".into(),
+        secret_key: "test".into(),
+        prefix: "test".into(),
+    });
+    let queue = normfs_types::QueueIdResolver::new("0000").resolve("/outage/q");
+    std::fs::write(
+        temp.path().join(".memory_pointers"),
+        format!("{}\t3\t1\n", queue.as_str()),
+    )
+    .unwrap();
+    let fs = NormFS::new(temp.path().to_path_buf(), settings)
+        .await
+        .unwrap();
+
+    // The start-up listing finds nothing past the pointer; every request
+    // after it fails.
+    tokio::spawn(async move {
+        let mut first = true;
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
+            let (status, body) = if std::mem::take(&mut first) {
+                (200, "<ListBucketResult></ListBucketResult>")
+            } else {
+                (503, "")
+            };
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let err = fs
+        .read(
+            &queue,
+            normfs::ReadPosition::Absolute(uintn::UintN::zero()),
+            1,
+            1,
+            tx,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, normfs::Error::Cloud(_)), "got {err:?}");
+    fs.close().await.unwrap();
+}

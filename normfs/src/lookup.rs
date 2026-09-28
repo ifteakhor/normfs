@@ -1,3 +1,4 @@
+use normfs_cloud::errors::CloudError;
 use normfs_cloud::CloudDownloader;
 use normfs_store::{PersistStore, StoreError};
 use normfs_types::QueueId;
@@ -9,6 +10,9 @@ use uintn::UintN;
 pub enum LookupError {
     Store(StoreError),
     Wal(WalError),
+    /// The bucket did not answer where only the bucket could: an outage, not
+    /// an absent queue.
+    Cloud(CloudError),
 }
 
 impl std::fmt::Display for LookupError {
@@ -16,6 +20,7 @@ impl std::fmt::Display for LookupError {
         match self {
             LookupError::Store(e) => write!(f, "Store lookup error: {}", e),
             LookupError::Wal(e) => write!(f, "WAL lookup error: {}", e),
+            LookupError::Cloud(e) => write!(f, "cloud lookup error: {}", e),
         }
     }
 }
@@ -25,6 +30,7 @@ impl std::error::Error for LookupError {
         match self {
             LookupError::Store(e) => Some(e),
             LookupError::Wal(e) => Some(e),
+            LookupError::Cloud(e) => Some(e),
         }
     }
 }
@@ -151,6 +157,9 @@ pub async fn find_file_with_s3(
                 }
                 id
             }
+            Err(e) if store_first_id.is_none() && wal_first_id.is_none() => {
+                return Err(LookupError::Cloud(e));
+            }
             Err(e) => {
                 log::warn!(target: "normfs-lookup", "Failed to get S3 first file ID for queue '{}': {}", queue, e);
                 None
@@ -224,12 +233,7 @@ pub async fn find_file_with_s3(
                                     first_file_id, queue);
                                 return Ok(None);
                             }
-                            Err(e) => {
-                                log::warn!(target: "normfs-lookup",
-                                    "S3 lookup failed for first file {} in queue '{}': {}. Using local data only.",
-                                    first_file_id, queue, e);
-                                return Ok(None);
-                            }
+                            Err(e) => return Err(LookupError::Cloud(e)),
                         }
                     } else {
                         return Err(LookupError::Wal(WalError::WalNotFound));

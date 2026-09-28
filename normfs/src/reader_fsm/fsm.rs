@@ -537,8 +537,11 @@ impl ReaderFSM {
                 log::error!(target: "normfs-reader-fsm",
                     "Lookup failed for queue '{}', id {}: {:?}",
                     queue, start_id, e);
-                // Convert lookup error to appropriate NormFS error
-                return Ok(ReaderState::Failed(Error::NotFound));
+                let error = match e {
+                    crate::lookup::LookupError::Cloud(e) => Error::Cloud(e),
+                    _ => Error::NotFound,
+                };
+                return Ok(ReaderState::Failed(error));
             }
         };
 
