@@ -467,3 +467,36 @@ async fn compression_no_writer_supports_is_refused() {
         "got {err:?}"
     );
 }
+
+#[tokio::test]
+async fn an_unreadable_latest_store_file_is_not_written_over() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue;
+    {
+        let fs = open(temp.path(), store_settings()).await;
+        queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, 2 * PER_PAGE).await;
+        fs.flush_queue(&queue).await.unwrap();
+        fs.close().await.unwrap();
+    }
+    let store = queue.to_store_dir(temp.path());
+    let second = UintN::from(2u64).to_file_path(store.to_str().unwrap(), "store");
+    let damaged = vec![0xEE; std::fs::metadata(&second).unwrap().len() as usize];
+    std::fs::write(&second, &damaged).unwrap();
+
+    let fs = open(temp.path(), store_settings()).await;
+    fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+    write(&fs, &queue, 1).await;
+    fs.flush_queue(&queue).await.unwrap();
+    fs.close().await.unwrap();
+
+    assert_eq!(
+        std::fs::read(&second).unwrap(),
+        damaged,
+        "an unreadable file may still be recoverable; it is never the next file"
+    );
+    assert!(UintN::from(3u64)
+        .to_file_path(store.to_str().unwrap(), "store")
+        .exists());
+}

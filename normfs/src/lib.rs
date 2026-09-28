@@ -941,18 +941,25 @@ impl NormFS {
 
         // A file that could not be read is not an empty file: `get_file_end`
         // already reports "absent" and "no entries" as Ok(None), and the reuse
-        // branch below hands its id to a writer that opens with truncate(true).
-        let wal = &self.wal;
-        let latest_unreadable = match wal.get_file_end(queue, &latest_file_id).await {
-            Err(e) => {
-                log::error!(target: "normfs",
-                    "Queue '{}' - Latest file {} could not be read ({:?}); writing to the next \
-                     file id rather than reusing it",
-                    queue, latest_file_id, e);
-                true
-            }
-            Ok(_) => false,
+        // branch below hands its id to a writer that truncates a `.wal` or
+        // renames a `.store` over it. Both sources are asked: in store mode
+        // the latest file is a store file the WAL has never seen.
+        let (wal_end, store_end) = tokio::join!(
+            self.wal.get_file_end(queue, &latest_file_id),
+            self.store.get_file_end(queue, &latest_file_id)
+        );
+        let unreadable = match (&wal_end, &store_end) {
+            (Err(e), _) => Some(format!("{e:?}")),
+            (_, Err(e)) => Some(format!("{e:?}")),
+            _ => None,
         };
+        if let Some(e) = &unreadable {
+            log::error!(target: "normfs",
+                "Queue '{}' - Latest file {} could not be read ({}); writing to the next \
+                 file id rather than reusing it",
+                queue, latest_file_id, e);
+        }
+        let latest_unreadable = unreadable.is_some();
 
         // Walk backward from the latest file ID to find the first file with actual entries
         let mut current_file_id = latest_file_id.clone();
