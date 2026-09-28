@@ -209,3 +209,27 @@ async fn a_lost_pointer_is_reconciled_from_the_bucket() {
     );
     fs.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn records_recovered_from_the_bucket_are_readable_before_anything_lands() {
+    let Some(cloud) = s3().await else { return };
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue;
+    {
+        let fs = open(temp.path(), settings(cloud.clone())).await;
+        queue = fs.resolve("cam0");
+        fs.ensure_queue_exists_for_write(&queue).await.unwrap();
+        write(&fs, &queue, PER_PAGE + 1).await;
+        fs.flush_queue(&queue).await.unwrap();
+        fs.close().await.unwrap();
+    }
+    std::fs::remove_file(temp.path().join(".memory_pointers")).unwrap();
+
+    let fs = open(temp.path(), settings(cloud)).await;
+    fs.ensure_queue_exists_for_read(&queue).await.unwrap();
+    assert_eq!(
+        read_all(&fs, &queue, 0, PER_PAGE + 1).await,
+        [DataSource::Cloud; PER_PAGE as usize + 1]
+    );
+    fs.close().await.unwrap();
+}

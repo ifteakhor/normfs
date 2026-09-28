@@ -1050,7 +1050,9 @@ impl NormFS {
     /// The pointer names the last landed file. The bucket is asked once for a
     /// later one, for a crash between the PUT and the pointer write: a file
     /// written at a lower id would overwrite acked records. Until the bucket
-    /// answers, the queue does not write.
+    /// answers, the queue does not write. A later file found there is written
+    /// back to the pointer before the queue starts, since readers bound their
+    /// file walk by it.
     async fn continue_cloud_queue(
         &self,
         queue: &QueueId,
@@ -1064,6 +1066,9 @@ impl NormFS {
                             std::io::ErrorKind::InvalidData,
                             format!("cloud file {max_file} has no recoverable range for queue {queue}"),
                         ))?;
+                    self.memory_pointers
+                        .mark_landed(queue, &last, &max_file)
+                        .map_err(Error::Io)?;
                     landed = Some((last, max_file));
                 }
             }
