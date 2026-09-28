@@ -1462,7 +1462,9 @@ impl NormFS {
         match drainer {
             Drainer::Wal => self.wal.close_writer(queue).await?,
             Drainer::Page => {
-                self.store.close_page_writer(queue).await;
+                if !self.store.close_page_writer(queue).await {
+                    return Err(Error::Wal(WalError::CloseIncomplete));
+                }
             }
             Drainer::None => {}
         }

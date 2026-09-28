@@ -1,11 +1,11 @@
 use crate::header::{CompressionType, EncryptionType};
-use crate::page_writer::{PageStoreWriter, PageWriterSettings};
+use crate::page_writer::{PageStoreWriter, PageWriterSettings, seal_through};
 use crate::sink::SealedFileSink;
 use crate::store_file::SealedFile;
 use crate::{PersistStore, StoreWriteConfig};
 use normfs_crypto::CryptoContext;
 use normfs_types::{QueueId, QueueIdResolver};
-use normfs_wal::{AnyWalHeader, PagePool, WalHeader, WalStore};
+use normfs_wal::{AnyWalHeader, PagePool, WAL_HEADER_V1_MAX_SIZE, WalHeader, WalStore};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -312,4 +312,27 @@ async fn a_file_that_cannot_be_built_fails_every_later_flush() {
         Err(crate::StoreError::FlushIncomplete)
     ));
     assert!(sink.landed().is_empty());
+}
+
+#[tokio::test]
+async fn a_seal_takes_the_file_an_append_closed_before_it() {
+    let f = fixture(4);
+    f.pool.set_drainer();
+    f.pool.arm_page_files(WAL_HEADER_V1_MAX_SIZE as u64);
+
+    // Records 0 and 1 fill file 0's page; record 2 opens file 1 before the
+    // writer has looked at the epoch.
+    for i in 0..3u64 {
+        f.pool.place(i, &RECORD).await.unwrap();
+    }
+    assert_eq!(f.pool.epoch(), 1);
+
+    let mut next_epoch = 0;
+    let files = seal_through(&f.pool, &mut next_epoch);
+    let ranges: Vec<_> = files
+        .iter()
+        .map(|r| (r.first_entry_id, r.last_entry_id))
+        .collect();
+    assert_eq!(ranges, [(0, 1), (2, 2)]);
+    assert_eq!(next_epoch, 2);
 }

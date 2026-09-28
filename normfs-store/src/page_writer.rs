@@ -79,7 +79,7 @@ impl PageStoreWriter {
             file_id: file_id.clone(),
             header,
             next_epoch: 0,
-            build_failed: false,
+            durable_floor: None,
             settings,
             pool,
             sink,
@@ -131,7 +131,10 @@ struct Task {
     file_id: UintN,
     header: WalHeader,
     next_epoch: u64,
-    build_failed: bool,
+    /// The first id of the first file that failed to build. Nothing from here
+    /// on is reported durable, even once later files land: their pages would
+    /// be recycled and a close would certify records that are in no file.
+    durable_floor: Option<u64>,
     settings: PageWriterSettings,
     pool: Arc<PagePool>,
     sink: Arc<dyn SealedFileSink>,
@@ -157,20 +160,14 @@ impl Task {
                 _ = flush.notified() => self.catch_up().await,
                 req = rx.recv() => match req {
                     Some(Request::Flush(reply)) => {
-                        self.catch_up().await;
-                        if let Some(runs) = self.seal() {
-                            self.land(runs).await;
-                        }
-                        let _ = reply.send(!self.build_failed);
+                        self.land_all().await;
+                        let _ = reply.send(self.durable_floor.is_none());
                     }
                     Some(Request::Close) => {
-                        self.catch_up().await;
-                        if let Some(runs) = self.seal() {
-                            self.land(runs).await;
-                        }
+                        self.land_all().await;
                         // Reader pins can outlive the writer; they prevent
                         // page reuse, but do not undo a successful landing.
-                        self.done.send_replace(Some(!self.build_failed));
+                        self.done.send_replace(Some(self.durable_floor.is_none()));
                         self.pool.clear_drainer();
                         return;
                     }
@@ -193,22 +190,23 @@ impl Task {
         }
     }
 
-    fn seal(&mut self) -> Option<FileRuns> {
-        let (epoch, runs) = self.pool.seal_open_file()?;
-        debug_assert_eq!(
-            epoch, self.next_epoch,
-            "sealed an epoch the writer had not reached"
-        );
-        self.next_epoch = epoch + 1;
-        Some(runs)
+    /// Everything accepted so far, the open page included.
+    async fn land_all(&mut self) {
+        self.catch_up().await;
+        for runs in seal_through(&self.pool, &mut self.next_epoch) {
+            self.land(runs).await;
+        }
+        // An empty seal says nothing about files closed after the first look.
+        self.catch_up().await;
     }
 
     async fn land(&mut self, runs: FileRuns) {
+        let first = runs.first_entry_id;
         if let Some(built) = self.build(runs).await {
             self.try_land(&built.sealed).await;
             self.finish(built);
         } else {
-            self.build_failed = true;
+            self.durable_floor.get_or_insert(first);
         }
     }
 
@@ -266,8 +264,8 @@ impl Task {
                 last_entry_id: runs.last_entry_id,
             }),
             Err(e) => {
-                // Deterministic, so a retry would fail the same way; the
-                // records stay in memory, unreported as durable, until evicted.
+                // Deterministic, so a retry would fail the same way. The
+                // records stay in memory, held there by `durable_floor`.
                 log::error!(target: "normfs-store",
                     "cannot build store file {} for queue {} (entries {}..={}): {e}; \
                      these records reach no file",
@@ -318,11 +316,16 @@ impl Task {
     }
 
     fn finish(&mut self, built: Built) {
-        self.pool
-            .mark_durable(built.last_entry_id.saturating_add(1));
-        let _ = self
-            .written_sender
-            .send((self.queue.clone(), UintN::from(built.last_entry_id)));
+        let through = built.last_entry_id.saturating_add(1);
+        match self.durable_floor {
+            Some(floor) => self.pool.mark_durable(floor.min(through)),
+            None => {
+                self.pool.mark_durable(through);
+                let _ = self
+                    .written_sender
+                    .send((self.queue.clone(), UintN::from(built.last_entry_id)));
+            }
+        }
         self.file_id = self.file_id.increment();
         self.header = built.header;
         self.header.num_entries_before = UintN::from(built.last_entry_id).increment();
@@ -330,4 +333,24 @@ impl Task {
             "queue {}: entries {}..={} landed as store file {}",
             self.queue, built.first_entry_id, built.last_entry_id, self.file_id);
     }
+}
+
+/// Seals the open file, preceded by any file closed since the writer last
+/// looked. An append can open a page between `catch_up` reading the epoch and
+/// the seal taking the lock; sealing alone would then skip the file it closed,
+/// and the next landing would report that file's records durable.
+pub(crate) fn seal_through(pool: &PagePool, next_epoch: &mut u64) -> Vec<FileRuns> {
+    let Some((sealed_epoch, sealed)) = pool.seal_open_file() else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    while *next_epoch < sealed_epoch {
+        if let Some(runs) = pool.take_file(*next_epoch) {
+            files.push(runs);
+        }
+        *next_epoch += 1;
+    }
+    files.push(sealed);
+    *next_epoch = sealed_epoch + 1;
+    files
 }
