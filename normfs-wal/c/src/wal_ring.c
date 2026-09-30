@@ -56,6 +56,47 @@ static void normfs_wal_ring_fold_in_pool(struct normfs_wal_ring *ring, uint64_t 
 	(void)ring_id;
 }
 
+/@ requires ring->page_count >= 1;
+   requires ring->page_size >= NORMFS_WAL_ENTRY_V1_MIN_SIZE + 4;
+   requires ring->page_size <= 0xFFFFFFFF;
+   requires ring->active < ring->page_count;
+   requires \forall integer k; 0 <= k < ring->page_count ==>
+              ring->pages[k].cap == ring->page_size;
+   requires ring->pages[ring->active].first_entry_id +
+              (integer)ring->pages[ring->active].count == ring->next_entry_id;
+   assigns \nothing;
+   ensures normfs_wal_ring_scalar_wf(ring);
+@/
+static void normfs_wal_ring_fold_scalar_wf(struct normfs_wal_ring *ring)
+{
+	(void)ring;
+}
+
+/@ requires \valid(ring->arena + (0 .. ring->page_count * ring->page_size - 1));
+   requires \forall integer k; 0 <= k < ring->page_count ==>
+              ring->pages[k].buf == ring->arena + k * ring->page_size;
+   assigns \nothing;
+   ensures normfs_wal_ring_layout(ring);
+@/
+static void normfs_wal_ring_fold_layout(struct normfs_wal_ring *ring)
+{
+	(void)ring;
+}
+
+/@ requires normfs_wal_pool_wf(pool);
+   assigns \nothing;
+   ensures \forall integer k; 0 <= k < pool->page_count ==>
+             normfs_wal_page_layout(&pool->pages[k]);
+   ensures \forall integer k; 0 <= k < pool->page_count ==>
+             normfs_wal_page_offsets_wf(&pool->pages[k]);
+   ensures \forall integer k; 0 <= k < pool->page_count ==>
+             normfs_wal_page_ids_wf(&pool->pages[k]);
+@/
+static void normfs_wal_ring_unfold_pool_pages(struct normfs_wal_pool *pool)
+{
+	(void)pool;
+}
+
 */
 
 void
@@ -222,6 +263,7 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	      ring->first_slot == \at(ring->first_slot, Pre) &&
 	      ring->page_size == \at(ring->page_size, Pre) &&
 	      ring->page_count == page_count; */
+	/*@ ghost normfs_wal_ring_unfold_pool_pages(ring->pool); */
 
 	/* Read off pool_take's postcondition rather than carried across the
 	 * write: pool_wf already says every page of the pool is well-formed, and
@@ -313,6 +355,7 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	/*@ assert pool_pages_unchanged_by_count_bump:
 	      \forall integer k; 0 <= k < ring->pool->page_count ==>
 	        ring->pool->pages[k].cap == \at(ring->pool->pages[k].cap, taken) &&
+	        ring->pool->pages[k].count == \at(ring->pool->pages[k].count, taken) &&
 	        ring->pool->pages[k].used_bytes ==
 	          \at(ring->pool->pages[k].used_bytes, taken) &&
 	        ring->pool->pages[k].first_entry_id ==
@@ -431,7 +474,16 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	/*@ assert active_id_run_final:
 	      ring->pages[ring->active].first_entry_id +
 	        (integer)ring->pages[ring->active].count == ring->next_entry_id; */
+	/*@ assert count_positive_final: ring->page_count >= 1; */
+	/*@ assert page_size_bounds_final:
+	      ring->page_size >= NORMFS_WAL_ENTRY_V1_MIN_SIZE + 4 &&
+	      ring->page_size <= 0xFFFFFFFF; */
+	/*@ assert caps_final:
+	      \forall integer k; 0 <= k < ring->page_count ==>
+	        ring->pages[k].cap == ring->page_size; */
+	/*@ ghost normfs_wal_ring_fold_scalar_wf(ring); */
 	/*@ assert scalar_wf_final: normfs_wal_ring_scalar_wf(ring); */
+	/*@ ghost normfs_wal_ring_fold_layout(ring); */
 	/*@ assert layout_pred_final: normfs_wal_ring_layout(ring); */
 	/*@ assert pages_wf_pred_final: normfs_wal_ring_pages_wf(ring); */
 
