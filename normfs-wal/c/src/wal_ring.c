@@ -97,6 +97,42 @@ static void normfs_wal_ring_unfold_pool_pages(struct normfs_wal_pool *pool)
 	(void)pool;
 }
 
+/@ requires \forall integer k; 0 <= k < pool->page_count ==>
+              normfs_wal_page_offsets_wf(&pool->pages[k]);
+   assigns \nothing;
+   ensures \forall integer k, i;
+             0 <= k < pool->page_count && 0 <= i < pool->pages[k].count ==>
+               0 <= normfs_wal_page_offset_logic(&pool->pages[k], i) <
+                 pool->pages[k].used_bytes;
+   ensures \forall integer k, i;
+             0 <= k < pool->page_count &&
+             0 <= i < (integer)pool->pages[k].count - 1 ==>
+               normfs_wal_page_offset_logic(&pool->pages[k], i) <
+                 normfs_wal_page_offset_logic(&pool->pages[k], i + 1);
+@/
+static void normfs_wal_ring_unfold_pool_offsets(struct normfs_wal_pool *pool)
+{
+	(void)pool;
+}
+
+/@ requires \forall integer k, i;
+              0 <= k < pool->page_count && 0 <= i < pool->pages[k].count ==>
+                0 <= normfs_wal_page_offset_logic(&pool->pages[k], i) <
+                  pool->pages[k].used_bytes;
+   requires \forall integer k, i;
+              0 <= k < pool->page_count &&
+              0 <= i < (integer)pool->pages[k].count - 1 ==>
+                normfs_wal_page_offset_logic(&pool->pages[k], i) <
+                  normfs_wal_page_offset_logic(&pool->pages[k], i + 1);
+   assigns \nothing;
+   ensures \forall integer k; 0 <= k < pool->page_count ==>
+             normfs_wal_page_offsets_wf(&pool->pages[k]);
+@/
+static void normfs_wal_ring_fold_pool_offsets(struct normfs_wal_pool *pool)
+{
+	(void)pool;
+}
+
 */
 
 void
@@ -264,6 +300,7 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	      ring->page_size == \at(ring->page_size, Pre) &&
 	      ring->page_count == page_count; */
 	/*@ ghost normfs_wal_ring_unfold_pool_pages(ring->pool); */
+	/*@ ghost normfs_wal_ring_unfold_pool_offsets(ring->pool); */
 
 	/* Read off pool_take's postcondition rather than carried across the
 	 * write: pool_wf already says every page of the pool is well-formed, and
@@ -377,6 +414,19 @@ normfs_wal_ring_retain_page(struct normfs_wal_ring *ring, uint64_t ring_id)
 	/*@ assert pool_page_layouts_final:
 	      \forall integer k; 0 <= k < ring->pool->page_count ==>
 	        normfs_wal_page_layout(&ring->pool->pages[k]); */
+	/*@ assert pool_offsets_in_range_final:
+	      \forall integer k, i;
+	        0 <= k < ring->pool->page_count &&
+	        0 <= i < ring->pool->pages[k].count ==>
+	          0 <= normfs_wal_page_offset_logic(&ring->pool->pages[k], i) <
+	            ring->pool->pages[k].used_bytes; */
+	/*@ assert pool_offsets_ordered_final:
+	      \forall integer k, i;
+	        0 <= k < ring->pool->page_count &&
+	        0 <= i < (integer)ring->pool->pages[k].count - 1 ==>
+	          normfs_wal_page_offset_logic(&ring->pool->pages[k], i) <
+	            normfs_wal_page_offset_logic(&ring->pool->pages[k], i + 1); */
+	/*@ ghost normfs_wal_ring_fold_pool_offsets(ring->pool); */
 	/*@ assert pool_page_offsets_final:
 	      \forall integer k; 0 <= k < ring->pool->page_count ==>
 	        normfs_wal_page_offsets_wf(&ring->pool->pages[k]); */

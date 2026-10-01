@@ -114,6 +114,8 @@ if(FRAMAC)
         normfs_wal_ring_fold_scalar_wf
         normfs_wal_ring_fold_layout
         normfs_wal_ring_unfold_pool_pages
+        normfs_wal_ring_unfold_pool_offsets
+        normfs_wal_ring_fold_pool_offsets
         normfs_wal_ring_init
         normfs_wal_ring_retain_page
         normfs_wal_ring_try_append
