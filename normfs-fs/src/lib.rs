@@ -310,9 +310,11 @@ impl Fs {
 
     /// Writes `spec.runs` to `spec.tmp`, syncs, renames it to `spec.dst` and
     /// syncs the directory. `then`, if given, runs on the executor's thread
-    /// right after the directory sync and before this returns: bookkeeping
+    /// once the rename has succeeded and before this returns: bookkeeping
     /// put there cannot be separated from the rename by a dropped future.
-    /// A callback panic is logged; the completed publication still returns success.
+    /// It runs even when the directory sync then fails and this returns an
+    /// error, because `spec.dst` already holds the new file.
+    /// A callback panic is logged and does not change the result.
     pub async fn publish(
         &self,
         spec: PublishSpec,

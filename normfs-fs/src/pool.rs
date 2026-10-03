@@ -132,7 +132,12 @@ fn run_plan(job: PlanJob) {
         reply,
     } = job;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let (file, absent, opened) = drive(&mut plan, &res)?;
+        let Driven {
+            file,
+            absent,
+            opened,
+            renamed,
+        } = drive(&mut plan, &res)?;
         if opened && plan.kind() == Kind::Publish && plan.next().ok() == Some(Op::Failed) {
             // An unsuccessful exclusive open never owns the existing name.
             let mut e = Errno::new();
@@ -141,10 +146,10 @@ fn run_plan(job: PlanJob) {
                 normfs_fs_sys_unlink(plan.tmp().as_ptr(), plan.tmp().to_bytes().len(), &mut e.0)
             };
         }
+        // The rename replaced the file; a directory sync failing after it does not undo that.
         if let Some(then) = then
-            && plan.next().ok() == Some(Op::Done)
+            && renamed
         {
-            // DONE is irreversible; accounting failure cannot turn it into a retryable publish.
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 then(&PublishReport {
                     old_len: plan.old_len(),
@@ -162,9 +167,16 @@ fn run_plan(job: PlanJob) {
     let _ = reply.send(result);
 }
 
+struct Driven {
+    file: Option<File>,
+    absent: bool,
+    opened: bool,
+    renamed: bool,
+}
+
 /// The step loop. Errors here are executor faults (a report the planner
 /// refuses); a failing syscall is a report, not an error.
-fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool, bool), FsError> {
+fn drive(plan: &mut Plan, res: &Resources) -> Result<Driven, FsError> {
     if plan.kind() == Kind::Publish {
         if path_of(plan.tmp()) == path_of(plan.dst()) {
             return Err(std::io::Error::new(
@@ -178,6 +190,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool, bool),
     let mut owned: Option<OwnedFd> = None;
     let mut absent = false;
     let mut opened = false;
+    let mut renamed = false;
     let fd_of = |owned: &Option<OwnedFd>| -> RawFd {
         match (owned, &res.file) {
             (Some(fd), _) => fd.as_raw_fd(),
@@ -303,6 +316,7 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool, bool),
                     )
                 };
                 if rc == 0 {
+                    renamed = true;
                     plan.ok(0)?;
                 } else {
                     plan.err(e.0)?;
@@ -364,9 +378,21 @@ fn drive(plan: &mut Plan, res: &Resources) -> Result<(Option<File>, bool, bool),
                 } else {
                     None
                 };
-                return Ok((file, absent, opened));
+                return Ok(Driven {
+                    file,
+                    absent,
+                    opened,
+                    renamed,
+                });
             }
-            Op::Failed => return Ok((None, absent, opened)),
+            Op::Failed => {
+                return Ok(Driven {
+                    file: None,
+                    absent,
+                    opened,
+                    renamed,
+                });
+            }
         }
     }
 }
