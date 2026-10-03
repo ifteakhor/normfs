@@ -1,3 +1,4 @@
+use normfs_cloud::errors::CloudError;
 use normfs_cloud::CloudDownloader;
 use normfs_store::{PersistStore, StoreError};
 use normfs_types::QueueId;
@@ -9,6 +10,9 @@ use uintn::UintN;
 pub enum LookupError {
     Store(StoreError),
     Wal(WalError),
+    /// The bucket did not answer where only the bucket could: an outage, not
+    /// an absent queue.
+    Cloud(CloudError),
 }
 
 impl std::fmt::Display for LookupError {
@@ -16,6 +20,7 @@ impl std::fmt::Display for LookupError {
         match self {
             LookupError::Store(e) => write!(f, "Store lookup error: {}", e),
             LookupError::Wal(e) => write!(f, "WAL lookup error: {}", e),
+            LookupError::Cloud(e) => write!(f, "cloud lookup error: {}", e),
         }
     }
 }
@@ -25,6 +30,7 @@ impl std::error::Error for LookupError {
         match self {
             LookupError::Store(e) => Some(e),
             LookupError::Wal(e) => Some(e),
+            LookupError::Cloud(e) => Some(e),
         }
     }
 }
@@ -75,6 +81,7 @@ async fn find_valid_file_backward(
     min_file_id: &UintN,
     store: &PersistStore,
     wal: &WalStore,
+    cloud_downloader: Option<&Arc<CloudDownloader>>,
 ) -> Result<Option<(UintN, UintN, Option<UintN>)>, LookupError> {
     let mut search_id = start_file_id.clone();
     loop {
@@ -91,6 +98,12 @@ async fn find_valid_file_backward(
                 {
                     return Ok(Some((search_id, start, Some(end))));
                 }
+                // A cloud-direct queue's files were never local.
+                if let Some(s3) = cloud_downloader {
+                    if let Ok(Some((start, end))) = s3.get_file_range(queue, &search_id).await {
+                        return Ok(Some((search_id, start, Some(end))));
+                    }
+                }
                 if search_id <= *min_file_id {
                     return Ok(None);
                 }
@@ -103,12 +116,15 @@ async fn find_valid_file_backward(
     }
 }
 
+/// `cloud_last` is the last file a cloud-direct life landed: it bounds the
+/// walk with the local files, without a LIST on every read.
 pub async fn find_file_with_s3(
     queue: &QueueId,
     target_id: &UintN,
     store: &PersistStore,
     wal: &WalStore,
     cloud_downloader: Option<&Arc<CloudDownloader>>,
+    cloud_last: Option<UintN>,
 ) -> Result<Option<UintN>, LookupError> {
     log::debug!(target: "normfs-lookup", "Finding file for queue '{}', target ID: {}", queue, target_id);
 
@@ -141,6 +157,9 @@ pub async fn find_file_with_s3(
                 }
                 id
             }
+            Err(e) if store_first_id.is_none() && wal_first_id.is_none() => {
+                return Err(LookupError::Cloud(e));
+            }
             Err(e) => {
                 log::warn!(target: "normfs-lookup", "Failed to get S3 first file ID for queue '{}': {}", queue, e);
                 None
@@ -166,13 +185,13 @@ pub async fn find_file_with_s3(
     }
     .unwrap();
 
-    let last_file_id = match (&store_last_id, &wal_last_id) {
-        (Some(s), Some(w)) => Some(s.max(w).clone()),
-        (Some(s), None) => Some(s.clone()),
-        (None, Some(w)) => Some(w.clone()),
-        (None, None) => return Ok(None),
-    }
-    .unwrap();
+    let last_file_id = [store_last_id.clone(), wal_last_id.clone(), cloud_last]
+        .into_iter()
+        .flatten()
+        .max();
+    let Some(last_file_id) = last_file_id else {
+        return Ok(None);
+    };
 
     log::debug!(target: "normfs-lookup",
         "Absolute file range for queue '{}': {} to {}",
@@ -212,12 +231,7 @@ pub async fn find_file_with_s3(
                                     first_file_id, queue);
                                 return Ok(None);
                             }
-                            Err(e) => {
-                                log::warn!(target: "normfs-lookup",
-                                    "S3 lookup failed for first file {} in queue '{}': {}. Using local data only.",
-                                    first_file_id, queue, e);
-                                return Ok(None);
-                            }
+                            Err(e) => return Err(LookupError::Cloud(e)),
                         }
                     } else {
                         return Err(LookupError::Wal(WalError::WalNotFound));
@@ -250,11 +264,19 @@ pub async fn find_file_with_s3(
 
     // Walk backward from last_file_id to find effective last file with data.
     // Handles empty/missing trailing WAL or Store files (same pattern as recovery).
-    let (last_file_id, last_file_start, last_file_end) =
-        match find_valid_file_backward(queue, &last_file_id, &first_file_id, store, wal).await? {
-            Some((file_id, start, end)) => (file_id, start, end),
-            None => return Ok(None), // no files with data
-        };
+    let (last_file_id, last_file_start, last_file_end) = match find_valid_file_backward(
+        queue,
+        &last_file_id,
+        &first_file_id,
+        store,
+        wal,
+        cloud_downloader,
+    )
+    .await?
+    {
+        Some((file_id, start, end)) => (file_id, start, end),
+        None => return Ok(None), // no files with data
+    };
 
     if target_id > &last_file_start {
         log::debug!(target: "normfs-lookup",
@@ -392,6 +414,7 @@ async fn binary_search(
                                 &min_search,
                                 store,
                                 wal,
+                                cloud_downloader,
                             )
                             .await?
                             {
@@ -411,8 +434,15 @@ async fn binary_search(
                         // Mid file is empty — walk backward to find nearest valid file.
                         // If none found between left and mid, target must be in left file.
                         let min_search = left_file_id.increment();
-                        match find_valid_file_backward(queue, &mid_file_id, &min_search, store, wal)
-                            .await?
+                        match find_valid_file_backward(
+                            queue,
+                            &mid_file_id,
+                            &min_search,
+                            store,
+                            wal,
+                            cloud_downloader,
+                        )
+                        .await?
                         {
                             Some((valid_id, valid_start, valid_end)) => {
                                 // Use valid file as new right boundary

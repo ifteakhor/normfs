@@ -8,6 +8,7 @@ pub struct S3Client {
     bucket: Bucket,
     credentials: Credentials,
     http_client: reqwest::Client,
+    list_page_size: Option<usize>,
 }
 
 impl S3Client {
@@ -30,7 +31,27 @@ impl S3Client {
             bucket,
             credentials,
             http_client,
+            list_page_size: None,
         })
+    }
+
+    /// Caps each listing page below the endpoint's own limit, so a test can
+    /// reach the second page without a thousand objects.
+    pub fn with_list_page_size(mut self, keys: usize) -> Self {
+        self.list_page_size = Some(keys);
+        self
+    }
+
+    /// Creates the bucket; an existing one is not an error. For tests and
+    /// first-run tooling, not the write path.
+    pub async fn create_bucket(&self) -> Result<(), crate::errors::CloudError> {
+        let action = self.bucket.create_bucket(&self.credentials);
+        let url = action.sign(PRESIGNED_URL_DURATION);
+        let response = self.http_client.put(url.as_str()).send().await?;
+        match response.status().as_u16() {
+            200 | 409 => Ok(()),
+            code => Err(crate::errors::CloudError::InvalidStatusCode(code)),
+        }
     }
 
     pub async fn put_object(
@@ -134,42 +155,62 @@ impl S3Client {
         Ok(Some(bytes))
     }
 
+    /// Every page of the listing: a caller looking for the largest key cannot
+    /// stop at the first thousand.
     pub async fn list_objects(
         &self,
         prefix: &str,
         delimiter: Option<&str>,
     ) -> Result<ListObjectsResult, crate::errors::CloudError> {
-        let mut query =
-            rusty_s3::actions::ListObjectsV2::new(&self.bucket, Some(&self.credentials));
-        query.with_prefix(prefix);
+        let mut out = ListObjectsResult {
+            contents: Vec::new(),
+            common_prefixes: Vec::new(),
+        };
+        let mut token: Option<String> = None;
+        loop {
+            let mut query =
+                rusty_s3::actions::ListObjectsV2::new(&self.bucket, Some(&self.credentials));
+            query.with_prefix(prefix);
+            // Into the action before signing: a query parameter appended to the
+            // signed URL is outside the signature, and a strict endpoint answers
+            // 403 to every listing.
+            if let Some(delim) = delimiter {
+                query.query_mut().insert("delimiter", delim);
+            }
+            // rusty-s3 asks for URL-encoded keys, and callers match keys
+            // against the prefix they passed: an encoded key matches nothing.
+            query.query_mut().remove("encoding-type");
+            if let Some(max_keys) = self.list_page_size {
+                query.with_max_keys(max_keys);
+            }
+            if let Some(token) = &token {
+                query.with_continuation_token(token.as_str());
+            }
+            let url = query.sign(PRESIGNED_URL_DURATION);
 
-        // Build URL with delimiter as a query parameter if provided
-        let mut url = query.sign(PRESIGNED_URL_DURATION);
-        if let Some(delim) = delimiter {
-            // Manually add delimiter to query string
-            let url_str = if url.query().is_some() {
-                format!("{}&delimiter={}", url.as_str(), urlencoding::encode(delim))
-            } else {
-                format!("{}?delimiter={}", url.as_str(), urlencoding::encode(delim))
-            };
-            url = url::Url::parse(&url_str)?;
+            let response = self.http_client.get(url.as_str()).send().await?;
+
+            let status = response.status().as_u16();
+
+            if status != 200 {
+                return Err(crate::errors::CloudError::InvalidStatusCode(status));
+            }
+
+            let xml = response.text().await?;
+            let page: ListBucketResult = quick_xml::de::from_str(&xml)?;
+            out.contents.extend(page.contents);
+            out.common_prefixes.extend(page.common_prefixes);
+
+            if !page.is_truncated {
+                return Ok(out);
+            }
+            // A truncated page without a token would repeat the first page
+            // forever.
+            token = Some(
+                page.next_continuation_token
+                    .ok_or(crate::errors::CloudError::TruncatedListingWithoutToken)?,
+            );
         }
-
-        let response = self.http_client.get(url.as_str()).send().await?;
-
-        let status = response.status().as_u16();
-
-        if status != 200 {
-            return Err(crate::errors::CloudError::InvalidStatusCode(status));
-        }
-
-        let xml = response.text().await?;
-        let result: ListBucketResult = quick_xml::de::from_str(&xml)?;
-
-        Ok(ListObjectsResult {
-            contents: result.contents,
-            common_prefixes: result.common_prefixes,
-        })
     }
 
     pub fn bucket(&self) -> &Bucket {
@@ -194,6 +235,10 @@ struct ListBucketResult {
     contents: Vec<S3Object>,
     #[serde(rename = "CommonPrefixes", default)]
     common_prefixes: Vec<CommonPrefix>,
+    #[serde(rename = "IsTruncated", default)]
+    is_truncated: bool,
+    #[serde(rename = "NextContinuationToken", default)]
+    next_continuation_token: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, Clone)]

@@ -467,3 +467,160 @@ async fn test_get_object_range() {
         range_data.len()
     );
 }
+
+#[tokio::test]
+async fn test_create_bucket_is_idempotent() {
+    let settings = match skip_if_no_s3() {
+        Some(s) => s,
+        None => return,
+    };
+    let client = create_client(&settings).unwrap();
+    client.create_bucket().await.expect("first create");
+    client.create_bucket().await.expect("second create");
+}
+
+/// A downloader over a prefix no other run shares, and the queue under it.
+async fn fresh_queue(
+    settings: &CloudSettings,
+    list_page_size: Option<usize>,
+) -> (
+    std::sync::Arc<S3Client>,
+    normfs_cloud::CloudDownloader,
+    normfs_types::QueueId,
+) {
+    let mut client = create_client(settings).unwrap();
+    if let Some(keys) = list_page_size {
+        client = client.with_list_page_size(keys);
+    }
+    client.create_bucket().await.unwrap();
+    let client = std::sync::Arc::new(client);
+    let prefix = format!("{}/ids-{}", settings.prefix, uuid::Uuid::new_v4());
+    let downloader = normfs_cloud::CloudDownloader::new(client.clone(), &prefix);
+    let queue = normfs_types::QueueIdResolver::new("0123456789abcdef").resolve("q");
+    (client, downloader, queue)
+}
+
+async fn put_ids(
+    client: &S3Client,
+    downloader: &normfs_cloud::CloudDownloader,
+    queue: &normfs_types::QueueId,
+    ids: impl IntoIterator<Item = u64>,
+) {
+    for id in ids {
+        let status = client
+            .put_object(&downloader.key(queue, &uintn::UintN::from(id)), b"x")
+            .await
+            .unwrap();
+        assert_eq!(status, 200);
+    }
+}
+
+#[tokio::test]
+async fn test_find_ids_across_directory_levels() {
+    let Some(settings) = skip_if_no_s3() else {
+        return;
+    };
+    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+
+    // fff.store, 001/000.store, 002/fff.store, 001/000/000.store
+    put_ids(
+        &client,
+        &downloader,
+        &queue,
+        [0xfff, 0x1000, 0x2fff, 0x1000000],
+    )
+    .await;
+    assert_eq!(
+        downloader.find_max_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(0x1000000u64))
+    );
+    assert_eq!(
+        downloader.find_min_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(0xfffu64))
+    );
+
+    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+    put_ids(&client, &downloader, &queue, [0x2fff, 0x1000]).await;
+    assert_eq!(
+        downloader.find_min_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(0x1000u64))
+    );
+    assert_eq!(
+        downloader.find_max_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(0x2fffu64))
+    );
+
+    // 001/000/000.store sorts before 002/000.store but is the larger id.
+    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+    put_ids(&client, &downloader, &queue, [0x1000000, 0x2000]).await;
+    assert_eq!(
+        downloader.find_min_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(0x2000u64))
+    );
+}
+
+#[tokio::test]
+async fn test_find_ids_ignores_keys_outside_the_layout() {
+    let Some(settings) = skip_if_no_s3() else {
+        return;
+    };
+    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+
+    put_ids(&client, &downloader, &queue, [5]).await;
+    let key = downloader.key(&queue, &uintn::UintN::from(5u64));
+    let queue_prefix = key.strip_suffix("005.store").unwrap();
+    for stray in [
+        "ffff.store",
+        "zzz.store",
+        "fff.wal",
+        "fff/",
+        "g01/000.store",
+    ] {
+        client
+            .put_object(&format!("{queue_prefix}{stray}"), b"x")
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        downloader.find_max_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(5u64))
+    );
+}
+
+#[tokio::test]
+async fn test_find_ids_follows_every_listing_page() {
+    let Some(settings) = skip_if_no_s3() else {
+        return;
+    };
+    let (client, downloader, queue) = fresh_queue(&settings, Some(4)).await;
+
+    put_ids(&client, &downloader, &queue, 1..=11).await;
+    put_ids(&client, &downloader, &queue, (1..=11).map(|d| d << 12)).await;
+    assert_eq!(
+        downloader.find_max_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(11u64 << 12))
+    );
+    assert_eq!(
+        downloader.find_min_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(1u64))
+    );
+}
+
+#[tokio::test]
+async fn test_find_ids_under_a_prefix_the_server_would_encode() {
+    let Some(mut settings) = skip_if_no_s3() else {
+        return;
+    };
+    settings.prefix = format!("{} with space+plus", settings.prefix);
+    let (client, downloader, queue) = fresh_queue(&settings, None).await;
+
+    put_ids(&client, &downloader, &queue, [1, 0x1000]).await;
+    assert_eq!(
+        downloader.find_max_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(0x1000u64))
+    );
+    assert_eq!(
+        downloader.find_min_id(&queue).await.unwrap(),
+        Some(uintn::UintN::from(1u64))
+    );
+}
