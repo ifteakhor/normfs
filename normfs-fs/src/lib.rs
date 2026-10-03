@@ -168,7 +168,22 @@ pub struct Fs {
     exec: Arc<dyn Executor>,
     slots: Arc<Semaphore>,
     // Avoid repeated pool round trips for already provisioned store directories.
-    provisioned: Arc<Mutex<HashSet<PathBuf>>>,
+    provisioned: Arc<Mutex<Provisioned>>,
+}
+
+#[derive(Default)]
+struct Provisioned {
+    dirs: HashSet<PathBuf>,
+    /// Advanced by every removal, so a creation that overlapped one cannot
+    /// cache a directory the removal may have deleted.
+    generation: u64,
+}
+
+impl Provisioned {
+    fn forget(&mut self, path: &Path) {
+        self.dirs.retain(|known| !known.starts_with(path));
+        self.generation += 1;
+    }
 }
 
 impl std::fmt::Debug for Fs {
@@ -193,7 +208,7 @@ impl Fs {
         Ok(Fs {
             exec,
             slots: Arc::new(Semaphore::new(threads.saturating_mul(32).clamp(1, 1024))),
-            provisioned: Arc::new(Mutex::new(HashSet::new())),
+            provisioned: Arc::new(Mutex::new(Provisioned::default())),
         })
     }
 
@@ -471,14 +486,21 @@ impl Fs {
 
     /// Creates durable directories below an already durable, provisioned ancestor.
     pub async fn mkdir_all(&self, path: &Path) -> Result<(), FsError> {
-        if self.provisioned.lock().unwrap().contains(path) {
-            return Ok(());
-        }
+        let generation = {
+            let provisioned = self.provisioned.lock().unwrap();
+            if provisioned.dirs.contains(path) {
+                return Ok(());
+            }
+            provisioned.generation
+        };
         let key = path.to_path_buf();
         let path = key.clone();
         self.run_blocking(move || directory::mkdir_all(&path))
             .await?;
-        self.provisioned.lock().unwrap().insert(key);
+        let mut provisioned = self.provisioned.lock().unwrap();
+        if provisioned.generation == generation {
+            provisioned.dirs.insert(key);
+        }
         Ok(())
     }
 
@@ -490,13 +512,18 @@ impl Fs {
     }
 
     pub async fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
-        self.provisioned
-            .lock()
-            .unwrap()
-            .retain(|known| !known.starts_with(path));
+        self.provisioned.lock().unwrap().forget(path);
+        let provisioned = self.provisioned.clone();
         let path = path.to_path_buf();
-        self.run_blocking(move || std::fs::remove_dir_all(&path))
-            .await
+        self.run_blocking(move || {
+            let removed = std::fs::remove_dir_all(&path);
+            // A creation that finished while the removal ran may have cached
+            // its directory. Clearing here, on the executor, holds even if the
+            // caller stopped waiting.
+            provisioned.lock().unwrap().forget(&path);
+            removed
+        })
+        .await
     }
 
     /// The ids of the `.{ext}` files under `dir` in the 3-hex-chunk layout.

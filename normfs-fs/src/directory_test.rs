@@ -1,4 +1,5 @@
 use std::fs;
+use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -96,4 +97,34 @@ async fn concurrent_creation_shares_completion_for_the_same_directory() {
     while let Some(result) = tasks.join_next().await {
         result.unwrap();
     }
+}
+
+#[tokio::test]
+async fn a_creation_overlapping_a_removal_is_not_cached() {
+    let root = tempfile::tempdir().unwrap();
+    let leaf = root.path().join("queue/wal");
+    let fs = fs();
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+
+    let (release, hold) = std::sync::mpsc::channel::<()>();
+    let mut blocker = Box::pin(fs.run_blocking(move || {
+        hold.recv().unwrap();
+        Ok(())
+    }));
+    assert!(blocker.as_mut().poll(&mut cx).is_pending());
+
+    let mut create = Box::pin(fs.mkdir_all(&leaf));
+    assert!(create.as_mut().poll(&mut cx).is_pending());
+    let mut remove = Box::pin(fs.remove_dir_all(&leaf));
+    assert!(remove.as_mut().poll(&mut cx).is_pending());
+
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    create.await.unwrap();
+    remove.await.unwrap();
+    assert!(!leaf.exists());
+
+    fs.mkdir_all(&leaf).await.unwrap();
+    assert!(leaf.is_dir());
 }
