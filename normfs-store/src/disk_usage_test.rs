@@ -2,6 +2,7 @@ use crate::DiskUsage;
 use bytes::Bytes;
 use normfs_fs::{Fs, FsConfig, PublishSpec, Runs, TmpMode};
 use normfs_types::QueueIdResolver;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +14,13 @@ fn spec(tmp: &Path, dst: &Path, size: usize) -> PublishSpec {
         runs: Runs(vec![Bytes::from(vec![0u8; size])]),
         tmp_mode: TmpMode::Trunc,
         sync: false,
+    }
+}
+
+fn synced(tmp: &Path, dst: &Path, size: usize) -> PublishSpec {
+    PublishSpec {
+        sync: true,
+        ..spec(tmp, dst, size)
     }
 }
 
@@ -101,4 +109,37 @@ async fn publications_of_one_queue_do_not_wait_for_each_other() {
     );
     drop(held);
     assert_eq!(rescan.await.unwrap().get(), 100);
+}
+
+#[tokio::test]
+async fn a_rename_is_counted_even_when_the_directory_sync_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Fs::new(FsConfig::default()).unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let usage = DiskUsage::default();
+    let first = dir.path().join("001.store");
+    usage
+        .publish(&fs, &queue, synced(&dir.path().join("a.tmp"), &first, 200))
+        .await
+        .unwrap();
+
+    let sealed = dir.path().join("sealed");
+    std::fs::create_dir(&sealed).unwrap();
+    let second = sealed.join("002.store");
+    // Write and search without read: the rename goes through, opening the
+    // directory to sync it does not.
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let failed = usage
+        .publish(&fs, &queue, synced(&sealed.join("b.tmp"), &second, 100))
+        .await;
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(failed.is_err());
+    assert_eq!(std::fs::metadata(&second).unwrap().len(), 100);
+    assert_eq!(usage.queue(&queue).bytes(), 300);
+
+    usage
+        .publish(&fs, &queue, synced(&sealed.join("c.tmp"), &second, 100))
+        .await
+        .unwrap();
+    assert_eq!(usage.queue(&queue).bytes(), 300);
 }
