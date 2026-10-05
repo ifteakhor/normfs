@@ -395,3 +395,36 @@ async fn a_file_that_cannot_be_deleted_holds_cleanup_at_its_id() {
     assert!(!store_file_exists(root, &queue, 0x2000));
     assert!(store_file_exists(root, &queue, 0x2001));
 }
+
+#[tokio::test]
+async fn scans_wait_for_the_fs_pool() {
+    use std::future::Future;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let queue = QueueIdResolver::new("inst").resolve("cam");
+    let mut monitor = seeded_monitor(temp.path(), &queue, 1000).await;
+    let fs = Fs::new(normfs_fs::FsConfig {
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    monitor.fs = fs.clone();
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+
+    let (release, hold) = std::sync::mpsc::channel::<()>();
+    let mut blocker = Box::pin(fs.run_blocking(move || {
+        hold.recv().unwrap();
+        Ok(())
+    }));
+    assert!(blocker.as_mut().poll(&mut cx).is_pending());
+
+    let mut size = Box::pin(monitor.get_queue_size());
+    assert!(size.as_mut().poll(&mut cx).is_pending());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(size.as_mut().poll(&mut cx).is_pending());
+
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    assert_eq!(size.await.unwrap(), 0);
+}
