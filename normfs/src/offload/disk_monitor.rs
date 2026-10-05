@@ -381,18 +381,6 @@ pub(crate) fn evict(
     })
 }
 
-/// The C calls are blocking syscalls; keep them off the runtime threads.
-async fn blocking<T, F>(f: F) -> Result<T, Error>
-where
-    T: Send + 'static,
-    F: FnOnce() -> io::Result<T> + Send + 'static,
-{
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| Error::Io(io::Error::other(e)))?
-        .map_err(Error::Io)
-}
-
 #[derive(Debug, Clone)]
 pub struct DiskMonitorConfig {
     /// Maximum size in bytes for a queue (store + wal combined)
@@ -430,6 +418,7 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const RESCAN_EVERY_TICKS: u64 = 60;
 
 struct QueueMonitor {
+    fs: Fs,
     queue_id: QueueId,
     config: DiskMonitorConfig,
     store_dir: PathBuf,
@@ -462,7 +451,14 @@ impl QueueMonitor {
     ) -> Result<Self, Error> {
         let offloader = match (client, prefix) {
             (Some(client), Some(prefix)) if config.offload => Some(
-                QueueOffloader::new(fs, queue_id.clone(), root_path.clone(), client, prefix).await,
+                QueueOffloader::new(
+                    fs.clone(),
+                    queue_id.clone(),
+                    root_path.clone(),
+                    client,
+                    prefix,
+                )
+                .await,
             ),
             _ => None,
         };
@@ -472,6 +468,7 @@ impl QueueMonitor {
         let store_bytes = disk_usage.queue(&queue_id);
 
         let monitor = Self {
+            fs,
             queue_id,
             config,
             store_dir,
@@ -485,32 +482,34 @@ impl QueueMonitor {
         Ok(monitor)
     }
 
-    async fn scan_dir(dir: &Path, kind: FileKind) -> Result<DirScan, Error> {
+    async fn scan_dir(&self, dir: &Path, kind: FileKind) -> Result<DirScan, Error> {
         let dir = dir.to_path_buf();
-        blocking(move || scan(&dir, kind)).await
+        Ok(self.fs.run_blocking(move || scan(&dir, kind)).await?)
     }
 
     async fn rescan_store(&self) -> Result<(), Error> {
         let tracked = self.store_bytes.clone().exclusive().await;
         let dir = self.store_dir.clone();
-        let min = blocking(move || {
-            let store = scan(&dir, FileKind::Store)?;
-            tracked.set(store.total);
-            Ok(store.min)
-        })
-        .await?;
+        let min = self
+            .fs
+            .run_blocking(move || {
+                let store = scan(&dir, FileKind::Store)?;
+                tracked.set(store.total);
+                Ok(store.min)
+            })
+            .await?;
         *self.cursor.lock().unwrap() = min;
         Ok(())
     }
 
     /// Only the minimum is wanted, so the walk runs without the lock.
     async fn locate_oldest(&self, wal_min: Option<UintN>) -> Result<Option<UintN>, Error> {
-        let store = Self::scan_dir(&self.store_dir, FileKind::Store).await?;
+        let store = self.scan_dir(&self.store_dir, FileKind::Store).await?;
         Ok(earliest(store.min, wal_min))
     }
 
     async fn get_queue_size(&self) -> Result<u64, Error> {
-        let wal = Self::scan_dir(&self.wal_dir, FileKind::Wal).await?.total;
+        let wal = self.scan_dir(&self.wal_dir, FileKind::Wal).await?.total;
         Ok(self.store_bytes.bytes().saturating_add(wal))
     }
 
@@ -525,7 +524,7 @@ impl QueueMonitor {
         let tracked = self.store_bytes.clone().exclusive().await;
         let store_dir = self.store_dir.clone();
         let wal_dir = self.wal_dir.clone();
-        blocking(move || {
+        let evicted = self.fs.run_blocking(move || {
             let to_free = tracked
                 .get()
                 .saturating_add(wal_total)
@@ -546,8 +545,8 @@ impl QueueMonitor {
                 Err(_) => tracked.set(scan(&store_dir, FileKind::Store)?.total),
             }
             result.map(Some)
-        })
-        .await
+        });
+        Ok(evicted.await?)
     }
 
     async fn cleanup_oldest_files(
@@ -681,7 +680,7 @@ impl QueueMonitor {
         if rescan {
             self.rescan_store().await?;
         }
-        let wal_scan = Self::scan_dir(&self.wal_dir, FileKind::Wal).await?;
+        let wal_scan = self.scan_dir(&self.wal_dir, FileKind::Wal).await?;
         let current_size = self.store_bytes.bytes().saturating_add(wal_scan.total);
 
         if current_size > self.config.max_size as u64 {
