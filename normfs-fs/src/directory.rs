@@ -77,6 +77,14 @@ pub(crate) fn mkdir_all(path: &Path) -> io::Result<()> {
 
 fn finish(path: &Path, entry: Arc<Mutex<c_int>>) -> io::Result<()> {
     let mut stage = entry.lock().unwrap();
+    // A removal does not reset a retained stage, so resume only if the directory is still there.
+    if *stage != 0 {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => *stage = 0,
+            Err(e) => return Err(e),
+        }
+    }
     if *stage == 0 {
         match std::fs::create_dir(path) {
             Ok(()) => *stage = 1,

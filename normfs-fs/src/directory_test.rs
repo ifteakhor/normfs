@@ -77,6 +77,21 @@ async fn a_failed_parent_sync_is_retried_across_fs_instances() {
 }
 
 #[tokio::test]
+async fn a_removal_after_a_failed_parent_sync_restarts_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let leaf = root.path().join("new");
+    let fs = fs();
+    {
+        let _restore = permissions(root.path(), 0o300);
+        assert!(fs.mkdir_all(&leaf).await.is_err());
+    }
+    assert!(leaf.is_dir());
+    fs.remove_dir_all(&leaf).await.unwrap();
+    fs.mkdir_all(&leaf).await.unwrap();
+    assert!(leaf.is_dir());
+}
+
+#[tokio::test]
 async fn concurrent_creation_shares_completion_for_the_same_directory() {
     let root = tempfile::tempdir().unwrap();
     let mut tasks = tokio::task::JoinSet::new();
